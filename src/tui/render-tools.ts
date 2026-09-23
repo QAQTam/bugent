@@ -30,10 +30,17 @@ export const DIFF_DISPLAY_LINES = 14;
 function argsSummary(item: ToolItem): string {
   const args = item.args as Record<string, unknown> | null;
   if (args === null || typeof args !== "object") return "";
+
   const command = args.command;
   if (typeof command === "string") return command;
+
   const path = args.path;
   if (typeof path === "string") return path;
+
+  // ask_user：显示题数比显示一整坨 JSON 有意义得多
+  const questions = args.questions;
+  if (Array.isArray(questions)) return `${questions.length} 题`;
+
   try {
     return JSON.stringify(args);
   } catch {

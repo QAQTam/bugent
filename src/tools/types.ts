@@ -8,6 +8,7 @@
 
 import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
 import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
+import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 import {
   denialMessage,
   type PermissionDecision,
@@ -46,6 +47,12 @@ export interface ToolCtx {
    * 未提供时视为不可申请。
    */
   onRequestCapability?: (escalation: CapabilityEscalation) => Promise<boolean>;
+  /**
+   * 向用户提问（ask_user 工具用）。
+   * 返回 undefined 表示用户中止了回答。
+   * 未提供说明当前环境没有交互界面。
+   */
+  askUser?: (questions: readonly AskUserQuestion[]) => Promise<AskUserAnswer[] | undefined>;
 }
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */

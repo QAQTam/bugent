@@ -23,6 +23,7 @@ import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
 import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
 import type { CapabilityEscalation } from "./tools/types.ts";
+import type { AskUserAnswer, AskUserQuestion } from "./tui/ask-user.ts";
 import {
   ALLOW_ALL_POLICY,
   composePolicy,
@@ -382,10 +383,19 @@ async function main(): Promise<void> {
   // 能力授权（联网）的交互入口在两条路径下不同：TUI 用弹窗，CLI 用 stdin。
   // 用一个可变引用让 hooks 在分支确定后再拿到真正的实现。
   let capabilityHandler: ((escalation: CapabilityEscalation) => Promise<boolean>) | undefined;
+  // ask_user 是纯交互式功能：TUI 里用多页表单实现，
+  // 非 TUI 路径不提供 —— 工具会据此明确告知模型"没有界面，请自行判断"
+  let askUserHandler:
+    | ((questions: readonly AskUserQuestion[]) => Promise<AskUserAnswer[] | undefined>)
+    | undefined;
   const hooks = combineHooks(
-    createHooks((escalation) =>
-      capabilityHandler === undefined ? Promise.resolve(false) : capabilityHandler(escalation),
-    ),
+    {
+      ...createHooks((escalation) =>
+        capabilityHandler === undefined ? Promise.resolve(false) : capabilityHandler(escalation),
+      ),
+      onAskUser: async (_call, questions) =>
+        askUserHandler === undefined ? undefined : askUserHandler(questions),
+    },
     audit?.hooks(),
   );
   const signal = new AbortController().signal;
@@ -466,6 +476,7 @@ async function main(): Promise<void> {
         }),
       );
       capabilityHandler = (escalation) => app.requestCapability(escalation);
+      askUserHandler = (questions) => app.askUser(questions);
       await app.run();
       return;
     }

@@ -14,6 +14,7 @@ import type {
 import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
 import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
+import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 
 export interface LoopHooks {
   onText?(delta: string): void;
@@ -36,6 +37,11 @@ export interface LoopHooks {
    * 与报错，用户知道自己在批准什么。返回 true 表示批准。
    */
   onRequestCapability?(call: ToolCall, escalation: CapabilityEscalation): Promise<boolean>;
+  /** 向用户提问。返回 undefined 表示用户中止。 */
+  onAskUser?(
+    call: ToolCall,
+    questions: readonly AskUserQuestion[],
+  ): Promise<AskUserAnswer[] | undefined>;
   onUsage?(usage: Usage): void;
 }
 
@@ -106,7 +112,7 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     onToolResult: (call, result) => {
       for (const group of active) group.onToolResult?.(call, result);
     },
-    // 能力授权只走第一个提供了它的 hook —— 这是"用户交互"，不该被广播多次
+    // 用户交互只走第一个提供了它的 hook —— 不该被广播多次
     onRequestCapability: async (call, escalation) => {
       for (const group of active) {
         if (group.onRequestCapability !== undefined) {
@@ -114,6 +120,12 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
         }
       }
       return false;
+    },
+    onAskUser: async (call, questions) => {
+      for (const group of active) {
+        if (group.onAskUser !== undefined) return group.onAskUser(call, questions);
+      }
+      return undefined;
     },
     onUsage: (usage) => {
       for (const group of active) group.onUsage?.(usage);
@@ -229,6 +241,7 @@ export async function runTurn(
       hooks.onToolCall?.(call);
       const progress = hooks.onToolProgress;
       const requestCapability = hooks.onRequestCapability;
+      const askUser = hooks.onAskUser;
       const result = await tools.execute(call, {
         cwd,
         signal,
@@ -238,6 +251,7 @@ export async function runTurn(
         ...(requestCapability !== undefined
           ? { onRequestCapability: (escalation: CapabilityEscalation) => requestCapability(call, escalation) }
           : {}),
+        ...(askUser !== undefined ? { askUser: (qs: readonly AskUserQuestion[]) => askUser(call, qs) } : {}),
       });
       hooks.onToolResult?.(call, result);
       session.appendToolResult(call.id, result.ok ? result.output : `Error: ${result.output}`);

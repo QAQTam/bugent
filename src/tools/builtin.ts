@@ -12,6 +12,7 @@ import {
   createWriteFileTool,
 } from "./files.ts";
 import { createTodoWriteTool } from "./todo.ts";
+import { createAskUserTool } from "./ask_user.ts";
 import { ToolRegistry } from "./types.ts";
 import type { PermissionRule } from "../permission/policy.ts";
 import { MODES, type SandboxMode } from "../permission/mode.ts";
@@ -58,7 +59,8 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     .register(createReadFileTool())
     .register(createWriteFileTool())
     .register(createEditFileTool())
-    .register(createTodoWriteTool());
+    .register(createTodoWriteTool())
+    .register(createAskUserTool());
 
   let runner: ShellRunner;
   let enabled: boolean;

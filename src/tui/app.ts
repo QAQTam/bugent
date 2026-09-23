@@ -30,6 +30,11 @@ import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
 import { sliceViewport } from "./viewport.ts";
 import { setHighlightReadyHandler } from "./highlight.ts";
+import {
+  AskUserFlow,
+  type AskUserAnswer,
+  type AskUserQuestion,
+} from "./ask-user.ts";
 import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
@@ -92,6 +97,9 @@ export class TuiApp {
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
+  /** 进行中的 ask_user 问答流程。 */
+  #askFlow: AskUserFlow | undefined;
+  #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; todos: Todo[] } | undefined;
@@ -164,6 +172,33 @@ export class TuiApp {
     });
   }
 
+  /**
+   * ask_user 的交互入口。
+   *
+   * 与权限弹窗共用同一套外框渲染，区别只是内容是分页表单、
+   * 按键路由到 AskUserFlow。返回 undefined 表示用户中止。
+   */
+  askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined> {
+    return new Promise<AskUserAnswer[] | undefined>((resolve) => {
+      this.#askResolve = resolve;
+      this.#askFlow = new AskUserFlow({
+        questions,
+        onChange: () => this.#render(true),
+      });
+      this.#render(true);
+    });
+  }
+
+  #finishAsk(answers: AskUserAnswer[] | undefined): void {
+    const flow = this.#askFlow;
+    const resolve = this.#askResolve;
+    this.#askFlow = undefined;
+    this.#askResolve = undefined;
+    flow?.dispose();
+    resolve?.(answers);
+    this.#render(true);
+  }
+
   #openDialog(dialog: Omit<PendingDialog, "resolve">): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.#pendingDialog = { ...dialog, resolve };
@@ -205,6 +240,14 @@ export class TuiApp {
   }
 
   #handleKey(key: Key): void {
+    // ask_user 问答优先：它是多页表单，有自己的按键语义
+    if (this.#askFlow !== undefined) {
+      const outcome = this.#askFlow.handleKey(key);
+      if (outcome.kind === "submit") this.#finishAsk(outcome.answers);
+      else if (outcome.kind === "abort") this.#finishAsk(undefined);
+      return;
+    }
+
     // 有对话框时，所有按键都归它 —— 不能漏到下面的输入逻辑
     if (this.#pendingDialog !== undefined) {
       this.#resolveDialog(key);
@@ -443,6 +486,8 @@ export class TuiApp {
       },
       // 工具跑失败后请求一次性能力授权（如联网）—— 弹窗里带真实原因与报错
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
+      // ask_user：多页问答表单
+      onAskUser: (_call, questions) => this.askUser(questions),
       onToolResult: (call, result) => {
         this.#transcript.finishTool(call.id, result.output, result.ok);
         this.#scheduleRender();
@@ -514,8 +559,8 @@ export class TuiApp {
     );
     const body = this.#composeBody(width, bodyHeight);
 
-    // 对话框以覆盖层形式压在消息区底部
-    if (this.#pendingDialog !== undefined) {
+    // 对话框 / 问答以覆盖层形式压在消息区底部
+    if (this.#pendingDialog !== undefined || this.#askFlow !== undefined) {
       const overlay = this.#renderDialog(width);
       const start = Math.max(0, bodyHeight - overlay.length);
       for (let i = 0; i < overlay.length && start + i < bodyHeight; i += 1) {
@@ -548,14 +593,23 @@ export class TuiApp {
   }
 
   #renderDialog(width: number): string[] {
-    const dialog = this.#pendingDialog;
-    if (dialog === undefined) return [];
-
     const inner = Math.max(16, Math.min(width - 2, 74));
     const color = fg(COLOR.warn);
     const bar = `${color}│${RESET}`;
     const row = (text: string): string =>
       `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
+
+    // ask_user：分页表单，内容由 AskUserFlow 自己渲染
+    if (this.#askFlow !== undefined) {
+      return [
+        `${color}┌${"─".repeat(inner)}┐${RESET}`,
+        ...this.#askFlow.render(inner).map((line) => row(` ${line}`)),
+        `${color}└${"─".repeat(inner)}┘${RESET}`,
+      ];
+    }
+
+    const dialog = this.#pendingDialog;
+    if (dialog === undefined) return [];
 
     const lines = [
       `${color}┌${"─".repeat(inner)}┐${RESET}`,
