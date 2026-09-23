@@ -107,6 +107,11 @@ interface PendingMessageMenu {
   actions: readonly DialogAction<MessageAction>[];
 }
 
+/** 当前鼠标交互的弹窗按钮。 */
+type ButtonTarget =
+  | { kind: "dialog"; value: boolean }
+  | { kind: "message"; value: MessageAction };
+
 /** 请求 TUI 宿主创建/切换 runtime。 */
 export interface RuntimeRequest {
   /** 省略时表示新建 session。 */
@@ -222,6 +227,9 @@ export class TuiApp implements TuiInteraction {
   #dialogButtonHits: DialogButtonRowHit[] = [];
   /** 当前消息操作菜单按钮的鼠标命中区间。 */
   #messageButtonHits: DialogButtonRowHit<MessageAction>[] = [];
+  /** 当前鼠标悬停/按下的按钮。 */
+  #hoveredButton: ButtonTarget | undefined;
+  #pressedButton: ButtonTarget | undefined;
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; list: TodoList } | undefined;
@@ -347,6 +355,7 @@ export class TuiApp implements TuiInteraction {
 
   #openDialog(dialog: Omit<PendingDialog, "resolve">): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
+      this.#clearButtonInteraction();
       this.#pendingDialog = { ...dialog, resolve };
       this.#render(true);
     });
@@ -547,36 +556,42 @@ export class TuiApp implements TuiInteraction {
       else this.#scrollBy(-3);
       return;
     }
-    if (!key.pressed) return;
+    // 鼠标移动：只更新悬停按钮，不触发点击。
+    if (key.motion === true) {
+      const target = this.#buttonTargetAt(key.x, key.y);
+      if (!this.#sameButtonTarget(this.#hoveredButton, target)) {
+        this.#hoveredButton = target;
+        this.#render(true);
+      }
+      return;
+    }
 
     // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
     const bodyRow = key.y - 2;
 
-    // 消息操作菜单：点击任意动作按钮。
-    if (this.#pendingMessageMenu !== undefined && this.#dialogTopRow >= 0) {
-      const menuLine = bodyRow - this.#dialogTopRow;
-      const action = hitDialogActionAtLine(this.#messageButtonHits, menuLine, key.x - 1);
-      if (action !== undefined) {
-        this.#resolveMessageAction(action);
+    // 弹窗 / 消息操作菜单使用标准按下-抬起语义。
+    if (this.#pendingMessageMenu !== undefined || this.#pendingDialog !== undefined) {
+      if (key.button !== "left") return;
+
+      if (key.pressed) {
+        const target = this.#buttonTargetAt(key.x, key.y);
+        this.#pressedButton = target;
+        if (target !== undefined) this.#render(true);
         return;
+      }
+
+      const target = this.#buttonTargetAt(key.x, key.y);
+      const pressed = this.#pressedButton;
+      this.#pressedButton = undefined;
+      if (pressed !== undefined && this.#sameButtonTarget(pressed, target)) {
+        this.#invokeButton(pressed);
+      } else {
+        this.#render(true);
       }
       return;
     }
 
-    // 权限 / 能力 / 升档弹窗：点击按钮直接确认或拒绝。
-    if (
-      key.button === "left" &&
-      this.#pendingDialog !== undefined &&
-      this.#dialogTopRow >= 0
-    ) {
-      const dialogLine = bodyRow - this.#dialogTopRow;
-      const answer = hitDialogActionAtLine(this.#dialogButtonHits, dialogLine, key.x - 1);
-      if (answer !== undefined) {
-        this.#finishDialog(answer);
-        return;
-      }
-      return;
-    }
+    if (!key.pressed) return;
 
     // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
     // 覆盖层第 0 行是上边框，所以 flow 行号要再减 1。
@@ -623,6 +638,47 @@ export class TuiApp implements TuiInteraction {
 
     const hit = this.#messageAt(bodyIndex);
     if (hit !== undefined) this.#openMessageMenu(hit.msgid, hit.undoMsgid);
+  }
+
+  #clearButtonInteraction(): void {
+    this.#hoveredButton = undefined;
+    this.#pressedButton = undefined;
+  }
+
+  #sameButtonTarget(a: ButtonTarget | undefined, b: ButtonTarget | undefined): boolean {
+    if (a === undefined || b === undefined) return a === b;
+    if (a.kind !== b.kind) return false;
+    return a.value === b.value;
+  }
+
+  #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
+    const bodyRow = y - 2;
+    if (this.#dialogTopRow < 0) return undefined;
+
+    if (this.#pendingMessageMenu !== undefined) {
+      const action = hitDialogActionAtLine(
+        this.#messageButtonHits,
+        bodyRow - this.#dialogTopRow,
+        x - 1,
+      );
+      return action === undefined ? undefined : { kind: "message", value: action };
+    }
+
+    if (this.#pendingDialog !== undefined) {
+      const answer = hitDialogActionAtLine(
+        this.#dialogButtonHits,
+        bodyRow - this.#dialogTopRow,
+        x - 1,
+      );
+      return answer === undefined ? undefined : { kind: "dialog", value: answer };
+    }
+
+    return undefined;
+  }
+
+  #invokeButton(target: ButtonTarget): void {
+    if (target.kind === "dialog") this.#finishDialog(target.value);
+    else this.#resolveMessageAction(target.value);
   }
 
   #messageAt(bodyIndex: number): { msgid: MsgId; undoMsgid: MsgId } | undefined {
@@ -754,6 +810,7 @@ export class TuiApp implements TuiInteraction {
 
     this.#pendingDialog = undefined;
     this.#dialogButtonHits = [];
+    this.#clearButtonInteraction();
     dialog.resolve(answer);
     this.#render(true);
   }
@@ -781,6 +838,7 @@ export class TuiApp implements TuiInteraction {
       "快捷键：u 撤回 · f 分叉 · r 重试 · c 复制 · i 检查 · Esc 取消",
     ];
 
+    this.#clearButtonInteraction();
     this.#pendingMessageMenu = {
       msgid,
       undoMsgid,
@@ -811,6 +869,7 @@ export class TuiApp implements TuiInteraction {
     if (menu === undefined) return;
     this.#pendingMessageMenu = undefined;
     this.#messageButtonHits = [];
+    this.#clearButtonInteraction();
 
     if (action === "cancel") {
       this.#render(true);
@@ -1251,9 +1310,18 @@ export class TuiApp implements TuiInteraction {
       for (const entry of menu.body) lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
       lines.push(row(""));
 
+      const hovered =
+        this.#hoveredButton?.kind === "message" ? this.#hoveredButton.value : undefined;
+      const pressed =
+        this.#pressedButton?.kind === "message" ? this.#pressedButton.value : undefined;
+
       for (let offset = 0; offset < menu.actions.length; offset += 3) {
         const actions = composeDialogActions<MessageAction>(
           menu.actions.slice(offset, offset + 3),
+          {
+            ...(hovered !== undefined ? { hovered } : {}),
+            ...(pressed !== undefined ? { pressed } : {}),
+          },
         );
         lines.push(row(actions.text));
         const actionLine = lines.length - 1;
@@ -1279,7 +1347,14 @@ export class TuiApp implements TuiInteraction {
     }
     lines.push(row(""));
 
-    const actions = composeDialogActions(dialog.actions);
+    const hovered =
+      this.#hoveredButton?.kind === "dialog" ? this.#hoveredButton.value : undefined;
+    const pressed =
+      this.#pressedButton?.kind === "dialog" ? this.#pressedButton.value : undefined;
+    const actions = composeDialogActions(dialog.actions, {
+      ...(hovered !== undefined ? { hovered } : {}),
+      ...(pressed !== undefined ? { pressed } : {}),
+    });
     lines.push(row(actions.text));
     const actionLine = lines.length - 1;
     this.#dialogButtonHits = actions.hits.map((hit) => ({ line: actionLine, hit }));

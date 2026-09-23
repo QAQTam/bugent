@@ -26,7 +26,7 @@ export type Key =
   | { type: "pageDown" }
   | { type: "ctrl"; key: string }
   /** 鼠标事件（SGR 扩展模式，坐标是 1-based）。 */
-  | { type: "mouse"; button: MouseButton; x: number; y: number; pressed: boolean };
+  | { type: "mouse"; button: MouseButton; x: number; y: number; pressed: boolean; motion?: boolean };
 
 function mouseButton(code: number): MouseButton {
   // 低两位是按键；64 以上是滚轮
@@ -57,7 +57,15 @@ function parseMouse(params: string, final: string): Key | undefined {
   const y = Number.parseInt(yRaw ?? "", 10);
   if (!Number.isFinite(code) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
 
-  return { type: "mouse", button: mouseButton(code), x, y, pressed: final === "M" };
+  const motion = (code & 32) !== 0;
+  return {
+    type: "mouse",
+    button: mouseButton(code),
+    x,
+    y,
+    pressed: final === "M" && !motion,
+    ...(motion ? { motion: true } : {}),
+  };
 }
 
 function csiToKey(final: string, params: string): Key | undefined {

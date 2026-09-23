@@ -57,4 +57,15 @@ describe("授权弹窗按钮", () => {
     expect(hitDialogActionAtLine(rows, 4, hits[1]!.start)).toBe(false);
     expect(hitDialogActionAtLine(rows, 3, hits[1]!.start)).toBeUndefined();
   });
+
+  test("hover / pressed 使用不同背景，pressed 优先于 hover", () => {
+    const normal = composeDialogActions(actions).text;
+    const hovered = composeDialogActions(actions, { hovered: true }).text;
+    const pressed = composeDialogActions(actions, { hovered: true, pressed: true }).text;
+
+    expect(hovered).not.toBe(normal);
+    expect(pressed).not.toBe(hovered);
+    expect(hovered).toContain("\x1b[48;");
+    expect(pressed).toContain("\x1b[48;");
+  });
 });

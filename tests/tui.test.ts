@@ -101,6 +101,13 @@ describe("P5 · 按键解析", () => {
     expect(decoder.push("\x04")).toEqual([{ type: "ctrl", key: "d" }]);
   });
 
+  test("鼠标移动事件带 motion 标记，且不会当成点击", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.push("\x1b[<35;10;5M")).toEqual([
+      { type: "mouse", button: "other", x: 10, y: 5, pressed: false, motion: true },
+    ]);
+  });
+
   test("被拆包的转义序列能正确拼接", () => {
     const decoder = new KeyDecoder();
     expect(decoder.push("\x1b")).toEqual([]);

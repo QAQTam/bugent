@@ -38,4 +38,10 @@ export const COLOR = {
   bashSuccess: "#86efac",
   bashPath: "#93c5fd",
   bashUrl: "#67e8f9",
+
+  // 按钮交互
+  buttonHoverBg: "#1e3a5f",
+  buttonHoverFg: "#e0f2fe",
+  buttonPressedBg: "#2563eb",
+  buttonPressedFg: "#ffffff",
 } as const;

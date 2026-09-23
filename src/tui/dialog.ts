@@ -7,7 +7,7 @@
  */
 
 import { visibleWidth } from "./ansi.ts";
-import { BOLD, fg, RESET } from "./markdown.ts";
+import { BOLD, bg, fg, RESET } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 
 export type DialogActionTone = "ok" | "warn" | "error";
@@ -37,6 +37,11 @@ export interface ComposedDialogActions<T = boolean> {
   hits: DialogButtonHit<T>[];
 }
 
+export interface DialogActionRenderState<T = boolean> {
+  hovered?: T;
+  pressed?: T;
+}
+
 function toneColor(tone: DialogActionTone | undefined): string {
   switch (tone) {
     case "ok":
@@ -57,6 +62,7 @@ function toneColor(tone: DialogActionTone | undefined): string {
  */
 export function composeDialogActions<T = boolean>(
   actions: readonly DialogAction<T>[],
+  state: DialogActionRenderState<T> = {},
 ): ComposedDialogActions<T> {
   const hits: DialogButtonHit<T>[] = [];
   let text = " ";
@@ -72,7 +78,19 @@ export function composeDialogActions<T = boolean>(
 
     const label = `[ ${action.label} ]`;
     const start = cursor;
-    text += `${BOLD}${fg(toneColor(action.tone))}${label}${RESET}`;
+    const pressed = state.pressed !== undefined && state.pressed === action.value;
+    const hovered = !pressed && state.hovered !== undefined && state.hovered === action.value;
+    const background = pressed
+      ? bg(COLOR.buttonPressedBg)
+      : hovered
+        ? bg(COLOR.buttonHoverBg)
+        : "";
+    const foreground = pressed
+      ? fg(COLOR.buttonPressedFg)
+      : hovered
+        ? fg(COLOR.buttonHoverFg)
+        : fg(toneColor(action.tone));
+    text += `${BOLD}${background}${foreground}${label}${RESET}`;
     cursor += visibleWidth(label);
 
     hits.push({
