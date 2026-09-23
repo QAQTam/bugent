@@ -13,7 +13,7 @@
 
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
-import { spillOutput } from "./spill.ts";
+import { createOutputSpool, type OutputSpool, type OutputStreamName } from "./spill.ts";
 import { sanitizeEnv } from "../sandbox/env.ts";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -23,9 +23,9 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
 /**
  * 回传给模型的字符上限。
  *
- * 超出就截断，并把**完整输出**写到 `~/.bugent/output/<session>/<call>.txt`，
- * 在结果里给出路径引导模型自己去读。这样既不撑爆上下文，
- * 又不丢信息 —— 模型需要细节时能按需取。
+ * 超出就截断，并把**完整输出**流式写到
+ * `~/.bugent/output/<session>/<call>.txt`，在结果里给出路径引导模型自己去读。
+ * 这样既不撑爆上下文，又不丢信息 —— 模型需要细节时能按需取。
  */
 export const MAX_MODEL_OUTPUT_CHARS = 3000;
 
@@ -38,6 +38,13 @@ export interface ShellRunOptions {
   signal: AbortSignal;
   /** 流式回调：边跑边把输出推给 UI（不参与最终结果）。 */
   onProgress?: (chunk: string) => void;
+  /**
+   * 原始字节流回调：给完整输出落盘用。
+   *
+   * 与 `onProgress` 不同，它不会在内存截断点停止，stdout/stderr 的每个
+   * chunk 都会原样送达；回调应保持同步且尽量轻量，避免阻塞读流。
+   */
+  onOutputChunk?: (stream: OutputStreamName, chunk: Uint8Array) => void;
   /**
    * 这一次运行是否放开网络（覆盖沙箱配置）。
    *
@@ -110,10 +117,13 @@ interface CappedText {
 async function readCapped(
   stream: ReadableStream<Uint8Array>,
   cap: number,
+  streamName: OutputStreamName,
   onChunk?: (text: string) => void,
+  onRawOutput?: (stream: OutputStreamName, chunk: Uint8Array) => void,
 ): Promise<CappedText> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
+  const progressDecoder = new TextDecoder();
   let text = "";
   let bytes = 0;
   let truncated = false;
@@ -124,26 +134,35 @@ async function readCapped(
       if (done) break;
       if (value === undefined) continue;
 
-      if (truncated) continue; // 已经截断，只负责排空
+      // 原始字节先落盘/交给调用方，**不经过内存截断**。
+      onRawOutput?.(streamName, value);
+
+      // UI 进度也继续消费完整流；只有给模型的 text 受 cap 限制。
+      if (onChunk !== undefined) {
+        const progress = progressDecoder.decode(value, { stream: true });
+        if (progress.length > 0) onChunk(progress);
+      }
+
+      if (truncated) continue;
 
       if (bytes + value.byteLength > cap) {
         const remaining = Math.max(0, cap - bytes);
         const piece = decoder.decode(value.subarray(0, remaining), { stream: true });
         text += piece;
-        onChunk?.(piece);
         truncated = true;
         continue;
       }
 
       bytes += value.byteLength;
-      const piece = decoder.decode(value, { stream: true });
-      text += piece;
-      onChunk?.(piece);
+      text += decoder.decode(value, { stream: true });
     }
+
     const tail = decoder.decode();
-    if (tail.length > 0) {
-      text += tail;
-      onChunk?.(tail);
+    if (tail.length > 0) text += tail;
+
+    if (onChunk !== undefined) {
+      const progressTail = progressDecoder.decode();
+      if (progressTail.length > 0) onChunk(progressTail);
     }
   } finally {
     reader.releaseLock();
@@ -218,11 +237,19 @@ export function createProcessRunner(
 
       try {
         const [stdout, stderr] = await Promise.all([
-          readCapped(proc.stdout as ReadableStream<Uint8Array>, options.maxOutputBytes, options.onProgress),
+          readCapped(
+            proc.stdout as ReadableStream<Uint8Array>,
+            options.maxOutputBytes,
+            "stdout",
+            options.onProgress,
+            options.onOutputChunk,
+          ),
           readCapped(
             proc.stderr as ReadableStream<Uint8Array>,
             options.maxOutputBytes,
+            "stderr",
             options.onProgress,
+            options.onOutputChunk,
           ),
         ]);
         const exitCode = await proc.exited;
@@ -236,6 +263,10 @@ export function createProcessRunner(
           truncated: stdout.truncated || stderr.truncated,
           durationMs: (Bun.nanoseconds() - startedAt) / 1e6,
         };
+      } catch (error) {
+        // 读取/落盘失败时不能让子进程继续跑并占着管道。
+        proc.kill("SIGKILL");
+        throw error;
       } finally {
         clearTimeout(timer);
         options.signal.removeEventListener("abort", onAbort);
@@ -317,10 +348,25 @@ function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: nu
  * 头 7 : 尾 3 的分配是有意的 —— bash 的失败原因通常出现在结尾，
  * 只给头部会让模型看不到为什么失败。
  */
-async function clampForModel(text: string, ctx: ToolCtx): Promise<string> {
-  if (text.length <= MAX_MODEL_OUTPUT_CHARS) return text;
+async function clampForModel(
+  text: string,
+  spool: OutputSpool,
+  forceSpill = false,
+): Promise<string> {
+  if (!forceSpill && text.length <= MAX_MODEL_OUTPUT_CHARS) {
+    await spool.discard();
+    return text;
+  }
 
-  const path = await spillOutput(ctx.sessionId, ctx.callId, text);
+  const spilled = await spool.promote();
+  const pathHint = [
+    `[完整输出共 ${spilled.bytes} 字节，已写入：${spilled.path}]`,
+    `[需要细节时用 read_file 读取该路径]`,
+  ];
+
+  if (text.length <= MAX_MODEL_OUTPUT_CHARS) {
+    return [text, "", ...pathHint].join("\n");
+  }
 
   const headBudget = Math.floor(MAX_MODEL_OUTPUT_CHARS * 0.7);
   const tailBudget = MAX_MODEL_OUTPUT_CHARS - headBudget;
@@ -332,8 +378,7 @@ async function clampForModel(text: string, ctx: ToolCtx): Promise<string> {
     `[... 已省略 ${omitted} 字符 ...]`,
     text.slice(text.length - tailBudget),
     "",
-    `[完整输出共 ${text.length} 字符，已写入：${path}]`,
-    `[需要细节时用 read_file 读取该路径]`,
+    ...pathHint,
   ].join("\n");
 }
 
@@ -380,18 +425,30 @@ export function createBashTool(
         timeoutMs = Math.min(input.timeoutMs, MAX_TIMEOUT_MS);
       }
 
-      const runOnce = (allowNetwork?: boolean): Promise<ShellResult> =>
-        runner.run({
-          command,
-          cwd: ctx.cwd,
-          timeoutMs,
-          maxOutputBytes,
-          signal: ctx.signal,
-          ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
-          ...(allowNetwork === true ? { allowNetwork: true } : {}),
-        });
+      const runOnce = async (
+        allowNetwork?: boolean,
+      ): Promise<{ result: ShellResult; spool: OutputSpool }> => {
+        const spool = await createOutputSpool(ctx.sessionId, ctx.callId);
+        try {
+          const result = await runner.run({
+            command,
+            cwd: ctx.cwd,
+            timeoutMs,
+            maxOutputBytes,
+            signal: ctx.signal,
+            ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
+            onOutputChunk: (stream, chunk) => spool.write(stream, chunk),
+            ...(allowNetwork === true ? { allowNetwork: true } : {}),
+          });
+          return { result, spool };
+        } catch (error) {
+          await spool.discard();
+          throw error;
+        }
+      };
 
-      let result = await runOnce();
+      let attempt = await runOnce();
+      let result = attempt.result;
 
       // 先真跑一次；失败且像是被沙箱断网挡住时，**带着真实报错**去要授权。
       //
@@ -415,12 +472,18 @@ export function createBashTool(
         });
 
         if (approved) {
-          // 注意：只放开这一次的网络，沙箱本身不拆
-          result = await runOnce(true);
+          // 第一次失败只用于申请授权，最终给模型的应是重跑结果。
+          await attempt.spool.discard();
+          attempt = await runOnce(true);
+          result = attempt.result;
         }
       }
 
-      return clampForModel(formatResult(result, timeoutMs, maxOutputBytes), ctx);
+      return clampForModel(
+        formatResult(result, timeoutMs, maxOutputBytes),
+        attempt.spool,
+        result.truncated,
+      );
     },
   };
 }

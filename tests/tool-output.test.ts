@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compactDiff, diffLines, diffStat, formatDiff, formatDiffStat, parseDiffStat } from "../src/tools/diff.ts";
@@ -108,6 +108,36 @@ describe("bash 输出截断与落盘", () => {
     }
   });
 
+  test("超过内存上限时仍完整落盘，stdout/stderr 都不丢", async () => {
+    const home = await workspace("bugent-home-");
+    const cwd = await workspace();
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const tool = createBashTool(createShellRunner(), { maxOutputBytes: 1024 });
+      const out = await tool.run(
+        {
+          command: "yes x | head -c 200000; printf '\\nSTDERR-TAIL\\n' >&2",
+        },
+        ctxFor(cwd),
+      );
+
+      expect(out).toContain("已截断");
+      expect(out).toContain("完整输出共");
+
+      const match = /已写入：(.+?)\]/u.exec(out);
+      expect(match).not.toBeNull();
+      const full = await readFile(match![1]!, "utf8");
+      expect(full.length).toBeGreaterThan(200_000);
+      expect(full).toContain("--- stdout ---");
+      expect(full).toContain("--- stderr ---");
+      expect(full).toContain("STDERR-TAIL");
+    } finally {
+      process.env.HOME = previousHome;
+    }
+  });
+
   test("短输出不落盘，原样返回", async () => {
     const home = await workspace("bugent-home-");
     const cwd = await workspace();
@@ -119,23 +149,25 @@ describe("bash 输出截断与落盘", () => {
       const out = await tool.run({ command: "echo short" }, ctxFor(cwd));
       expect(out).toContain("short");
       expect(out).not.toContain("已省略");
+
+      // 临时 spool 必须被清理，不能给短命令留下垃圾文件。
+      expect(await readdir(join(home, ".bugent", "output", "s1"))).toEqual([]);
     } finally {
       process.env.HOME = previousHome;
     }
   });
 
-  test("onProgress 能把输出流式推给 UI", async () => {
+  test("onProgress 在超过内存截断点后仍持续推送", async () => {
     const cwd = await workspace();
     const chunks: string[] = [];
-    const tool = createBashTool(createShellRunner());
+    const tool = createBashTool(createShellRunner(), { maxOutputBytes: 64 });
 
     await tool.run(
-      { command: "echo one; echo two" },
+      { command: "printf 'HEAD'; yes x | head -c 5000; printf 'TAIL'" },
       { ...ctxFor(cwd), onProgress: (chunk) => chunks.push(chunk) },
     );
 
-    expect(chunks.length).toBeGreaterThan(0);
-    expect(chunks.join("")).toContain("one");
+    expect(chunks.join("")).toContain("TAIL");
   });
 });
 
