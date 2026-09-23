@@ -147,7 +147,32 @@ describe("P8 · ANSI 宽度工具", () => {
     expect(result.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")).not.toContain("\x1b");
   });
 
+  test("截断 OSC 8 超链接不会切断控制序列", () => {
+    const link = "\x1b]8;;https://example.com\x07click me\x1b]8;;\x07";
+    const result = truncateAnsi(link, 5);
+
+    expect(visibleWidth(result)).toBe(5);
+    expect(result).toContain("\x1b]8;;https://example.com\x07");
+    expect(result).toContain("\x1b]8;;\x07");
+    expect(Bun.stripANSI(result)).toBe("clic…");
+  });
+
+  test("emoji ZWJ 按一个字素截断", () => {
+    const result = truncateAnsi("👩‍👩‍👧‍👦abc", 3);
+
+    expect(visibleWidth(result)).toBe(3);
+    expect(Bun.stripANSI(result)).toBe("👩‍👩‍👧‍👦…");
+  });
+
+  test("ambiguous-width 与 stringWidth 使用同一规则", () => {
+    const result = truncateAnsi("ααα", 2);
+
+    expect(visibleWidth(result)).toBe(2);
+    expect(Bun.stripANSI(result)).toBe("α…");
+  });
+
   test("不需要截断时原样返回", () => {
     expect(truncateAnsi("abc", 10)).toBe("abc");
+    expect(truncateAnsi("abc", 0)).toBe("");
   });
 });
