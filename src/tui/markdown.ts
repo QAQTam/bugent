@@ -37,16 +37,69 @@ export function wrapToLines(text: string, width: number): string[] {
   return out;
 }
 
-/** markdown -> 终端 ANSI -> 按宽度折行。 */
-export function renderMarkdown(text: string, width: number): string[] {
+export interface MarkdownRenderOptions {
+  /** 是否输出 OSC 8 可点击链接；不传时按终端能力探测。 */
+  hyperlinks?: boolean;
+  /** 是否启用 Kitty Graphics；不传时只在已知支持的终端开启。 */
+  kittyGraphics?: boolean;
+}
+
+function terminalSupportsHyperlinks(): boolean {
+  if (process.stdout.isTTY !== true) return false;
+  return process.env.TERM !== "dumb";
+}
+
+function terminalSupportsKittyGraphics(): boolean {
+  if (process.stdout.isTTY !== true) return false;
+  const env = process.env;
+  return Boolean(
+    env.KITTY_WINDOW_ID ??
+      env.WEZTERM_PANE ??
+      env.GHOSTTY_RESOURCES_DIR ??
+      (env.TERM?.toLowerCase().includes("kitty") ? env.TERM : undefined) ??
+      (env.TERM_PROGRAM === "WezTerm" || env.TERM_PROGRAM === "ghostty"
+        ? env.TERM_PROGRAM
+        : undefined),
+  );
+}
+
+/**
+ * Bun.wrapAnsi 不认 Kitty Graphics 的 APC 序列，会把图片行折成空串；
+ * 图片控制序列必须原样透传，其余行继续正常折行。
+ */
+function wrapPreservingGraphics(text: string, width: number): string[] {
   const out: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.includes("\x1b_G")) {
+      out.push(line);
+      continue;
+    }
+    out.push(...wrapToLines(line, width));
+  }
+  return out;
+}
+
+/** markdown -> 终端 ANSI -> 按宽度折行。 */
+export function renderMarkdown(
+  text: string,
+  width: number,
+  options: MarkdownRenderOptions = {},
+): string[] {
+  const out: string[] = [];
+  const hyperlinks = options.hyperlinks ?? terminalSupportsHyperlinks();
+  const kittyGraphics = options.kittyGraphics ?? terminalSupportsKittyGraphics();
 
   for (const segment of splitMarkdown(text)) {
     if (segment.kind === "prose") {
       // **必须传 columns** —— Bun.markdown.ansi 默认按 80 列折行，
       // 终端再宽也没用，表现就是"回答提前换行"。
       // 注意参数名是 columns 而不是 width（width 会被静默忽略）。
-      out.push(...wrapToLines(Bun.markdown.ansi(segment.text, { columns: width }), width));
+      const rendered = Bun.markdown.ansi(segment.text, {
+        columns: width,
+        hyperlinks,
+        ...(kittyGraphics ? { kittyGraphics: true } : {}),
+      });
+      out.push(...wrapPreservingGraphics(rendered, width));
     } else {
       out.push(...renderCodeSegment(segment, width));
     }

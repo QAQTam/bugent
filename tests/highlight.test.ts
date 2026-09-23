@@ -1,4 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderMarkdown, renderPlain, splitMarkdown, wrapToLines } from "../src/tui/markdown.ts";
 import {
   clearHighlightCache,
@@ -9,9 +12,12 @@ import {
   setHighlightReadyHandler,
 } from "../src/tui/highlight.ts";
 
-afterAll(() => {
+const tempDirs: string[] = [];
+
+afterAll(async () => {
   setHighlightReadyHandler(undefined);
   clearHighlightCache();
+  for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
 });
 
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -155,6 +161,42 @@ describe("markdown 折行宽度", () => {
   test("窄终端仍然正确折行", () => {
     const lines = renderMarkdown("这是一段需要在窄终端里折行的文本".repeat(3), 40);
     for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+  });
+});
+
+describe("renderMarkdown：超链接与图片", () => {
+  test("hyperlinks=true 输出 OSC 8 可点击链接", () => {
+    const raw = renderMarkdown("[docs](https://example.com)", 40, { hyperlinks: true }).join("\n");
+
+    expect(raw).toContain("\x1b]8;;https://example.com");
+    expect(raw).toContain("docs");
+  });
+
+  test("kittyGraphics=true 原样保留本地图片控制序列", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bugent-md-"));
+    tempDirs.push(dir);
+    const image = join(dir, "pixel.png");
+    await writeFile(
+      image,
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3S8AAAAASUVORK5CYII=",
+        "base64",
+      ),
+    );
+
+    const raw = renderMarkdown(`![alt](${image})`, 40, { kittyGraphics: true }).join("\n");
+
+    expect(raw).toContain("\x1b_G");
+    expect(raw).not.toBe("");
+  });
+
+  test("远程图片降级为 alt 文本", () => {
+    const raw = renderMarkdown("![remote](https://example.com/x.png)", 40, {
+      kittyGraphics: true,
+    }).join("\n");
+
+    expect(raw).not.toContain("\x1b_G");
+    expect(Bun.stripANSI(raw)).toContain("remote");
   });
 });
 
