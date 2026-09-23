@@ -28,6 +28,7 @@ import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
+import { sliceViewport } from "./viewport.ts";
 import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
@@ -623,34 +624,44 @@ export class TuiApp {
     return `${edge}${textColor}${rendered}${RESET}`;
   }
 
+  /**
+   * 渲染消息区，并在必要时**吸顶**当前条目的头部。
+   *
+   * 为什么需要吸顶：body 视窗是钉底的（scrollOffset=0 时看最新内容），
+   * 而长工具条目的渲染又是从开头截断的 —— 两个方向相反，结果是
+   * 滚到底时既看不到头部（含 +N -M 徽标），也看不到内容结尾，
+   * 只剩信息量最低的中段。
+   *
+   * 修法是通用且便宜的：窗口起点落在某条目内部时，把该条目的头部
+   * 覆盖在第一行。对 bash 的长输出、read_file 的长文件同样有效。
+   */
   #composeBody(width: number, height: number): string[] {
     const all: string[] = [];
-    const hits: { callId: string; start: number; end: number }[] = [];
+    const spans: { callId?: string; start: number; end: number; header: string }[] = [];
 
     for (const item of this.#transcript.items) {
       const start = all.length;
-      all.push(...this.#renderItem(item, width));
-      // 记录工具条目占用的行区间，供鼠标点击命中
-      if (item.kind === "tool") {
-        hits.push({ callId: item.callId, start, end: all.length - 1 });
-      }
+      const rendered = this.#renderItem(item, width);
+      all.push(...rendered);
+
+      spans.push({
+        start,
+        end: all.length - 1,
+        header: rendered[0] ?? "",
+        ...(item.kind === "tool" ? { callId: item.callId } : {}),
+      });
+
       all.push("");
     }
 
-    this.#toolHits = hits;
+    // 记录工具条目占用的行区间，供鼠标点击命中
+    this.#toolHits = spans.flatMap((span) =>
+      span.callId === undefined ? [] : [{ callId: span.callId, start: span.start, end: span.end }],
+    );
 
-    const total = all.length;
-    if (total <= height) {
-      this.#bodyWindowStart = 0;
-      const padded = all.slice();
-      while (padded.length < height) padded.push("");
-      return padded;
-    }
-
-    const end = this.#scrollOffset === 0 ? total : Math.max(height, total - this.#scrollOffset);
-    const start = Math.max(0, end - height);
-    this.#bodyWindowStart = start;
-    return all.slice(start, end);
+    const viewport = sliceViewport(all, spans, height, this.#scrollOffset);
+    this.#bodyWindowStart = viewport.start;
+    return viewport.lines;
   }
 
   #renderItem(item: DisplayItem, width: number): string[] {
