@@ -12,7 +12,11 @@ import type { SessionStore } from "./repository.ts";
 
 export interface AuditOptions {
   store: SessionStore;
-  sessionId: string;
+  /**
+   * 当前会话 id。用函数而不是字符串，是为了支持多会话：
+   * 用户 `/new` 换会话后，审计流水要跟着切过去。
+   */
+  sessionId: () => string;
   /** 当前轮次（用于把事件归到某一轮）。 */
   turn: () => number;
   now?: () => number;
@@ -20,7 +24,7 @@ export interface AuditOptions {
 
 export class AuditTrail {
   #store: SessionStore;
-  #sessionId: string;
+  #sessionId: () => string;
   #turn: () => number;
   #now: () => number;
 
@@ -34,7 +38,7 @@ export class AuditTrail {
   #record(kind: Parameters<SessionStore["appendEvent"]>[0]["kind"], payload: unknown): void {
     const turn = this.#turn();
     this.#store.appendEvent({
-      sessionId: this.#sessionId,
+      sessionId: this.#sessionId(),
       at: this.#now(),
       kind,
       payload,

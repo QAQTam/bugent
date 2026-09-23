@@ -40,6 +40,9 @@ bun run src/index.ts --allow-network  # 沙箱内允许联网（默认断网）
 bun run src/index.ts --sessions       # 列出已保存的会话
 bun run src/index.ts --resume <id>    # 恢复会话继续聊
 bun run src/index.ts --no-persist     # 不落盘
+```
+
+TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可用 `--resume` 回去）。
 
 # 测试与类型检查
 bun test
@@ -61,7 +64,7 @@ bun run typecheck
 | P6 权限与沙箱 | ✅ | allow/ask/deny 三级策略；bwrap 沙箱（只读根 / 可写 cwd / 默认断网）；TUI 弹窗确认 |
 | P7 文件工具 | ✅ | read_file / write_file / edit_file；路径约束挡住 `../` 与符号链接逃逸；写入是原子的 |
 | P8 markdown / 高亮 | ✅ | `Bun.markdown.ansi` + `Bun.wrapAnsi` + `Bun.stringWidth`（代码高亮限 ts/js） |
-| P9 多 session | ⬜ | 待做 |
+| P9 多 session | ✅ | `SessionRegistry` + 并发锁：不同会话真并行，同一会话重复进入抛 `SessionBusyError`；TUI `/new` 开新对话；多进程共写同一库已回归测试 |
 | P10 落盘与审计 | ✅ | bun:sqlite + WAL；消息即时落盘、`--resume` 恢复；审计流水含工具调用与权限决策 |
 
 已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter。

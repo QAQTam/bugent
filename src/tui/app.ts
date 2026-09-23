@@ -33,6 +33,11 @@ export interface TuiOptions {
   banner?: string;
   /** 是否启用了沙箱，用于状态栏提示。 */
   sandboxEnabled?: boolean;
+  /**
+   * 新建对话时调用（`/new`）。
+   * 省略则 `/new` 不可用 —— 调用方需要能创建并落盘一个新会话。
+   */
+  createSession?: () => AgentSession;
 }
 
 const COLOR = {
@@ -54,6 +59,7 @@ export class TuiApp {
   #session: AgentSession;
   #tools: ToolRegistry;
   #cwd: string;
+  #createSession: (() => AgentSession) | undefined;
 
   #transcript = new Transcript();
   #input = "";
@@ -73,6 +79,7 @@ export class TuiApp {
     this.#session = options.session;
     this.#tools = options.tools;
     this.#cwd = options.cwd;
+    this.#createSession = options.createSession;
     this.#sandboxEnabled = options.sandboxEnabled === true;
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
@@ -234,6 +241,10 @@ export class TuiApp {
       this.#requestExit();
       return;
     }
+    if (text === "/new") {
+      this.#startNewSession();
+      return;
+    }
 
     this.#input = "";
     this.#cursor = 0;
@@ -241,6 +252,31 @@ export class TuiApp {
     this.#transcript.pushUser(text);
     this.#render();
     void this.#runTurn(text);
+  }
+
+  /** `/new`：换一个全新会话，显示历史一并清空。 */
+  #startNewSession(): void {
+    if (this.#busy) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再开新对话");
+      this.#render();
+      return;
+    }
+    if (this.#createSession === undefined) {
+      this.#transcript.pushError("当前未启用持久化，无法创建新对话");
+      this.#render();
+      return;
+    }
+
+    this.#input = "";
+    this.#cursor = 0;
+    this.#scrollOffset = 0;
+    this.#usage = { input: 0, output: 0 };
+    this.#session = this.#createSession();
+    this.#transcript = new Transcript();
+    this.#transcript.pushNotice(
+      `已开始新对话：\`${this.#session.id}\`\n\n用 \`/resume\` 之外的会话请重启并加 \`--resume <id>\`。`,
+    );
+    this.#render(true);
   }
 
   #requestExit(): void {

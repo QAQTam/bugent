@@ -336,8 +336,16 @@ async function main(): Promise<void> {
   );
 
   // 审计流水：工具调用、权限决策、每轮起止，全部落盘可回放
+  // 用 activeSession 而非固定 session —— 用户 /new 换会话后审计要跟着切
+  let activeSession = session;
   const audit =
-    store === undefined ? undefined : new AuditTrail({ store, sessionId, turn: () => session.turn });
+    store === undefined
+      ? undefined
+      : new AuditTrail({
+          store,
+          sessionId: () => activeSession.id,
+          turn: () => activeSession.turn,
+        });
 
   const hooks = combineHooks(createHooks(), audit?.hooks());
   const signal = new AbortController().signal;
@@ -383,8 +391,27 @@ async function main(): Promise<void> {
               : `默认 ${policy.defaultDecision}${policy.ruleCount > 0 ? `，${policy.ruleCount} 条规则` : ""}`
           }`,
           "",
-          "输入消息开始对话；`/exit` 退出；运行中按 `ESC` 中断。",
+          "输入消息开始对话；`/new` 开新对话；`/exit` 退出；运行中按 `ESC` 中断。",
         ].join("\n"),
+        ...(store === undefined
+          ? {}
+          : {
+              createSession: (): AgentSession => {
+                const next = openSession({
+                  store,
+                  sessionId: newSessionId(),
+                  // 每个会话拿一个全新的 client：真实 provider 是无状态的，
+                  // 但 mock adapter 带脚本计数器，复用会让新会话读到旧进度
+                  client: registry.resolve(ref),
+                  model: ref.model,
+                  providerId: ref.provider,
+                  systemPrompt,
+                  cwd: options.cwd,
+                });
+                activeSession = next;
+                return next;
+              },
+            }),
       });
 
       // TUI 自己就是权限确认入口：闸门回调到 app 的弹窗

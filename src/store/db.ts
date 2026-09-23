@@ -63,24 +63,63 @@ CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
 export interface OpenDatabaseOptions {
   /** 文件路径，或 ":memory:"。 */
   path: string;
+  /** 抢锁重试总时长上限（毫秒）。 */
+  lockTimeoutMs?: number;
+}
+
+function isBusyError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /locked|busy/i.test(message);
+}
+
+/**
+ * 同步重试。
+ *
+ * 为什么可以阻塞：bun:sqlite 本身就是同步 API，且这里只包住"建库 + 建表"这一小段，
+ * 争用窗口是毫秒级。用异步等待反而要把它改成 async，污染整条调用链。
+ */
+function withLockRetry<T>(fn: () => T, timeoutMs: number): T {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 5;
+  let lastError: unknown;
+
+  for (;;) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      if (!isBusyError(error) || Date.now() >= deadline) throw error;
+      Bun.sleepSync(delay);
+      delay = Math.min(delay * 2, 100);
+    }
+  }
 }
 
 export function openDatabase(options: OpenDatabaseOptions): Database {
   const { path } = options;
+  const lockTimeoutMs = options.lockTimeoutMs ?? 5000;
+
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
   }
 
   const db = new Database(path, { create: true });
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  // 多 session 并行写入时，等锁而不是立刻报 SQLITE_BUSY
-  db.exec("PRAGMA busy_timeout = 5000");
-  db.exec(SCHEMA);
 
-  db.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
-    String(SCHEMA_VERSION),
-  );
+  // 顺序很重要：busy_timeout 必须在任何可能抢锁的语句之前设好。
+  // 注意 Bun 的 DatabaseOptions 里没有 timeout 字段（运行时会被静默忽略），
+  // 所以不能指望构造参数，必须显式设 PRAGMA。
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec("PRAGMA foreign_keys = ON");
+
+  // journal_mode 切换与建表都可能撞上别的进程，需要重试。
+  // 多个进程同时首次建库时，这里是唯一的真实争用点。
+  withLockRetry(() => {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(SCHEMA);
+    db.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
+      String(SCHEMA_VERSION),
+    );
+  }, lockTimeoutMs);
 
   return db;
 }

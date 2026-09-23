@@ -69,6 +69,13 @@ describe("P10 · 数据库", () => {
     second.close();
   });
 
+  test("busy_timeout 被显式设置（并发写的前提）", async () => {
+    const store = await makeStore();
+    // 回归：曾把 busy_timeout 设在 journal_mode 之后，导致并发建库必然失败
+    const row = store.db.query("PRAGMA busy_timeout").get() as { timeout: number } | null;
+    expect(row?.timeout).toBe(5000);
+  });
+
   test("默认数据库路径落在项目内的 .bugent 下", () => {
     expect(defaultDatabasePath("/work/proj")).toBe("/work/proj/.bugent/bugent.db");
     expect(defaultDatabasePath("/work/proj/")).toBe("/work/proj/.bugent/bugent.db");
@@ -207,7 +214,12 @@ describe("P10 · 审计流水", () => {
     store.createSession(makeSessionRecord("s1"));
 
     let turn = 0;
-    const audit = new AuditTrail({ store, sessionId: "s1", turn: () => turn, now: () => 42 });
+    const audit = new AuditTrail({
+      store,
+      sessionId: () => "s1",
+      turn: () => turn,
+      now: () => 42,
+    });
 
     audit.turnStart();
     turn = 1;
@@ -232,8 +244,6 @@ describe("P10 · 审计流水", () => {
     const store = await makeStore();
     store.createSession(makeSessionRecord("s1"));
 
-    const audit = new AuditTrail({ store, sessionId: "s1", turn: () => session.turn });
-
     const session = new AgentSession({
       id: "s1",
       system: "SYS",
@@ -245,6 +255,12 @@ describe("P10 · 审计流水", () => {
       }),
       model: "test-model",
       onMessage: (m) => store.appendMessage("s1", m),
+    });
+
+    const audit = new AuditTrail({
+      store,
+      sessionId: () => session.id,
+      turn: () => session.turn,
     });
 
     const registry = new ToolRegistry().register(createBashTool(createShellRunner()));
