@@ -125,3 +125,49 @@ export function formatDiff(lines: readonly DiffLine[], header?: string): string 
   const body = lines.map((line) => `${line.kind}${line.text}`).join("\n");
   return body.length > 0 ? `${head}\n${body}` : head;
 }
+
+/* ------------------------------------------------------------------ */
+/* 从已渲染的文本反解出增删统计                                          */
+/* ------------------------------------------------------------------ */
+
+export interface DiffStat {
+  added: number;
+  removed: number;
+}
+
+/**
+ * 从 `formatDiff` 产出的文本里数出 +N / -M。
+ *
+ * 为什么可以"反解"而不是额外传字段：
+ *   - `compactDiff` 只裁掉**未变更**的上下文行，`+`/`-` 一行都不会少，
+ *     所以数出来的就是真实增删数；
+ *   - 工具输出本来就是 diff 的规范文本，没必要再造一个字段
+ *     让 UI 和模型看到两份可能不一致的数据。
+ *
+ * 首行是摘要（如"已编辑 a.ts（替换 1 处）"），从第二行开始数。
+ * 没有实际变更（只有摘要）时返回 undefined。
+ */
+export function parseDiffStat(text: string): DiffStat | undefined {
+  const lines = text.split("\n");
+  if (lines.length < 2) return undefined;
+
+  let added = 0;
+  let removed = 0;
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    // 只认行首单个前缀字符 —— `⋯ 省略 N 行` 那种以空格开头，天然被排除
+    if (line.startsWith("+")) added += 1;
+    else if (line.startsWith("-")) removed += 1;
+  }
+
+  return added === 0 && removed === 0 ? undefined : { added, removed };
+}
+
+/** 渲染成 `+12 -3` 这样的徽标文本（不含颜色，宽度可算）。 */
+export function formatDiffStat(stat: DiffStat): string {
+  const parts: string[] = [];
+  if (stat.added > 0) parts.push(`+${stat.added}`);
+  if (stat.removed > 0) parts.push(`-${stat.removed}`);
+  return parts.join(" ");
+}

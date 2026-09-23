@@ -13,7 +13,7 @@ import { dirname } from "node:path";
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { relativeTo, resolveWithin } from "./paths.ts";
-import { compactDiff, diffLines, formatDiff } from "./diff.ts";
+import { compactDiff, diffLines, formatDiff, type DiffLine } from "./diff.ts";
 
 export const MAX_READ_LINES = 500;
 /** 回传给模型的字符上限（与行数上限谁先到算谁）。 */
@@ -218,7 +218,13 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
         ? `已覆盖 ${display}（${bytes} 字节，${lineCount} 行）`
         : `已创建 ${display}（${bytes} 字节，${lineCount} 行）`;
 
-      return formatDiff(compactDiff(diffLines(before, content)), summary);
+      // 新建文件不走 diff：空内容 split 出来是一个空行，会被当成"删了 1 行"，
+      // 于是新文件显示成 `+3 -1`。直接全标成新增才对。
+      const diff = existed
+        ? compactDiff(diffLines(before, content))
+        : content.split("\n").map((text): DiffLine => ({ kind: "+", text }));
+
+      return formatDiff(diff, summary);
     },
   };
 }

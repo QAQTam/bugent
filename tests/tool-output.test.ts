@@ -2,9 +2,18 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compactDiff, diffLines, diffStat, formatDiff } from "../src/tools/diff.ts";
+import { compactDiff, diffLines, diffStat, formatDiff, formatDiffStat, parseDiffStat } from "../src/tools/diff.ts";
 import { createBashTool, createShellRunner, MAX_MODEL_OUTPUT_CHARS } from "../src/tools/bash.ts";
-import { createReadFileTool, MAX_READ_CHARS, MAX_READ_LINES } from "../src/tools/files.ts";
+import {
+  createEditFileTool,
+  createReadFileTool,
+  createWriteFileTool,
+  MAX_READ_CHARS,
+  MAX_READ_LINES,
+} from "../src/tools/files.ts";
+import { renderDiffTool } from "../src/tui/render-tools.ts";
+import { visibleWidth } from "../src/tui/ansi.ts";
+import type { ToolItem } from "../src/tui/renderers.ts";
 import type { ToolCtx } from "../src/tools/types.ts";
 
 const dirs: string[] = [];
@@ -130,7 +139,145 @@ describe("bash 输出截断与落盘", () => {
   });
 });
 
+describe("diff 统计徽标", () => {
+  test("从工具输出反解 +N -M", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "a.ts"), "l1\nl2\nl3\nl4\nl5\n");
+
+    const output = await createEditFileTool().run(
+      { path: "a.ts", old_string: "l2\nl3", new_string: "新的一行\n第二行\n第三行" },
+      ctxFor(cwd),
+    );
+
+    // 删 2 行、加 3 行
+    expect(parseDiffStat(output)).toEqual({ added: 3, removed: 2 });
+  });
+
+  test("新建文件是 +N -0", async () => {
+    const cwd = await workspace();
+    const output = await createWriteFileTool().run(
+      { path: "new.txt", content: "a\nb\nc" },
+      ctxFor(cwd),
+    );
+    expect(parseDiffStat(output)).toEqual({ added: 3, removed: 0 });
+  });
+
+  test("无变更时返回 undefined", () => {
+    expect(parseDiffStat("已编辑 a.ts（替换 1 处）")).toBeUndefined();
+    expect(parseDiffStat("")).toBeUndefined();
+  });
+
+  test("摘要行里的数字不会被误算（只从第二行起数）", () => {
+    // 首行即使以 + 开头也不算
+    expect(parseDiffStat("+5 -3\n context")).toBeUndefined();
+  });
+
+  test("省略提示行（以空格开头）不计入", () => {
+    const text = "已编辑 x\n ⋯ 省略 100 行未变更内容\n-old\n+new";
+    expect(parseDiffStat(text)).toEqual({ added: 1, removed: 1 });
+  });
+
+  test("formatDiffStat 省略为 0 的部分", () => {
+    expect(formatDiffStat({ added: 5, removed: 0 })).toBe("+5");
+    expect(formatDiffStat({ added: 0, removed: 3 })).toBe("-3");
+    expect(formatDiffStat({ added: 2, removed: 3 })).toBe("+2 -3");
+  });
+
+  test("徽标右对齐到指定宽度", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "src/a.ts" },
+      output: "已编辑 src/a.ts\n-old\n+new",
+      ok: true,
+      done: true,
+      progress: "",
+      expanded: false,
+    };
+
+    const [head] = renderDiffTool(item, 60);
+    // 去掉颜色后，可见宽度应正好等于给定宽度，且以 -1 结尾
+    expect(visibleWidth(head!)).toBeLessThanOrEqual(60);
+    const plain = head!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(plain.endsWith("+1 -1")).toBe(true);
+  });
+
+  test("窄屏时压缩摘要但保留徽标", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "一个非常长的路径/深/深/深/文件.ts" },
+      output: "已编辑 x\n-a\n+b",
+      ok: true,
+      done: true,
+      progress: "",
+      expanded: false,
+    };
+
+    const [head] = renderDiffTool(item, 30);
+    const plain = head!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(plain).toContain("+1 -1"); // 徽标不能被挤掉
+    expect(visibleWidth(head!)).toBeLessThanOrEqual(30);
+  });
+
+  test("折叠时保留开头（改动在中段，头尾折叠会把它藏起来）", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "a.ts" },
+      output: ["已编辑 a.ts", ...Array.from({ length: 30 }, (_, i) => `${i === 5 ? "+" : " "}l${i}`)].join("\n"),
+      ok: true,
+      done: true,
+      progress: "",
+      expanded: false,
+    };
+
+    const lines = renderDiffTool(item, 80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+    // 改动行在开头范围内，必须可见
+    expect(lines.some((line) => line.includes("+l5"))).toBe(true);
+    expect(lines.some((line) => line.includes("还有"))).toBe(true);
+  });
+
+  test("展开后显示全部 diff 行", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "a.ts" },
+      output: ["已编辑 a.ts", ...Array.from({ length: 30 }, (_, i) => ` l${i}`)].join("\n"),
+      ok: true,
+      done: true,
+      progress: "",
+      expanded: true,
+    };
+
+    const lines = renderDiffTool(item, 80);
+    expect(lines.some((line) => line.includes("还有"))).toBe(false);
+  });
+
+  test("失败时不显示徽标", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "a.ts" },
+      output: "Error: 找不到 old_string",
+      ok: false,
+      done: true,
+      progress: "",
+      expanded: false,
+    };
+
+    const [head] = renderDiffTool(item, 60);
+    expect(head).not.toContain("+");
+  });
+});
+
 describe("read_file 截断", () => {
+
   test(`默认最多读 ${MAX_READ_LINES} 行`, async () => {
     const cwd = await workspace();
     const content = Array.from({ length: 1200 }, (_, i) => `line${i}`).join("\n");
