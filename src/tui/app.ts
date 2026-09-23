@@ -28,7 +28,8 @@ import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
-import { maxScrollOffset, TranscriptLayout } from "./transcript-layout.ts";
+import { HISTORY_WINDOW_MULTIPLIER, maxScrollOffset, TranscriptLayout } from "./transcript-layout.ts";
+import { composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
 import { setHighlightReadyHandler } from "./highlight.ts";
 import {
   AskUserFlow,
@@ -66,6 +67,13 @@ interface PendingDialog {
   /** 可鼠标点击的按钮。键盘路径仍然保留。 */
   actions: readonly DialogAction[];
   resolve: (value: boolean) => void;
+}
+
+/** 屏幕坐标命中区间；row 为 1-based。 */
+interface HitRegion {
+  row: number;
+  start: number;
+  end: number;
 }
 
 export interface TuiOptions {
@@ -108,6 +116,16 @@ export class TuiApp {
   #lastLayoutTotal = 0;
   /** 上一次消息区高度，供滚动和历史上限计算。 */
   #bodyHeight = 1;
+  /** body 顶部是否有非内容行（“查看更多消息”按钮）；鼠标命中要扣掉。 */
+  #bodyContentOffset = 0;
+  /** 是否打开半屏历史抽屉。 */
+  #historyOpen = false;
+  /** 历史抽屉上半屏距底部的偏移。 */
+  #historyOffset = 0;
+  /** 消息区顶部“查看更多消息”的鼠标命中区间（row 相对 body，0-based）。 */
+  #moreHistoryHit: HitRegion | undefined;
+  /** 输入框上方“回到最新消息”的鼠标命中区间（row 为屏幕 1-based）。 */
+  #returnToLatestHit: HitRegion | undefined;
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
   #abort: AbortController | undefined;
@@ -305,6 +323,12 @@ export class TuiApp {
       return;
     }
 
+    // 历史抽屉只接管 Esc 与滚动；输入框仍可正常使用。
+    if (this.#historyOpen && key.type === "escape") {
+      this.#closeHistoryDrawer();
+      return;
+    }
+
     switch (key.type) {
       case "mouse":
         this.#handleMouse(key);
@@ -365,19 +389,23 @@ export class TuiApp {
         return;
 
       case "up":
-        this.#scrollBy(1);
+        if (this.#historyOpen) this.#scrollHistoryBy(1);
+        else this.#scrollBy(1);
         return;
 
       case "down":
-        this.#scrollBy(-1);
+        if (this.#historyOpen) this.#scrollHistoryBy(-1);
+        else this.#scrollBy(-1);
         return;
 
       case "pageUp":
-        this.#scrollBy(Math.max(1, this.#terminal.size.height - 4));
+        if (this.#historyOpen) this.#scrollHistoryBy(Math.max(1, this.#bodyHeight - 2));
+        else this.#scrollBy(Math.max(1, this.#bodyHeight));
         return;
 
       case "pageDown":
-        this.#scrollBy(-Math.max(1, this.#terminal.size.height - 4));
+        if (this.#historyOpen) this.#scrollHistoryBy(-Math.max(1, this.#bodyHeight - 2));
+        else this.#scrollBy(-Math.max(1, this.#bodyHeight));
         return;
 
       case "tab": {
@@ -392,21 +420,22 @@ export class TuiApp {
     }
   }
 
-  /** 处理鼠标事件：左键点击折叠行展开/收起，滚轮滚动历史。 */
+  /** 处理鼠标事件：左键点击按钮/折叠行，滚轮滚动主视窗或历史抽屉。 */
   #handleMouse(key: Extract<Key, { type: "mouse" }>): void {
     if (key.button === "wheelUp") {
-      this.#scrollBy(3);
+      if (this.#historyOpen) this.#scrollHistoryBy(3);
+      else this.#scrollBy(3);
       return;
     }
     if (key.button === "wheelDown") {
-      this.#scrollBy(-3);
+      if (this.#historyOpen) this.#scrollHistoryBy(-3);
+      else this.#scrollBy(-3);
       return;
     }
     if (!key.pressed || key.button !== "left") return;
 
     // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
     const bodyRow = key.y - 2;
-    if (bodyRow < 0) return;
 
     // 权限 / 能力 / 升档弹窗：点击按钮直接确认或拒绝。
     if (this.#pendingDialog !== undefined && this.#dialogTopRow >= 0) {
@@ -429,7 +458,32 @@ export class TuiApp {
       }
     }
 
-    const bodyIndex = this.#bodyWindowStart + bodyRow;
+    const returnHit = this.#returnToLatestHit;
+    if (
+      returnHit !== undefined &&
+      key.y === returnHit.row &&
+      key.x >= returnHit.start &&
+      key.x <= returnHit.end
+    ) {
+      this.#returnToLatest();
+      return;
+    }
+
+    const moreHit = this.#moreHistoryHit;
+    if (
+      !this.#historyOpen &&
+      moreHit !== undefined &&
+      bodyRow === moreHit.row &&
+      key.x >= moreHit.start &&
+      key.x <= moreHit.end
+    ) {
+      this.#openHistoryDrawer();
+      return;
+    }
+
+    if (this.#historyOpen || bodyRow < 0) return;
+
+    const bodyIndex = this.#bodyWindowStart + (bodyRow - this.#bodyContentOffset);
     for (const hit of this.#toolHits) {
       if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
         if (this.#transcript.toggleToolExpanded(hit.callId)) {
@@ -457,6 +511,39 @@ export class TuiApp {
     this.#render();
   }
 
+  #scrollHistoryBy(delta: number): void {
+    const pane = historyPaneHeights(this.#bodyHeight);
+    const max = Math.max(0, this.#layout.totalLines - pane.top);
+    this.#historyOffset = Math.max(0, Math.min(max, this.#historyOffset + delta));
+    this.#render();
+  }
+
+  #openHistoryDrawer(): void {
+    const total = this.#layout.totalLines;
+    const pane = historyPaneHeights(this.#bodyHeight);
+    const mainMax = maxScrollOffset(total, this.#bodyHeight);
+    const max = Math.max(0, total - pane.top);
+    // 默认落在主区三屏窗口的上方，而不是从最早历史重新开始。
+    this.#historyOffset = Math.min(max, mainMax + this.#bodyHeight);
+    this.#historyOpen = true;
+    this.#render(true);
+  }
+
+  #closeHistoryDrawer(): void {
+    if (!this.#historyOpen) return;
+    this.#historyOpen = false;
+    this.#historyOffset = 0;
+    this.#render(true);
+  }
+
+  #returnToLatest(): void {
+    this.#historyOpen = false;
+    this.#historyOffset = 0;
+    this.#scrollOffset = 0;
+    this.#followTail = true;
+    this.#render(true);
+  }
+
   #submit(): void {
     const text = this.#input.trim();
     if (text.length === 0) return;
@@ -473,6 +560,8 @@ export class TuiApp {
     this.#cursor = 0;
     this.#scrollOffset = 0;
     this.#followTail = true;
+    this.#historyOpen = false;
+    this.#historyOffset = 0;
     this.#transcript.pushUser(text);
     this.#render();
     void this.#runTurn(text);
@@ -495,6 +584,8 @@ export class TuiApp {
     this.#cursor = 0;
     this.#scrollOffset = 0;
     this.#followTail = true;
+    this.#historyOpen = false;
+    this.#historyOffset = 0;
     this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
     this.#stopTodoShimmer();
@@ -707,6 +798,22 @@ export class TuiApp {
       this.#dialogButtonHits = [];
     }
 
+    // “回到最新消息”放在思考区最后一行：它本来就是输入框上方的留白，
+    // 不额外挤占消息区高度，也不会造成 layout 抖动。
+    if ((!this.#followTail || this.#historyOpen) && thinkingBlock.length > 0) {
+      const rowIndex = thinkingBlock.length - 1;
+      const label = `${fg(COLOR.tool)}[ 回到最新消息 ]${RESET}`;
+      const left = Math.max(0, Math.floor((width - visibleWidth(label)) / 2));
+      thinkingBlock[rowIndex] = `${" ".repeat(left)}${label}`;
+      this.#returnToLatestHit = {
+        row: 1 + bodyHeight + todoPanel.length + thinkingBlock.length,
+        start: left + 1,
+        end: left + visibleWidth(label),
+      };
+    } else {
+      this.#returnToLatestHit = undefined;
+    }
+
     return [
       this.#composeStatus(width),
       ...body,
@@ -874,21 +981,61 @@ export class TuiApp {
     const delta = total - this.#lastLayoutTotal;
     // 用户正在回看时，新增/收缩内容不能把视口推走。
     if (!this.#followTail && delta !== 0) this.#scrollOffset += delta;
+    if (this.#historyOpen && delta !== 0) this.#historyOffset += delta;
     this.#lastLayoutTotal = total;
+
+    if (this.#historyOpen) {
+      const pane = historyPaneHeights(height);
+      const maxHistory = Math.max(0, total - pane.top);
+      this.#historyOffset = Math.max(0, Math.min(maxHistory, this.#historyOffset));
+
+      const older = this.#layout.window(pane.top, this.#historyOffset);
+      const latest = this.#layout.window(pane.bottom, 0);
+      const drawer = composeHistoryDrawer({
+        width,
+        height,
+        topLines: older.lines,
+        bottomLines: latest.lines,
+        offset: this.#historyOffset,
+        maxOffset: maxHistory,
+      });
+
+      this.#bodyWindowStart = older.start;
+      this.#bodyContentOffset = 0;
+      this.#toolHits = [];
+      this.#moreHistoryHit = undefined;
+      return drawer.lines;
+    }
 
     const maxOffset = maxScrollOffset(total, height);
     this.#scrollOffset = Math.max(0, Math.min(maxOffset, this.#scrollOffset));
     if (this.#scrollOffset === 0) this.#followTail = true;
 
-    const viewport = this.#layout.window(height, this.#scrollOffset);
+    const historyTruncated = total > height * HISTORY_WINDOW_MULTIPLIER;
+    const atOldest = maxOffset > 0 && this.#scrollOffset >= maxOffset;
+    const showMore = historyTruncated && atOldest;
+    const viewportHeight = Math.max(1, height - (showMore ? 1 : 0));
+    const viewport = this.#layout.window(viewportHeight, this.#scrollOffset);
+
     this.#bodyWindowStart = viewport.start;
+    this.#bodyContentOffset = showMore ? 1 : 0;
     this.#toolHits = viewport.blocks.flatMap((block) =>
       block.callId === undefined
         ? []
         : [{ callId: block.callId, start: block.start, end: block.contentEnd }],
     );
 
-    return viewport.lines;
+    if (!showMore) {
+      this.#moreHistoryHit = undefined;
+      return viewport.lines;
+    }
+
+    const button = `${DIM}↑ 更早消息已折叠 ${RESET}${fg(COLOR.tool)}[ 查看更多消息 ]${RESET}`;
+    const left = Math.max(0, Math.floor((width - visibleWidth(button)) / 2));
+    const buttonLine = `${" ".repeat(left)}${truncateAnsi(button, width - left)}`;
+    const buttonWidth = Math.min(visibleWidth(button), width - left);
+    this.#moreHistoryHit = { row: 0, start: left + 1, end: left + buttonWidth };
+    return [buttonLine, ...viewport.lines];
   }
 
   #renderItem(item: DisplayItem, width: number): string[] {
