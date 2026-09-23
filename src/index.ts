@@ -2,9 +2,10 @@
 /**
  * bugent CLI 入口。
  *
- * 现阶段（Phase 1/2/4 完成）提供两种模式：
+ * 三种模式：
  *   - 一次性：`bugent -p "你好"`
- *   - 交互式：`bugent`（readline REPL，Phase 5 会换成 OpenTUI）
+ *   - TUI：`bugent`（默认，需要 TTY）
+ *   - 纯文本 REPL：`bugent --plain`
  *
  * `--mock` 不需要网络和密钥，用来验证链路。
  */
@@ -16,6 +17,9 @@ import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
 import { TuiApp } from "./tui/app.ts";
+import { PermissionGate } from "./permission/gate.ts";
+import { StdinPrompter } from "./permission/prompt.ts";
+import { ALLOW_ALL_POLICY, PermissionPolicy } from "./permission/policy.ts";
 
 interface CliOptions {
   prompt?: string;
@@ -25,12 +29,16 @@ interface CliOptions {
   maxSteps?: number;
   help: boolean;
   plain: boolean;
+  /** 跳过所有权限确认。 */
+  yes: boolean;
+  noSandbox: boolean;
+  allowNetwork: boolean;
 }
 
 const HELP = `bugent — 终端里的 AI agent
 
 用法：
-  bugent                     交互式对话
+  bugent                     交互式对话（TUI）
   bugent -p "写个 hello"      一次性执行
 
 选项：
@@ -38,13 +46,24 @@ const HELP = `bugent — 终端里的 AI agent
   -m, --model <ref>          指定模型，格式 provider/model
       --mock                 使用内置 mock provider（无需网络与密钥）
       --plain                不使用 TUI，退回纯文本 REPL
+      --yes                  跳过权限确认（危险）
+      --no-sandbox           禁用 bwrap 沙箱
+      --allow-network        沙箱内允许联网（默认断网）
       --cwd <dir>            工作目录
       --max-steps <n>        单轮最大工具往返次数（默认 16）
   -h, --help                 显示帮助
 `;
 
 export function parseArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { mock: false, cwd: process.cwd(), help: false, plain: false };
+  const options: CliOptions = {
+    mock: false,
+    cwd: process.cwd(),
+    help: false,
+    plain: false,
+    yes: false,
+    noSandbox: false,
+    allowNetwork: false,
+  };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -80,6 +99,16 @@ export function parseArgs(argv: string[]): CliOptions {
         break;
       case "--plain":
         options.plain = true;
+        break;
+      case "--yes":
+      case "-y":
+        options.yes = true;
+        break;
+      case "--no-sandbox":
+        options.noSandbox = true;
+        break;
+      case "--allow-network":
+        options.allowNetwork = true;
         break;
       case "-h":
       case "--help":
@@ -147,11 +176,24 @@ async function main(): Promise<void> {
     model: ref.model,
   });
 
-  const tools = createDefaultTools();
+  // 沙箱：默认能用就用，--no-sandbox 显式关闭
+  const sandboxOption = options.noSandbox
+    ? null
+    : {
+        ...(config.sandbox ?? {}),
+        allowNetwork: options.allowNetwork || config.sandbox?.allowNetwork === true,
+      };
+  const tools = createDefaultTools({ sandbox: sandboxOption });
+
+  // 权限：--yes 全放行，否则用配置里的策略（默认 ask）
+  const policy = new PermissionPolicy(
+    options.yes ? ALLOW_ALL_POLICY : (config.permissions ?? { default: "ask" }),
+  );
+
   const hooks = createHooks();
   const signal = new AbortController().signal;
   const baseOptions = {
-    tools,
+    tools: tools.registry,
     hooks,
     cwd: options.cwd,
     signal,
@@ -162,36 +204,59 @@ async function main(): Promise<void> {
     return runUserTurn(session, input, baseOptions);
   };
 
-  if (options.prompt !== undefined) {
-    const result = await run(options.prompt);
-    if (result.text.length > 0) process.stdout.write("\n");
-    return;
-  }
-
   // 交互式：优先 TUI（需要 TTY），否则退回纯文本 REPL
-  if (!options.plain && process.stdout.isTTY) {
+  if (options.prompt === undefined && !options.plain && process.stdout.isTTY) {
     const app = new TuiApp({
       session,
-      tools,
+      tools: tools.registry,
       cwd: options.cwd,
-      banner: `**bugent** 已就绪 · \`${client.id}\`\n\n输入消息开始对话；\`/exit\` 退出；运行中按 \`ESC\` 中断。`,
+      sandboxEnabled: tools.sandbox.enabled,
+      banner: [
+        `**bugent** 已就绪 · \`${client.id}\``,
+        "",
+        `沙箱：${tools.sandbox.note}`,
+        `权限：${
+          options.yes
+            ? "**已跳过所有确认（--yes）**"
+            : `默认 ${policy.defaultDecision}${policy.ruleCount > 0 ? `，${policy.ruleCount} 条规则` : ""}`
+        }`,
+        "",
+        "输入消息开始对话；`/exit` 退出；运行中按 `ESC` 中断。",
+      ].join("\n"),
     });
+
+    // TUI 自己就是权限确认入口：闸门回调到 app 的弹窗
+    tools.registry.setGate(new PermissionGate(policy, { ask: (request) => app.askPermission(request) }));
     await app.run();
     return;
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  process.stdout.write(`bugent · ${client.id} · /exit 退出\n`);
+  // 非 TUI 路径：权限确认走 stdin
+  const prompter = new StdinPrompter();
+  tools.registry.setGate(new PermissionGate(policy, prompter));
+
   try {
-    for (;;) {
-      const line = (await rl.question("\x1b[1m> \x1b[0m")).trim();
-      if (line.length === 0) continue;
-      if (line === "/exit" || line === "/quit") break;
-      await run(line);
-      process.stdout.write("\n");
+    if (options.prompt !== undefined) {
+      const result = await run(options.prompt);
+      if (result.text.length > 0) process.stdout.write("\n");
+      return;
+    }
+
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    process.stdout.write(`bugent · ${client.id} · ${tools.sandbox.note} · /exit 退出\n`);
+    try {
+      for (;;) {
+        const line = (await rl.question("\x1b[1m> \x1b[0m")).trim();
+        if (line.length === 0) continue;
+        if (line === "/exit" || line === "/quit") break;
+        await run(line);
+        process.stdout.write("\n");
+      }
+    } finally {
+      rl.close();
     }
   } finally {
-    rl.close();
+    prompter.close();
   }
 }
 

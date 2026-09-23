@@ -31,6 +31,11 @@ bun run src/index.ts
 # 纯文本 REPL（不走 TUI）
 bun run src/index.ts --plain
 
+# 权限与沙箱
+bun run src/index.ts --yes            # 跳过所有权限确认（危险）
+bun run src/index.ts --no-sandbox     # 关闭 bwrap 沙箱
+bun run src/index.ts --allow-network  # 沙箱内允许联网（默认断网）
+
 # 测试与类型检查
 bun test
 bun run typecheck
@@ -48,7 +53,7 @@ bun run typecheck
 | P3 bash 工具 | ✅ | 管道执行（非 PTY），超时/中断/输出截断；执行层抽象为 `ShellRunner`，P6 沙箱直接替换 |
 | P4 最小 loop | ✅ | `src/core/loop.ts`，含工具往返、maxSteps 防死循环 |
 | P5 config + TUI | ✅ | config 可用；TUI 基于 **Bun 原生能力**自研（差分渲染 + raw mode，零第三方依赖） |
-| P6 权限与沙箱 | ⬜ | 待做（bwrap） |
+| P6 权限与沙箱 | ✅ | allow/ask/deny 三级策略；bwrap 沙箱（只读根 / 可写 cwd / 默认断网）；TUI 弹窗确认 |
 | P7 文件工具 | ⬜ | 待做 |
 | P8 markdown / 高亮 | ✅ | `Bun.markdown.ansi` + `Bun.wrapAnsi` + `Bun.stringWidth`（代码高亮限 ts/js） |
 | P9 多 session | ⬜ | 待做 |

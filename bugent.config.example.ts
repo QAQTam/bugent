@@ -36,4 +36,33 @@ export default defineConfig({
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     maxSteps: 16,
   },
+
+  /**
+   * 权限策略：规则按顺序匹配，第一条命中即生效；都不命中用 default。
+   * default 默认是 "ask"（每次执行工具都问一次）。
+   *
+   * 注意 glob 里的 `*` 匹配任意字符（含 `/`），所以给 bash 配白名单要非常小心：
+   * `"ls*"` 会把 `ls; rm -rf /` 一起放行。
+   */
+  permissions: {
+    default: "ask",
+    rules: [
+      // 只读操作自动放行，减少打断
+      { tool: "read_file", decision: "allow" },
+      // 明确禁止的危险命令
+      { tool: "bash", resource: "rm -rf /*", decision: "deny" },
+      { tool: "bash", resource: "sudo *", decision: "deny" },
+    ],
+  },
+
+  /**
+   * 沙箱（Linux / bubblewrap）。
+   * 默认：根只读、工作目录可写、私有 /tmp、断网。
+   */
+  sandbox: {
+    enabled: true,
+    allowNetwork: false,
+    // 需要写 $HOME 下缓存时显式放行（默认 HOME 是只读的）
+    writablePaths: [],
+  },
 });

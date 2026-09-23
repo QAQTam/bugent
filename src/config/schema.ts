@@ -6,6 +6,8 @@
  */
 
 import type { ProviderConfig } from "../provider/registry.ts";
+import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
+import type { SandboxOptions } from "../sandbox/bwrap.ts";
 
 export interface AgentConfig {
   systemPrompt?: string;
@@ -13,11 +15,24 @@ export interface AgentConfig {
   cwd?: string;
 }
 
+export interface PermissionsConfig {
+  /** 没命中任何规则时的默认决策，默认 "ask"。 */
+  default?: PermissionDecision;
+  rules?: PermissionRule[];
+}
+
+export interface SandboxConfig extends SandboxOptions {
+  /** 设为 false 等价于不启用沙箱。 */
+  enabled?: boolean;
+}
+
 export interface BugentConfig {
   /** 形如 "openai/gpt-4o-mini"。 */
   defaultModel: string;
   providers: ProviderConfig[];
   agent?: AgentConfig;
+  permissions?: PermissionsConfig;
+  sandbox?: SandboxConfig;
 }
 
 export function defineConfig(config: BugentConfig): BugentConfig {

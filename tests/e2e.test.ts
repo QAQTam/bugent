@@ -228,7 +228,7 @@ describe("P1+P4 · 端到端（HTTP + SSE）", () => {
     const session = new AgentSession({ id: "bash-e2e", system: "SYS", client, model: "test-model" });
 
     const result = await runUserTurn(session, "跑个命令", {
-      tools: createDefaultTools(),
+      tools: createDefaultTools().registry,
       cwd: process.cwd(),
     });
 

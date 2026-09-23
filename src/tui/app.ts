@@ -21,8 +21,9 @@ import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
-import { truncateAnsi, visibleWidth } from "./ansi.ts";
+import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { Transcript, type DisplayItem } from "./transcript.ts";
+import type { PermissionRequest } from "../permission/policy.ts";
 
 export interface TuiOptions {
   session: AgentSession;
@@ -30,6 +31,8 @@ export interface TuiOptions {
   cwd: string;
   /** 启动时的欢迎语。 */
   banner?: string;
+  /** 是否启用了沙箱，用于状态栏提示。 */
+  sandboxEnabled?: boolean;
 }
 
 const COLOR = {
@@ -39,6 +42,8 @@ const COLOR = {
   toolOk: "#94a3b8",
   error: "#f87171",
   busy: "#fbbf24",
+  warn: "#fbbf24",
+  ok: "#4ade80",
 };
 
 export class TuiApp {
@@ -59,16 +64,32 @@ export class TuiApp {
   #abort: AbortController | undefined;
   #renderScheduled = false;
   #resolveExit: (() => void) | undefined;
+  #sandboxEnabled = false;
+
+  /** 待用户确认的权限请求；存在时按键全部路由给它。 */
+  #pendingPrompt: { request: PermissionRequest; resolve: (value: boolean) => void } | undefined;
 
   constructor(options: TuiOptions) {
     this.#session = options.session;
     this.#tools = options.tools;
     this.#cwd = options.cwd;
+    this.#sandboxEnabled = options.sandboxEnabled === true;
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
     if (options.banner !== undefined) {
       this.#transcript.pushNotice(options.banner);
     }
+  }
+
+  /**
+   * 权限确认入口，供 PermissionGate 调用。
+   * 会挂起当前 turn，直到用户按下 y / n。
+   */
+  askPermission(request: PermissionRequest): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      this.#pendingPrompt = { request, resolve };
+      this.#render();
+    });
   }
 
   async run(): Promise<void> {
@@ -104,6 +125,12 @@ export class TuiApp {
   }
 
   #handleKey(key: Key): void {
+    // 有权限弹窗时，所有按键都归它 —— 不能漏到下面的输入逻辑
+    if (this.#pendingPrompt !== undefined) {
+      this.#resolvePrompt(key);
+      return;
+    }
+
     switch (key.type) {
       case "ctrl":
         if (key.key === "c") this.#requestExit();
@@ -220,6 +247,28 @@ export class TuiApp {
     this.#resolveExit?.();
   }
 
+  /** 处理权限弹窗里的按键。默认拒绝（Enter / Esc / 其它键都视为拒绝）。 */
+  #resolvePrompt(key: Key): void {
+    const pending = this.#pendingPrompt;
+    if (pending === undefined) return;
+
+    let answer: boolean | undefined;
+
+    if (key.type === "text") {
+      const value = key.value.trim().toLowerCase();
+      if (value === "y" || value === "yes") answer = true;
+      else if (value === "n" || value === "no") answer = false;
+    } else if (key.type === "enter" || key.type === "escape") {
+      answer = false;
+    }
+
+    if (answer === undefined) return;
+
+    this.#pendingPrompt = undefined;
+    pending.resolve(answer);
+    this.#render();
+  }
+
   /* --------------------------- 对话推进 --------------------------- */
 
   async #runTurn(input: string): Promise<void> {
@@ -292,15 +341,47 @@ export class TuiApp {
 
   #compose(width: number, height: number): string[] {
     const bodyHeight = Math.max(1, height - 2);
+    const body = this.#composeBody(width, bodyHeight);
+
+    // 权限弹窗以覆盖层形式压在消息区底部
+    if (this.#pendingPrompt !== undefined) {
+      const overlay = this.#renderPrompt(width);
+      const start = Math.max(0, bodyHeight - overlay.length);
+      for (let i = 0; i < overlay.length && start + i < bodyHeight; i += 1) {
+        body[start + i] = overlay[i]!;
+      }
+    }
+
+    return [this.#composeStatus(width), ...body, this.#composeInput(width)];
+  }
+
+  #renderPrompt(width: number): string[] {
+    const pending = this.#pendingPrompt;
+    if (pending === undefined) return [];
+
+    const inner = Math.max(16, Math.min(width - 2, 74));
+    const color = fg(COLOR.warn);
+    const bar = `${color}│${RESET}`;
+    const row = (text: string): string =>
+      `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
+
     return [
-      this.#composeStatus(width),
-      ...this.#composeBody(width, bodyHeight),
-      this.#composeInput(width),
+      `${color}┌${"─".repeat(inner)}┐${RESET}`,
+      row(` ${BOLD}权限确认${RESET} ${DIM}${pending.request.tool}${RESET}`),
+      row(` ${truncateAnsi(pending.request.summary, inner - 2)}`),
+      row(""),
+      row(
+        ` ${fg(COLOR.ok)}[y]${RESET} 允许    ${fg(COLOR.error)}[n]${RESET} 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+      ),
+      `${color}└${"─".repeat(inner)}┘${RESET}`,
     ];
   }
 
   #composeStatus(width: number): string {
-    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET}`;
+    const sandbox = this.#sandboxEnabled
+      ? `${fg(COLOR.ok)}沙箱${RESET}`
+      : `${fg(COLOR.warn)}无沙箱${RESET}`;
+    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${sandbox}`;
     const right = this.#busy
       ? `${fg(COLOR.busy)}● 运行中${RESET}`
       : `${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${

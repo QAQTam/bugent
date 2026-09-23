@@ -91,13 +91,22 @@ function defaultShell(): string {
   return Bun.which("bash") ?? Bun.which("sh") ?? "/bin/sh";
 }
 
-/** 本地子进程 runner（默认实现）。 */
-export function createShellRunner(shell = defaultShell()): ShellRunner {
+/** 由调用方决定实际启动什么进程（本地 shell / bwrap 沙箱 / …）。 */
+export type ArgvBuilder = (options: ShellRunOptions) => string[];
+
+/**
+ * 通用子进程 runner。
+ *
+ * 沙箱（Phase 6）就是换一个 ArgvBuilder —— 前面加上 bwrap 参数而已，
+ * 超时、中断、输出截断这些逻辑完全复用。
+ */
+export function createProcessRunner(buildArgv: ArgvBuilder): ShellRunner {
   return {
     async run(options: ShellRunOptions): Promise<ShellResult> {
       const startedAt = Bun.nanoseconds();
+      const argv = buildArgv(options);
 
-      const proc = Bun.spawn([shell, "-lc", options.command], {
+      const proc = Bun.spawn(argv, {
         cwd: options.cwd,
         stdin: "ignore",
         stdout: "pipe",
@@ -140,6 +149,11 @@ export function createShellRunner(shell = defaultShell()): ShellRunner {
       }
     },
   };
+}
+
+/** 本地子进程 runner（默认实现，不做任何隔离）。 */
+export function createShellRunner(shell = defaultShell()): ShellRunner {
+  return createProcessRunner((options) => [shell, "-lc", options.command]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -206,6 +220,14 @@ export function createBashTool(
     ].join(" "),
     parameters: BASH_PARAMETERS,
     needsSandbox: true,
+
+    describe(input: unknown): { resource: string; summary: string } {
+      const command =
+        typeof (input as BashInput | null)?.command === "string"
+          ? ((input as BashInput).command as string)
+          : "";
+      return { resource: command, summary: `执行命令：${command}` };
+    },
 
     async run(input: BashInput, ctx: ToolCtx): Promise<string> {
       const command = input.command;
