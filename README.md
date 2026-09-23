@@ -36,6 +36,11 @@ bun run src/index.ts --yes            # 跳过所有权限确认（危险）
 bun run src/index.ts --no-sandbox     # 关闭 bwrap 沙箱
 bun run src/index.ts --allow-network  # 沙箱内允许联网（默认断网）
 
+# 会话持久化（默认写入 ./.bugent/bugent.db）
+bun run src/index.ts --sessions       # 列出已保存的会话
+bun run src/index.ts --resume <id>    # 恢复会话继续聊
+bun run src/index.ts --no-persist     # 不落盘
+
 # 测试与类型检查
 bun test
 bun run typecheck
@@ -57,7 +62,7 @@ bun run typecheck
 | P7 文件工具 | ✅ | read_file / write_file / edit_file；路径约束挡住 `../` 与符号链接逃逸；写入是原子的 |
 | P8 markdown / 高亮 | ✅ | `Bun.markdown.ansi` + `Bun.wrapAnsi` + `Bun.stringWidth`（代码高亮限 ts/js） |
 | P9 多 session | ⬜ | 待做 |
-| P10 落盘与审计 | ⬜ | 待做 |
+| P10 落盘与审计 | ✅ | bun:sqlite + WAL；消息即时落盘、`--resume` 恢复；审计流水含工具调用与权限决策 |
 
 已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter。
 待实现：`openai-responses`、`anthropic-messages`。

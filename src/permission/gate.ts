@@ -23,13 +23,30 @@ export interface GateVerdict {
   reason?: string;
 }
 
+/** 一次权限决策的完整记录，用于审计。 */
+export interface GateDecision {
+  request: PermissionRequest;
+  decision: PermissionDecision;
+  allowed: boolean;
+  reason?: string;
+  at: number;
+}
+
+export type GateDecisionListener = (record: GateDecision) => void;
+
 export class PermissionGate {
   #policy: PermissionPolicy;
   #prompter: PermissionPrompter | undefined;
+  #onDecision: GateDecisionListener | undefined;
 
-  constructor(policy: PermissionPolicy, prompter?: PermissionPrompter) {
+  constructor(
+    policy: PermissionPolicy,
+    prompter?: PermissionPrompter,
+    onDecision?: GateDecisionListener,
+  ) {
     this.#policy = policy;
     this.#prompter = prompter;
+    this.#onDecision = onDecision;
   }
 
   get policy(): PermissionPolicy {
@@ -42,7 +59,18 @@ export class PermissionGate {
 
   async check(request: PermissionRequest): Promise<GateVerdict> {
     const decision = this.#policy.evaluate(request);
+    const verdict = await this.#resolve(request, decision);
+    this.#onDecision?.({
+      request,
+      decision,
+      allowed: verdict.allowed,
+      at: Date.now(),
+      ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+    });
+    return verdict;
+  }
 
+  async #resolve(request: PermissionRequest, decision: PermissionDecision): Promise<GateVerdict> {
     if (decision === "allow") return { allowed: true };
     if (decision === "deny") return { allowed: false, reason: "策略禁止" };
 

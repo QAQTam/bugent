@@ -16,6 +16,10 @@ export interface SessionInit {
   client: ModelClient;
   model: string;
   now?: () => number;
+  /** 每追加一条消息就回调一次（Phase 10 用它即时落盘）。 */
+  onMessage?: (message: StoredMessage) => void;
+  /** 从历史恢复：传入已落盘的消息（含 msgid 0）。 */
+  restore?: readonly StoredMessage[];
 }
 
 export class AgentSession {
@@ -27,6 +31,7 @@ export class AgentSession {
   #nextMsgId: MsgId = SYSTEM_MSGID;
   #turn = 0;
   #now: () => number;
+  #onMessage: ((message: StoredMessage) => void) | undefined;
   #lastSentPrefixHash: string | undefined;
 
   constructor(init: SessionInit) {
@@ -34,9 +39,16 @@ export class AgentSession {
     this.client = init.client;
     this.model = init.model;
     this.#now = init.now ?? (() => Date.now());
+    this.#onMessage = init.onMessage;
 
-    // msgid 0：system prompt。写一次，永不修改。
-    this.#append({ role: "system", origin: "system", parts: [textPart(init.system)] });
+    if (init.restore !== undefined && init.restore.length > 0) {
+      // 恢复路径：历史里已经包含 msgid 0 的 system prompt，不再新建
+      this.#messages = [...init.restore];
+      this.#nextMsgId = lastMsgId(this.#messages) + 1;
+    } else {
+      // msgid 0：system prompt。写一次，永不修改。
+      this.#append({ role: "system", origin: "system", parts: [textPart(init.system)] });
+    }
   }
 
   get messages(): readonly StoredMessage[] {
@@ -137,6 +149,7 @@ export class AgentSession {
     });
 
     this.#messages.push(msg);
+    this.#onMessage?.(msg);
     return msg;
   }
 }

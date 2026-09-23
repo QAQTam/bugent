@@ -68,6 +68,28 @@ interface PendingCall {
   args: string;
 }
 
+/** 把多组 hooks 合成一组（TUI 渲染 + 审计落盘互不干扰）。 */
+export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
+  const active = groups.filter((group): group is LoopHooks => group !== undefined);
+  return {
+    onText: (delta) => {
+      for (const group of active) group.onText?.(delta);
+    },
+    onAssistant: (message) => {
+      for (const group of active) group.onAssistant?.(message);
+    },
+    onToolCall: (call) => {
+      for (const group of active) group.onToolCall?.(call);
+    },
+    onToolResult: (call, result) => {
+      for (const group of active) group.onToolResult?.(call, result);
+    },
+    onUsage: (usage) => {
+      for (const group of active) group.onUsage?.(usage);
+    },
+  };
+}
+
 /**
  * 用户发一句话并推进一轮。
  *
