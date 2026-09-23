@@ -6,7 +6,12 @@
  */
 
 import type { ModelClient } from "./types.ts";
-import { createOpenAIChatClient, type OpenAIChatOptions } from "./adapters/openai-chat.ts";
+import {
+  createOpenAIChatClient,
+  type OpenAIChatOptions,
+  type ProviderProxy,
+  type ProviderTlsConfig,
+} from "./adapters/openai-chat.ts";
 import { createMockClient } from "./adapters/mock.ts";
 
 export type EndpointKind =
@@ -23,6 +28,10 @@ export interface ProviderConfig {
   apiKey?: string | undefined;
   headers?: Record<string, string> | undefined;
   extraBody?: Record<string, unknown> | undefined;
+  /** 显式代理；false 表示不走代理。 */
+  proxy?: ProviderProxy | undefined;
+  /** TLS 配置；字段与 Bun.fetch 的 tls 扩展兼容。 */
+  tls?: ProviderTlsConfig | undefined;
 }
 
 export interface ModelRef {
@@ -39,6 +48,8 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
     if (config.apiKey !== undefined) options.apiKey = config.apiKey;
     if (config.headers !== undefined) options.headers = config.headers;
     if (config.extraBody !== undefined) options.extraBody = config.extraBody;
+    if (config.proxy !== undefined) options.proxy = config.proxy;
+    if (config.tls !== undefined) options.tls = config.tls;
     return createOpenAIChatClient(model, options);
   },
 

@@ -15,12 +15,58 @@ import type {
 } from "../types.ts";
 import { messageText } from "../types.ts";
 
+export type ProviderProxy = string | false;
+
+export interface ProviderTlsConfig {
+  rejectUnauthorized?: boolean;
+  ca?: string;
+  cert?: string;
+  key?: string;
+  passphrase?: string;
+  serverName?: string;
+}
+
 export interface OpenAIChatOptions {
   baseUrl?: string;
   apiKey?: string;
   headers?: Record<string, string>;
   /** 额外塞进 body 的字段（如 `{"reasoning_effort":"high"}`）。 */
   extraBody?: Record<string, unknown>;
+  /** 显式代理；false 表示直连。 */
+  proxy?: ProviderProxy;
+  /** TLS 配置；只暴露字符串/布尔值，便于 TOML 表达。 */
+  tls?: ProviderTlsConfig;
+}
+
+/**
+ * Bun.fetch 支持 `proxy` / `tls` 扩展，但当前安装的 @types/bun 1.4.2
+ * 还没把 `proxy: false` 写进 RequestInit；用交叉类型保留类型检查。
+ */
+type FetchInit = RequestInit & {
+  proxy?: ProviderProxy;
+  tls?: ProviderTlsConfig;
+};
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+/**
+ * Bun 1.4.2 实测：即使 fetch 传了 `proxy: false`，HTTP_PROXY 仍可能生效；
+ * `NO_PROXY` 才是可靠的绕过方式。对本地 endpoint 自动补齐回环地址，
+ * 避免开发机上的全局代理把 127.0.0.1:8787 也劫走。
+ */
+function ensureLoopbackNoProxy(): void {
+  const current = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
+  const entries = current
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  for (const host of ["127.0.0.1", "localhost", "::1"]) {
+    if (!entries.includes(host)) entries.push(host);
+  }
+  process.env.NO_PROXY = entries.join(",");
 }
 
 /* ------------------------------------------------------------------ */
@@ -215,6 +261,14 @@ export function mapStreamEvent(
 export function createOpenAIChatClient(model: string, options: OpenAIChatOptions = {}): ModelClient {
   const baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
   const url = `${baseUrl}/chat/completions`;
+  const target = new URL(url);
+  const loopback = isLoopbackHost(target.hostname);
+
+  // 只有“没显式指定代理”或“显式要求直连”时，才帮本地 endpoint 绕过
+  // 环境代理；用户明确给了代理地址就尊重用户。
+  if (loopback && (options.proxy === undefined || options.proxy === false)) {
+    ensureLoopbackNoProxy();
+  }
 
   return {
     id: `openai-chat/${model}`,
@@ -236,12 +290,15 @@ export function createOpenAIChatClient(model: string, options: OpenAIChatOptions
       };
       if (options.apiKey !== undefined) headers.authorization = `Bearer ${options.apiKey}`;
 
-      const res = await fetch(url, {
+      const init: FetchInit = {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         ...(req.signal !== undefined ? { signal: req.signal } : {}),
-      });
+        ...(options.proxy !== undefined ? { proxy: options.proxy } : {}),
+        ...(options.tls !== undefined ? { tls: options.tls } : {}),
+      };
+      const res = await fetch(url, init);
 
       if (!res.ok || res.body === null) {
         const detail = await res.text().catch(() => "");

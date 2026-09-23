@@ -72,6 +72,40 @@ function asStringArray(value: unknown, field: string): string[] | undefined {
   return value as string[];
 }
 
+function asProxy(value: unknown, field: string): ProviderConfig["proxy"] {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" || value === false) return value;
+  throw new Error(`config.toml: ${field} 必须是代理 URL 字符串或 false`);
+}
+
+function asTls(raw: unknown, field: string): ProviderConfig["tls"] {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`config.toml: ${field} 必须是表`);
+  }
+
+  const table = raw as Raw;
+  const tls: NonNullable<ProviderConfig["tls"]> = {};
+  const rejectUnauthorized = asBool(
+    pick(table, "reject_unauthorized", "rejectUnauthorized"),
+    `${field}.reject_unauthorized`,
+  );
+  if (rejectUnauthorized !== undefined) tls.rejectUnauthorized = rejectUnauthorized;
+
+  const ca = asString(table.ca, `${field}.ca`);
+  if (ca !== undefined) tls.ca = ca;
+  const cert = asString(table.cert, `${field}.cert`);
+  if (cert !== undefined) tls.cert = cert;
+  const key = asString(table.key, `${field}.key`);
+  if (key !== undefined) tls.key = key;
+  const passphrase = asString(table.passphrase, `${field}.passphrase`);
+  if (passphrase !== undefined) tls.passphrase = passphrase;
+  const serverName = asString(pick(table, "server_name", "serverName"), `${field}.server_name`);
+  if (serverName !== undefined) tls.serverName = serverName;
+
+  return tls;
+}
+
 const DECISIONS: readonly PermissionDecision[] = ["allow", "ask", "deny"];
 
 function parseProvider(raw: unknown, index: number): ProviderConfig {
@@ -85,19 +119,21 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
   if (id === undefined) throw new Error(`config.toml: ${at}.id 必填`);
 
   const endpoint = (asString(table.endpoint, `${at}.endpoint`) ?? "openai-chat") as EndpointKind;
+  const baseUrl = asString(pick(table, "base_url", "baseUrl"), `${at}.base_url`);
+  const apiKey = asString(pick(table, "api_key", "apiKey"), `${at}.api_key`);
+  const proxy = asProxy(table.proxy, `${at}.proxy`);
+  const tls = asTls(table.tls, `${at}.tls`);
 
   return {
     id,
     endpoint,
-    ...(asString(pick(table, "base_url", "baseUrl"), `${at}.base_url`) !== undefined
-      ? { baseUrl: asString(pick(table, "base_url", "baseUrl"), `${at}.base_url`) }
-      : {}),
-    ...(asString(pick(table, "api_key", "apiKey"), `${at}.api_key`) !== undefined
-      ? { apiKey: asString(pick(table, "api_key", "apiKey"), `${at}.api_key`) }
-      : {}),
-    ...(pick(table, "extra_body", "extraBody") !== undefined
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
+    ...(table.extra_body !== undefined || table.extraBody !== undefined
       ? { extraBody: pick(table, "extra_body", "extraBody") as Record<string, unknown> }
       : {}),
+    ...(proxy !== undefined ? { proxy } : {}),
+    ...(tls !== undefined ? { tls } : {}),
   };
 }
 
@@ -240,6 +276,14 @@ id = "openai"
 endpoint = "openai-chat"
 base_url = "http://127.0.0.1:8787/v1"
 api_key = ""
+# 代理：不写时遵循 HTTP_PROXY/HTTPS_PROXY；本地 127.0.0.1 会自动绕过。
+# proxy = "http://127.0.0.1:7890"
+# proxy = false
+
+# TLS（可选；字符串字段直接放 PEM 内容）
+# [providers.tls]
+# reject_unauthorized = false
+# ca = "-----BEGIN CERTIFICATE-----..."
 
 # 开启思考链路：加了这个参数模型才会返回 reasoning_content
 # （实测 deepseek-v4.1-flash 必须显式开启）
