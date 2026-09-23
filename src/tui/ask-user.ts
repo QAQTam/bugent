@@ -67,6 +67,16 @@ export class AskUserFlow {
   #typing = false;
   #buffer = "";
 
+  /**
+   * 上一次 render 时，输出行号 -> 选项下标 的映射。
+   *
+   * 鼠标只给到屏幕坐标，得先知道"点到的那一行是哪个选项"才能处理点击。
+   * 每次 render 重建，保证和当前帧一致。
+   */
+  #optionRows = new Map<number, number>();
+  /** 汇总页：输出行号 -> 问题下标（点一行跳回那题）。 */
+  #summaryRows = new Map<number, number>();
+
   #escArmed = false;
   #escTimer: unknown;
 
@@ -297,10 +307,44 @@ export class AskUserFlow {
 
   /** 生成对话框内容（不含外框，外框由 TuiApp 统一画）。 */
   render(width: number): string[] {
+    this.#optionRows.clear();
+    this.#summaryRows.clear();
+
     const inner = Math.max(20, width - 4);
     if (this.isSummary) return this.#renderSummary(inner);
     if (this.#typing) return this.#renderTyping(inner);
     return this.#renderQuestion(inner);
+  }
+
+  /**
+   * 鼠标点击某一行（行号是 render() 输出的下标）。
+   * 返回是否命中 —— 没命中就让调用方继续处理（比如滚动）。
+   */
+  clickLine(lineIndex: number): boolean {
+    // 问题页：点选项 = 选中（单选）或勾选（多选）
+    const optionIndex = this.#optionRows.get(lineIndex);
+    if (optionIndex !== undefined) {
+      const question = this.questions[this.#page];
+      if (question === undefined) return false;
+
+      this.#cursor = optionIndex;
+      if (question.multiple === true) this.#toggle(this.#page, optionIndex);
+      else this.#select(this.#page, [optionIndex]);
+
+      this.#onChange?.();
+      return true;
+    }
+
+    // 汇总页：点某一题跳回那一题
+    const questionIndex = this.#summaryRows.get(lineIndex);
+    if (questionIndex !== undefined) {
+      this.#page = questionIndex;
+      this.#syncCursor();
+      this.#onChange?.();
+      return true;
+    }
+
+    return false;
   }
 
   #pageHeader(question: AskUserQuestion, inner: number): string {
@@ -323,6 +367,9 @@ export class AskUserFlow {
       lines.push(`${DIM}（本题无选项，按 e 直接输入回答）${RESET}`);
     } else {
       for (let index = 0; index < question.options.length; index += 1) {
+        // 记录这一行是哪个选项，供鼠标点击命中
+        this.#optionRows.set(lines.length, index);
+
         const active = index === this.#cursor;
         const chosen = answer.selected.includes(index);
         const marker = active ? `${fg(COLOR.prompt)}▸${RESET}` : " ";
@@ -342,8 +389,8 @@ export class AskUserFlow {
     lines.push("");
     lines.push(
       multiple
-        ? `${DIM}↑↓ 移动   Space 勾选   Enter 下一题   e 自定义   ←→ 翻页${RESET}`
-        : `${DIM}↑↓ 选择   Enter 下一题   e 自定义   ←→ 翻页${RESET}`,
+        ? `${DIM}↑↓ 移动   Space 勾选   Enter 下一题   e 自定义   ←→ 翻页   鼠标点击可勾选${RESET}`
+        : `${DIM}↑↓ 选择   Enter 下一题   e 自定义   ←→ 翻页   鼠标点击可选择${RESET}`,
     );
     lines.push(...this.#escHint());
     return lines;
@@ -369,6 +416,7 @@ export class AskUserFlow {
       const question = this.questions[index]!;
       const answer = this.#answers[index]!;
 
+      this.#summaryRows.set(lines.length, index);
       lines.push(`${BOLD}${index + 1}.${RESET} ${truncateAnsi(question.question, inner - 4)}`);
 
       const picked = answer.selected
@@ -387,7 +435,7 @@ export class AskUserFlow {
       lines.push("");
     }
 
-    lines.push(`${DIM}Enter 确认提交   ← 返回上一页${RESET}`);
+    lines.push(`${DIM}Enter 确认提交   ← 返回上一页   鼠标点击某题可跳回去改${RESET}`);
     lines.push(...this.#escHint());
     return lines;
   }

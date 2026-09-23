@@ -100,6 +100,8 @@ export class TuiApp {
   /** 进行中的 ask_user 问答流程。 */
   #askFlow: AskUserFlow | undefined;
   #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
+  /** 对话框覆盖层在 body 里的起始行（-1 表示当前没有对话框）。鼠标命中要用。 */
+  #dialogTopRow = -1;
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; todos: Todo[] } | undefined;
@@ -242,6 +244,13 @@ export class TuiApp {
   #handleKey(key: Key): void {
     // ask_user 问答优先：它是多页表单，有自己的按键语义
     if (this.#askFlow !== undefined) {
+      // 但鼠标要放行 —— 点击选项是问答的核心交互之一，
+      // 如果在这里一并吞掉，#handleMouse 永远收不到事件
+      if (key.type === "mouse") {
+        this.#handleMouse(key);
+        return;
+      }
+
       const outcome = this.#askFlow.handleKey(key);
       if (outcome.kind === "submit") this.#finishAsk(outcome.answers);
       else if (outcome.kind === "abort") this.#finishAsk(undefined);
@@ -356,6 +365,16 @@ export class TuiApp {
     // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
     const bodyRow = key.y - 2;
     if (bodyRow < 0) return;
+
+    // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
+    // 覆盖层第 0 行是上边框，所以 flow 行号要再减 1。
+    if (this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
+      const flowLine = bodyRow - this.#dialogTopRow - 1;
+      if (flowLine >= 0 && this.#askFlow.clickLine(flowLine)) {
+        this.#render(true);
+        return;
+      }
+    }
 
     const bodyIndex = this.#bodyWindowStart + bodyRow;
     for (const hit of this.#toolHits) {
@@ -563,9 +582,12 @@ export class TuiApp {
     if (this.#pendingDialog !== undefined || this.#askFlow !== undefined) {
       const overlay = this.#renderDialog(width);
       const start = Math.max(0, bodyHeight - overlay.length);
+      this.#dialogTopRow = start;
       for (let i = 0; i < overlay.length && start + i < bodyHeight; i += 1) {
         body[start + i] = overlay[i]!;
       }
+    } else {
+      this.#dialogTopRow = -1;
     }
 
     return [

@@ -354,6 +354,79 @@ describe("ask_user · Esc 双击终止", () => {
   });
 });
 
+describe("ask_user · 鼠标点击", () => {
+  const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+  /** 找到某个选项标签所在的行号（render 输出的下标）。 */
+  function rowOf(flow: AskUserFlow, label: string, width = 70): number {
+    return flow.render(width).findIndex((line) => strip(line).includes(`${label}.`));
+  }
+
+  test("单选：点选项即选中", () => {
+    const { flow } = makeFlow();
+    const row = rowOf(flow, "C");
+
+    expect(flow.clickLine(row)).toBe(true);
+    expect(flow.answers[0]?.selected).toEqual([2]);
+  });
+
+  test("多选：点选项即勾选，再点取消", () => {
+    const { flow } = makeFlow();
+    flow.handleKey(key("right")); // 第 2 题（多选）
+
+    const rowB = rowOf(flow, "B");
+    expect(flow.clickLine(rowB)).toBe(true);
+    expect(flow.answers[1]?.selected).toEqual([1]);
+
+    expect(flow.clickLine(rowB)).toBe(true);
+    expect(flow.answers[1]?.selected).toEqual([]);
+  });
+
+  test("点非选项行返回 false（让调用方继续处理，比如滚动）", () => {
+    const { flow } = makeFlow();
+    expect(flow.clickLine(0)).toBe(false); // 标题行
+    expect(flow.clickLine(999)).toBe(false);
+  });
+
+  test("行号映射每帧重建，翻页后不会错位", () => {
+    const { flow } = makeFlow();
+
+    // 第 1 题：点 B
+    flow.clickLine(rowOf(flow, "B"));
+    expect(flow.answers[0]?.selected).toEqual([1]);
+
+    flow.handleKey(key("right")); // 到第 2 题
+    // 第 2 题的行号映射必须已经刷新 —— 点它自己的 C
+    flow.clickLine(rowOf(flow, "C"));
+    expect(flow.answers[1]?.selected).toEqual([2]);
+    expect(flow.answers[0]?.selected).toEqual([1]); // 第 1 题不受影响
+  });
+
+  test("汇总页：点某一题跳回那一题", () => {
+    const { flow } = makeFlow();
+    for (let i = 0; i < 10; i += 1) flow.handleKey(key("right"));
+    expect(flow.isSummary).toBe(true);
+
+    const row = flow.render(70).findIndex((line) => strip(line).includes("2."));
+    expect(flow.clickLine(row)).toBe(true);
+    expect(flow.isSummary).toBe(false);
+    expect(flow.page).toBe(1);
+  });
+
+  test("汇总页点非问题行不跳转", () => {
+    const { flow } = makeFlow();
+    for (let i = 0; i < 10; i += 1) flow.handleKey(key("right"));
+    expect(flow.clickLine(0)).toBe(false); // 标题行
+  });
+
+  test("输入态下不响应选项点击（避免误触）", () => {
+    const { flow } = makeFlow();
+    flow.handleKey(text("e"));
+    expect(flow.isTyping).toBe(true);
+    expect(flow.clickLine(3)).toBe(false);
+  });
+});
+
 describe("formatAnswers", () => {
   test("渲染选择与补充", () => {
     const text = formatAnswers([
