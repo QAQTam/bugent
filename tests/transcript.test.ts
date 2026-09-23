@@ -82,6 +82,28 @@ describe("P5 · Transcript 显示块归并", () => {
     expect(toolsOf(t)[0]?.ok).toBe(false);
   });
 
+  test("itemVersion 在流式文本、进度、展开和完成时递增", () => {
+    const t = new Transcript();
+
+    t.appendAssistantText("a");
+    const assistantBefore = t.itemVersion(0);
+    t.appendAssistantText("b");
+    expect(t.itemVersion(0)).toBe(assistantBefore + 1);
+
+    t.startTool({ id: "c1", name: "bash", args: {} });
+    const toolIndex = t.items.length - 1;
+    expect(t.itemVersion(toolIndex)).toBe(0);
+
+    t.appendToolProgress("c1", "progress");
+    expect(t.itemVersion(toolIndex)).toBe(1);
+
+    t.toggleToolExpanded("c1");
+    expect(t.itemVersion(toolIndex)).toBe(2);
+
+    t.finishTool("c1", "done", true);
+    expect(t.itemVersion(toolIndex)).toBe(3);
+  });
+
   test("mergeUsage 累加 token，cached 只在有值时出现", () => {
     const a = Transcript.mergeUsage({ input: 10, output: 2 }, { input: 5, output: 1 });
     expect(a).toEqual({ input: 15, output: 3 });

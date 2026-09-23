@@ -28,7 +28,7 @@ import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
-import { sliceViewport } from "./viewport.ts";
+import { maxScrollOffset, TranscriptLayout } from "./transcript-layout.ts";
 import { setHighlightReadyHandler } from "./highlight.ts";
 import {
   AskUserFlow,
@@ -94,11 +94,20 @@ export class TuiApp {
   #createSession: (() => AgentSession) | undefined;
 
   #transcript = new Transcript();
+  /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
+  #layout = new TranscriptLayout<DisplayItem>();
   /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
   #thinking = new ThinkingBuffer();
   #input = "";
   #cursor = 0;
+  /** 距底部的行偏移；0 表示跟随最新消息。 */
   #scrollOffset = 0;
+  /** 用户是否处于“钉底跟随”状态。 */
+  #followTail = true;
+  /** 上一次布局总行数，用于回看时抵消新增内容造成的位移。 */
+  #lastLayoutTotal = 0;
+  /** 上一次消息区高度，供滚动和历史上限计算。 */
+  #bodyHeight = 1;
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
   #abort: AbortController | undefined;
@@ -441,7 +450,10 @@ export class TuiApp {
   }
 
   #scrollBy(delta: number): void {
-    this.#scrollOffset = Math.max(0, this.#scrollOffset + delta);
+    const max = maxScrollOffset(this.#layout.totalLines, this.#bodyHeight);
+    if (delta > 0) this.#followTail = false;
+    this.#scrollOffset = Math.max(0, Math.min(max, this.#scrollOffset + delta));
+    if (this.#scrollOffset === 0) this.#followTail = true;
     this.#render();
   }
 
@@ -460,6 +472,7 @@ export class TuiApp {
     this.#input = "";
     this.#cursor = 0;
     this.#scrollOffset = 0;
+    this.#followTail = true;
     this.#transcript.pushUser(text);
     this.#render();
     void this.#runTurn(text);
@@ -481,10 +494,13 @@ export class TuiApp {
     this.#input = "";
     this.#cursor = 0;
     this.#scrollOffset = 0;
+    this.#followTail = true;
+    this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
     this.#stopTodoShimmer();
     this.#session = this.#createSession();
     this.#transcript = new Transcript();
+    this.#layout = new TranscriptLayout<DisplayItem>();
     this.#transcript.pushNotice(
       `已开始新对话：\`${this.#session.id}\`\n\n用 \`/resume\` 之外的会话请重启并加 \`--resume <id>\`。`,
     );
@@ -835,37 +851,43 @@ export class TuiApp {
    * 覆盖在第一行。对 bash 的长输出、read_file 的长文件同样有效。
    */
   #composeBody(width: number, height: number): string[] {
-    const all: string[] = [];
-    const spans: { callId?: string; start: number; end: number; header: string }[] = [];
+    this.#bodyHeight = height;
 
     // 左侧留白：内容按窄 width 渲染，再统一缩进，避免文字贴着终端边缘
     const indent = " ".repeat(BODY_INDENT);
     const innerWidth = Math.max(1, width - BODY_INDENT);
 
-    for (const item of this.#transcript.items) {
-      const start = all.length;
-      const rendered = this.#renderItem(item, innerWidth).map((line) =>
-        line.length > 0 ? indent + line : line,
-      );
-      all.push(...rendered);
-
-      spans.push({
-        start,
-        end: all.length - 1,
-        header: rendered[0] ?? "",
-        ...(item.kind === "tool" ? { callId: item.callId } : {}),
-      });
-
-      all.push("");
-    }
-
-    // 记录工具条目占用的行区间，供鼠标点击命中
-    this.#toolHits = spans.flatMap((span) =>
-      span.callId === undefined ? [] : [{ callId: span.callId, start: span.start, end: span.end }],
+    // 只有内容版本变化的 block 会重新渲染；滚动本身只重新取窗口。
+    this.#layout.update(
+      this.#transcript.items,
+      innerWidth,
+      (_item, index) => this.#transcript.itemVersion(index),
+      (item, itemWidth) =>
+        this.#renderItem(item, itemWidth).map((line) => (line.length > 0 ? indent + line : line)),
+      {
+        callIdOf: (item) => (item.kind === "tool" ? item.callId : undefined),
+        globalVersion: this.#transcript.revision,
+      },
     );
 
-    const viewport = sliceViewport(all, spans, height, this.#scrollOffset);
+    const total = this.#layout.totalLines;
+    const delta = total - this.#lastLayoutTotal;
+    // 用户正在回看时，新增/收缩内容不能把视口推走。
+    if (!this.#followTail && delta !== 0) this.#scrollOffset += delta;
+    this.#lastLayoutTotal = total;
+
+    const maxOffset = maxScrollOffset(total, height);
+    this.#scrollOffset = Math.max(0, Math.min(maxOffset, this.#scrollOffset));
+    if (this.#scrollOffset === 0) this.#followTail = true;
+
+    const viewport = this.#layout.window(height, this.#scrollOffset);
     this.#bodyWindowStart = viewport.start;
+    this.#toolHits = viewport.blocks.flatMap((block) =>
+      block.callId === undefined
+        ? []
+        : [{ callId: block.callId, start: block.start, end: block.contentEnd }],
+    );
+
     return viewport.lines;
   }
 

@@ -42,6 +42,10 @@ export function keepLastLines(text: string, maxLines: number): string {
 
 export class Transcript {
   #items: DisplayItem[] = [];
+  /** 与 #items 对齐的内容版本；布局缓存用它判断某个块是否要重渲染。 */
+  #versions: number[] = [];
+  /** 全局内容版本；布局层可在没有变化时直接跳过重建。 */
+  #revision = 0;
   /** 当前正在接收流式文本的 assistant 块；undefined 表示下段文本要开新块。 */
   #streamingIndex: number | undefined;
 
@@ -49,8 +53,29 @@ export class Transcript {
     return this.#items;
   }
 
+  /** 任意条目内容变化时递增。 */
+  get revision(): number {
+    return this.#revision;
+  }
+
+  /** 某个显示条目的内容版本。 */
+  itemVersion(index: number): number {
+    return this.#versions[index] ?? 0;
+  }
+
+  #push(item: DisplayItem): void {
+    this.#items.push(item);
+    this.#versions.push(0);
+    this.#revision += 1;
+  }
+
+  #bump(index: number): void {
+    this.#versions[index] = (this.#versions[index] ?? 0) + 1;
+    this.#revision += 1;
+  }
+
   pushUser(text: string): void {
-    this.#items.push({ kind: "user", text });
+    this.#push({ kind: "user", text });
   }
 
   /** 流式文本增量。同一段回复的增量会累积到同一个显示块。 */
@@ -59,13 +84,16 @@ export class Transcript {
 
     let index = this.#streamingIndex;
     if (index === undefined) {
-      this.#items.push({ kind: "assistant", text: "" });
+      this.#push({ kind: "assistant", text: "" });
       index = this.#items.length - 1;
       this.#streamingIndex = index;
     }
 
     const item = this.#items[index];
-    if (item !== undefined && item.kind === "assistant") item.text += delta;
+    if (item !== undefined && item.kind === "assistant") {
+      item.text += delta;
+      this.#bump(index);
+    }
   }
 
   /**
@@ -77,7 +105,7 @@ export class Transcript {
   }
 
   startTool(call: ToolCall): void {
-    this.#items.push({
+    this.#push({
       kind: "tool",
       callId: call.id,
       name: call.name,
@@ -92,9 +120,11 @@ export class Transcript {
 
   /** 切换展开状态；返回是否命中了某个工具条目。 */
   toggleToolExpanded(callId: string): boolean {
-    for (const item of this.#items) {
-      if (item.kind === "tool" && item.callId === callId) {
+    for (let i = 0; i < this.#items.length; i += 1) {
+      const item = this.#items[i];
+      if (item !== undefined && item.kind === "tool" && item.callId === callId) {
         item.expanded = !item.expanded;
+        this.#bump(i);
         return true;
       }
     }
@@ -108,6 +138,7 @@ export class Transcript {
       const item = this.#items[i];
       if (item !== undefined && item.kind === "tool" && item.callId === callId && !item.done) {
         item.progress = keepLastLines(item.progress + chunk, TOOL_PROGRESS_LINES);
+        this.#bump(i);
         return;
       }
     }
@@ -120,17 +151,18 @@ export class Transcript {
         item.output = output;
         item.ok = ok;
         item.done = true;
+        this.#bump(i);
         return;
       }
     }
   }
 
   pushError(text: string): void {
-    this.#items.push({ kind: "error", text });
+    this.#push({ kind: "error", text });
   }
 
   pushNotice(text: string): void {
-    this.#items.push({ kind: "assistant", text });
+    this.#push({ kind: "assistant", text });
   }
 
   /** 供 TuiApp 记录 token 用量（不进条目流）。 */
