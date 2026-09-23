@@ -96,6 +96,10 @@ export interface ShellResult {
   aborted: boolean;
   truncated: boolean;
   durationMs: number;
+  /** 子进程收到的信号；正常退出为 null。 */
+  signalCode?: string | number | null;
+  /** Bun.spawn 提供的进程资源用量；平台不支持时可能为 undefined。 */
+  resourceUsage?: Bun.ResourceUsage;
 }
 
 /** 执行层抽象：默认是本地子进程，Phase 6 会换成 bwrap 沙箱版本。 */
@@ -214,26 +218,51 @@ export function createProcessRunner(
           }).env
         : { ...process.env, ...(options.env ?? {}) };
 
+      // 已取消的 signal 不应再启动进程；Bun.spawn 对已 abort 的 signal
+      // 会直接抛错，这里显式返回统一的 aborted 结果。
+      if (options.signal.aborted) {
+        return {
+          stdout: "",
+          stderr: "",
+          exitCode: null,
+          timedOut: false,
+          aborted: true,
+          truncated: false,
+          durationMs: 0,
+          signalCode: null,
+        };
+      }
+
+      let exitSignalCode: string | number | null = null;
       const proc = Bun.spawn(argv, {
         cwd: options.cwd,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
         env,
+        // 超时与外部取消都交给 Bun：统一用 SIGKILL，避免 shell 捕获信号后
+        // 继续留下子进程。读取/落盘失败时仍由下面 catch 兜底 kill。
+        timeout: options.timeoutMs,
+        killSignal: "SIGKILL",
+        signal: options.signal,
+        onExit: (_proc, _exitCode, signalCode) => {
+          exitSignalCode = signalCode;
+        },
       });
 
       let timedOut = false;
       let aborted = false;
+      // Bun 自己负责 kill；这个 timer 只记录“确实触发了 timeout”，
+      // 不能靠 proc.killed 判断（正常退出时它也可能为 true）。
       const timer = setTimeout(() => {
         timedOut = true;
-        proc.kill("SIGKILL");
       }, options.timeoutMs);
 
       const onAbort = (): void => {
         aborted = true;
-        proc.kill("SIGKILL");
       };
       options.signal.addEventListener("abort", onAbort, { once: true });
+      if (options.signal.aborted) aborted = true;
 
       try {
         const [stdout, stderr] = await Promise.all([
@@ -254,6 +283,13 @@ export function createProcessRunner(
         ]);
         const exitCode = await proc.exited;
 
+        // resourceUsage 在 exited 之后偶尔要等一个事件循环拍才可见。
+        let resourceUsage = proc.resourceUsage();
+        if (resourceUsage === undefined) {
+          await Bun.sleep(0);
+          resourceUsage = proc.resourceUsage();
+        }
+
         return {
           stdout: stdout.text,
           stderr: stderr.text,
@@ -262,6 +298,8 @@ export function createProcessRunner(
           aborted,
           truncated: stdout.truncated || stderr.truncated,
           durationMs: (Bun.nanoseconds() - startedAt) / 1e6,
+          signalCode: exitSignalCode ?? proc.signalCode,
+          ...(resourceUsage !== undefined ? { resourceUsage } : {}),
         };
       } catch (error) {
         // 读取/落盘失败时不能让子进程继续跑并占着管道。

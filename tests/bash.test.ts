@@ -87,4 +87,52 @@ describe("P3 · bash 工具", () => {
     expect(tool.needsSandbox).toBe(true);
     expect(tool.parameters.required).toEqual(["command"]);
   });
+
+  test("runner 返回原生 signalCode 与 resourceUsage", async () => {
+    const runner = createShellRunner();
+    const result = await runner.run({
+      command: "true",
+      cwd: process.cwd(),
+      timeoutMs: 5_000,
+      maxOutputBytes: 1024,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.signalCode).toBeNull();
+    expect(result.resourceUsage).toBeDefined();
+    expect(result.resourceUsage!.maxRSS).toBeGreaterThan(0);
+  });
+
+  test("超时由 Bun.spawn 原生 timeout 终止", async () => {
+    const runner = createShellRunner();
+    const result = await runner.run({
+      command: "sleep 1",
+      cwd: process.cwd(),
+      timeoutMs: 80,
+      maxOutputBytes: 1024,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.timedOut).toBe(true);
+    expect(result.signalCode).toBe("SIGKILL");
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("已经 aborted 的 signal 不启动进程", async () => {
+    const runner = createShellRunner();
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runner.run({
+      command: "sleep 1",
+      cwd: process.cwd(),
+      timeoutMs: 5_000,
+      maxOutputBytes: 1024,
+      signal: controller.signal,
+    });
+
+    expect(result.aborted).toBe(true);
+    expect(result.exitCode).toBeNull();
+    expect(result.durationMs).toBe(0);
+  });
 });
