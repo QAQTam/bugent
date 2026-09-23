@@ -39,6 +39,12 @@ import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
+import {
+  composeDialogActions,
+  hitDialogActionAtLine,
+  type DialogAction,
+  type DialogButtonRowHit,
+} from "./dialog.ts";
 
 /** 输入面板的行数（带底色的"阴影"区块）。 */
 export const INPUT_ROWS = 4;
@@ -57,6 +63,8 @@ interface PendingDialog {
   body: string[];
   /** 按键提示。 */
   hint: string;
+  /** 可鼠标点击的按钮。键盘路径仍然保留。 */
+  actions: readonly DialogAction[];
   resolve: (value: boolean) => void;
 }
 
@@ -105,6 +113,8 @@ export class TuiApp {
   #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
   /** 对话框覆盖层在 body 里的起始行（-1 表示当前没有对话框）。鼠标命中要用。 */
   #dialogTopRow = -1;
+  /** 当前权限弹窗按钮的鼠标命中区间（行号相对覆盖层顶部）。 */
+  #dialogButtonHits: DialogButtonRowHit[] = [];
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; todos: Todo[] } | undefined;
@@ -144,6 +154,10 @@ export class TuiApp {
       title: `权限确认 · ${request.tool}`,
       body: [request.summary],
       hint: `[y] 允许    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+      actions: [
+        { label: "允许", value: true, tone: "ok" },
+        { label: "拒绝", value: false, tone: "error" },
+      ],
     });
   }
 
@@ -158,6 +172,10 @@ export class TuiApp {
       title: `需要授权 · ${describeCapability(escalation.capability)}`,
       body: [escalation.reason, ...(escalation.details ?? [])],
       hint: `[y] 允许这一次    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+      actions: [
+        { label: "允许这一次", value: true, tone: "ok" },
+        { label: "拒绝", value: false, tone: "error" },
+      ],
     });
   }
 
@@ -174,6 +192,10 @@ export class TuiApp {
         `当前档位（${this.#mode}）不允许，需要升到 ${needed}`,
       ],
       hint: `[y] 升到 ${needed}（本次会话）    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+      actions: [
+        { label: "允许升档", value: true, tone: "ok" },
+        { label: "拒绝", value: false, tone: "error" },
+      ],
     });
   }
 
@@ -260,9 +282,11 @@ export class TuiApp {
       return;
     }
 
-    // 有对话框时，所有按键都归它 —— 不能漏到下面的输入逻辑
+    // 有对话框时，所有按键都归它 —— 不能漏到下面的输入逻辑。
+    // 鼠标要交给统一的鼠标路由，才能命中按钮。
     if (this.#pendingDialog !== undefined) {
-      this.#resolveDialog(key);
+      if (key.type === "mouse") this.#handleMouse(key);
+      else this.#resolveDialog(key);
       return;
     }
 
@@ -369,6 +393,17 @@ export class TuiApp {
     const bodyRow = key.y - 2;
     if (bodyRow < 0) return;
 
+    // 权限 / 能力 / 升档弹窗：点击按钮直接确认或拒绝。
+    if (this.#pendingDialog !== undefined && this.#dialogTopRow >= 0) {
+      const dialogLine = bodyRow - this.#dialogTopRow;
+      const column = key.x - 1;
+      const answer = hitDialogActionAtLine(this.#dialogButtonHits, dialogLine, column);
+      if (answer !== undefined) {
+        this.#finishDialog(answer);
+        return;
+      }
+    }
+
     // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
     // 覆盖层第 0 行是上边框，所以 flow 行号要再减 1。
     if (this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
@@ -469,8 +504,16 @@ export class TuiApp {
     }
 
     if (answer === undefined) return;
+    this.#finishDialog(answer);
+  }
+
+  /** 结束当前对话框并返回布尔结果；鼠标与键盘共用。 */
+  #finishDialog(answer: boolean): void {
+    const dialog = this.#pendingDialog;
+    if (dialog === undefined) return;
 
     this.#pendingDialog = undefined;
+    this.#dialogButtonHits = [];
     dialog.resolve(answer);
     this.#render(true);
   }
@@ -591,6 +634,7 @@ export class TuiApp {
       }
     } else {
       this.#dialogTopRow = -1;
+      this.#dialogButtonHits = [];
     }
 
     return [
@@ -618,6 +662,7 @@ export class TuiApp {
   }
 
   #renderDialog(width: number): string[] {
+    this.#dialogButtonHits = [];
     const inner = Math.max(16, Math.min(width - 2, 74));
     const color = fg(COLOR.warn);
     const bar = `${color}│${RESET}`;
@@ -644,6 +689,12 @@ export class TuiApp {
       lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
     }
     lines.push(row(""));
+
+    const actions = composeDialogActions(dialog.actions);
+    lines.push(row(actions.text));
+    const actionLine = lines.length - 1;
+    this.#dialogButtonHits = actions.hits.map((hit) => ({ line: actionLine, hit }));
+
     lines.push(row(` ${dialog.hint}`));
     lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
     return lines;
