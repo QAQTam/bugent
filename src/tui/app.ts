@@ -14,8 +14,9 @@
  */
 
 import type { Usage } from "../provider/types.ts";
-import { runUserTurn, type LoopHooks } from "../core/loop.ts";
+import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
+import type { SessionRuntime } from "../core/runtime.ts";
 import type { ToolRegistry } from "../tools/types.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
@@ -53,6 +54,7 @@ import { currentTodoList, type TodoList } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
+import type { AuditTrail } from "../store/audit.ts";
 import {
   composeDialogActions,
   hitDialogActionAtLine,
@@ -84,6 +86,13 @@ interface PendingDialog {
 
 /** 屏幕坐标命中区间；row 为 1-based。 */
 
+export interface TuiInteraction {
+  askPermission(request: PermissionRequest): Promise<boolean>;
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean>;
+  requestCapability(escalation: CapabilityEscalation): Promise<boolean>;
+  askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined>;
+}
+
 export interface TuiOptions {
   session: AgentSession;
   tools: ToolRegistry;
@@ -92,14 +101,19 @@ export interface TuiOptions {
   banner?: string;
   /** 沙箱档位，用于状态栏与升档提示。 */
   mode?: SandboxMode;
+  /** 当前 session 的审计流水；TUI hooks 会把它和渲染 hooks 合并。 */
+  audit?: AuditTrail;
   /**
    * 新建对话时调用（`/new`）。
-   * 省略则 `/new` 不可用 —— 调用方需要能创建并落盘一个新会话。
+   * 返回完整的 session runtime，避免复用旧 session 的 gate/sandbox。
+   * 省略时回退到旧的 createSession（仅用于兼容）。
    */
+  createRuntime?: (interaction: TuiInteraction) => SessionRuntime;
+  /** 旧接口：只换 AgentSession，工具与 gate 复用当前 runtime。 */
   createSession?: () => AgentSession;
 }
 
-export class TuiApp {
+export class TuiApp implements TuiInteraction {
   #terminal = new Terminal();
   #screen: Screen;
   #decoder = new KeyDecoder();
@@ -107,7 +121,9 @@ export class TuiApp {
   #session: AgentSession;
   #tools: ToolRegistry;
   #cwd: string;
+  #createRuntime: ((interaction: TuiInteraction) => SessionRuntime) | undefined;
   #createSession: (() => AgentSession) | undefined;
+  #audit: AuditTrail | undefined;
 
   #transcript = new Transcript();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
@@ -169,7 +185,9 @@ export class TuiApp {
     this.#session = options.session;
     this.#tools = options.tools;
     this.#cwd = options.cwd;
+    this.#createRuntime = options.createRuntime;
     this.#createSession = options.createSession;
+    this.#audit = options.audit;
     this.#mode = options.mode ?? "workspace-write";
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
@@ -229,6 +247,9 @@ export class TuiApp {
         { label: "允许升档", value: true, tone: "ok" },
         { label: "拒绝", value: false, tone: "error" },
       ],
+    }).then((approved) => {
+      if (approved) this.#mode = needed;
+      return approved;
     });
   }
 
@@ -547,7 +568,7 @@ export class TuiApp {
       this.#render();
       return;
     }
-    if (this.#createSession === undefined) {
+    if (this.#createRuntime === undefined && this.#createSession === undefined) {
       this.#transcript.pushError("当前未启用持久化，无法创建新对话");
       this.#render();
       return;
@@ -559,7 +580,18 @@ export class TuiApp {
     this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
     this.#stopTodoShimmer();
-    this.#session = this.#createSession();
+    this.#todoCache = undefined;
+
+    if (this.#createRuntime !== undefined) {
+      const runtime = this.#createRuntime(this);
+      this.#session = runtime.session;
+      this.#tools = runtime.tools;
+      this.#mode = runtime.mode;
+      this.#audit = runtime.audit;
+    } else {
+      this.#session = this.#createSession!();
+    }
+
     this.#transcript = new Transcript();
     this.#layout = new TranscriptLayout<DisplayItem>();
     this.#transcript.pushNotice(
@@ -610,7 +642,7 @@ export class TuiApp {
     this.#render();
     this.#syncTodoShimmer();
 
-    const hooks: LoopHooks = {
+    const uiHooks: LoopHooks = {
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
         this.#scheduleRender();
@@ -648,6 +680,7 @@ export class TuiApp {
         this.#scheduleRender();
       },
     };
+    const hooks = combineHooks(uiHooks, this.#audit?.hooks());
 
     try {
       // runUserTurn 负责把用户消息写进 session —— 不要绕过它直接调 runTurn

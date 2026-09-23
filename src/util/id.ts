@@ -1,12 +1,17 @@
 /**
  * 会话 id 生成。
  *
- * 用「时间戳(36 进制) + 随机后缀」而不是 UUID：
- * 短、可排序、肉眼能看出创建时间，方便在 `--resume` 里手打。
+ * session 是业务隔离和 daemon 路由的边界，必须全局唯一；因此使用标准
+ * UUID v4，而不是时间戳 + 随机短后缀。旧短 id 仍可通过 `--resume` 兼容读取。
  */
 
-export function newSessionId(now = Date.now()): string {
-  const time = now.toString(36);
-  const random = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
-  return `${time}-${random}`;
+export const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function newSessionId(): string {
+  return crypto.randomUUID();
+}
+
+export function isSessionId(value: string): boolean {
+  return SESSION_ID_PATTERN.test(value);
 }

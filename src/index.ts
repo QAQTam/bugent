@@ -11,14 +11,14 @@
  */
 
 import { createInterface } from "node:readline/promises";
-import { AgentSession } from "./core/session.ts";
 import { combineHooks, runUserTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
-import type { ModelClient } from "./provider/types.ts";
 import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
 import type { BugentConfig } from "./config/schema.ts";
-import { TuiApp } from "./tui/app.ts";
+import { TuiApp, type TuiInteraction } from "./tui/app.ts";
+import { openSession } from "./core/open-session.ts";
+import { createSessionRuntime, type SessionRuntime } from "./core/runtime.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
 import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
@@ -232,69 +232,6 @@ function listSessions(store: SessionStore | undefined): void {
   }
 }
 
-interface OpenSessionOptions {
-  store: SessionStore | undefined;
-  sessionId: string;
-  client: ModelClient;
-  model: string;
-  providerId: string;
-  systemPrompt: string;
-  cwd: string;
-}
-
-/**
- * 打开会话：有历史就恢复，没有就新建并落盘。
- *
- * 恢复后 msgid 会从历史最大值继续递增，所以"只追加"这条铁律在重启后依然成立。
- */
-function openSession(options: OpenSessionOptions): AgentSession {
-  const { store, sessionId } = options;
-
-  if (store === undefined) {
-    return new AgentSession({
-      id: sessionId,
-      system: options.systemPrompt,
-      client: options.client,
-      model: options.model,
-    });
-  }
-
-  const existing = store.getSession(sessionId);
-  if (existing !== undefined) {
-    return new AgentSession({
-      id: sessionId,
-      system: existing.systemPrompt,
-      client: options.client,
-      model: options.model,
-      restore: store.loadMessages(sessionId),
-      onMessage: (message) => {
-        store.appendMessageAndTouch(sessionId, message, message.createdAt);
-      },
-    });
-  }
-
-  const now = Date.now();
-  store.createSession({
-    id: sessionId,
-    createdAt: now,
-    updatedAt: now,
-    model: options.model,
-    providerId: options.providerId,
-    systemPrompt: options.systemPrompt,
-    cwd: options.cwd,
-  });
-
-  return new AgentSession({
-    id: sessionId,
-    system: options.systemPrompt,
-    client: options.client,
-    model: options.model,
-    onMessage: (message) => {
-      store.appendMessageAndTouch(sessionId, message, message.createdAt);
-    },
-  });
-}
-
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
@@ -437,23 +374,31 @@ async function main(): Promise<void> {
           "",
           "输入消息开始对话；`/new` 开新对话；`/exit` 退出；运行中按 `ESC` 中断。",
         ].join("\n"),
+        ...(audit !== undefined ? { audit } : {}),
         ...(store === undefined
           ? {}
           : {
-              createSession: (): AgentSession => {
-                const next = openSession({
-                  store,
+              createRuntime: (interaction: TuiInteraction): SessionRuntime => {
+                const runtime = createSessionRuntime({
                   sessionId: newSessionId(),
-                  // 每个会话拿一个全新的 client：真实 provider 是无状态的，
-                  // 但 mock adapter 带脚本计数器，复用会让新会话读到旧进度
                   client: registry.resolve(ref),
                   model: ref.model,
                   providerId: ref.provider,
                   systemPrompt,
                   cwd: options.cwd,
+                  store,
+                  mode,
+                  ...(config.sandbox?.writablePaths !== undefined
+                    ? { writablePaths: config.sandbox.writablePaths }
+                    : {}),
+                  ...(config.sandbox?.passEnv !== undefined
+                    ? { passEnv: config.sandbox.passEnv }
+                    : {}),
+                  policy,
+                  interaction,
                 });
-                activeSession = next;
-                return next;
+                activeSession = runtime.session;
+                return runtime;
               },
             }),
       });

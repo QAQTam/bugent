@@ -1,0 +1,120 @@
+/**
+ * SessionRuntime —— 一个 session 的隔离边界。
+ *
+ * 同一进程里可以存在多个 runtime；它们共享 provider client 和 SQLite 连接，
+ * 但绝不共享可变的权限档位、sandbox runner、audit 或 abort 状态。
+ */
+
+import type { AgentSession } from "./session.ts";
+import type { PermissionGate } from "../permission/gate.ts";
+import type { PermissionRequest } from "../permission/policy.ts";
+import type { SandboxMode } from "../permission/mode.ts";
+import type { ToolRegistry } from "../tools/types.ts";
+import type { AuditTrail } from "../store/audit.ts";
+import type { ModelClient } from "../provider/types.ts";
+import type { SessionStore } from "../store/repository.ts";
+import { PermissionGate as Gate } from "../permission/gate.ts";
+import { AuditTrail as Audit } from "../store/audit.ts";
+import { createDefaultTools } from "../tools/builtin.ts";
+import { openSession } from "./open-session.ts";
+
+export class SessionRuntime {
+  readonly id: string;
+  readonly session: AgentSession;
+  readonly tools: ToolRegistry;
+  readonly gate: PermissionGate;
+  readonly sandboxNote: string;
+  readonly audit: AuditTrail | undefined;
+
+  constructor(options: {
+    session: AgentSession;
+    tools: ToolRegistry;
+    gate: PermissionGate;
+    sandboxNote: string;
+    audit: AuditTrail | undefined;
+  }) {
+    this.id = options.session.id;
+    this.session = options.session;
+    this.tools = options.tools;
+    this.gate = options.gate;
+    this.sandboxNote = options.sandboxNote;
+    this.audit = options.audit;
+  }
+
+  /** 当前权限档位；直接跟随 gate，避免 runtime.mode 与 gate.mode 分叉。 */
+  get mode(): SandboxMode {
+    return this.gate.mode;
+  }
+}
+
+/** runtime 只需要这两个权限交互入口；TUI 会提供更完整的 interaction。 */
+export interface SessionInteraction {
+  askPermission(request: PermissionRequest): Promise<boolean>;
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean>;
+}
+
+export interface CreateSessionRuntimeOptions {
+  sessionId: string;
+  client: ModelClient;
+  model: string;
+  providerId: string;
+  systemPrompt: string;
+  cwd: string;
+  store: SessionStore | undefined;
+  mode: SandboxMode;
+  writablePaths?: readonly string[];
+  passEnv?: readonly string[];
+  policy: import("../permission/policy.ts").PermissionPolicy;
+  interaction: SessionInteraction;
+}
+
+/**
+ * 创建一个 session 独占的 runtime。
+ *
+ * 每次调用都新建 ToolRegistry、PermissionGate、sandbox runner 和 AuditTrail；
+ * 这是避免 `/new` 或多 session daemon 互相污染的关键。
+ */
+export function createSessionRuntime(options: CreateSessionRuntimeOptions): SessionRuntime {
+  const session = openSession({
+    store: options.store,
+    sessionId: options.sessionId,
+    client: options.client,
+    model: options.model,
+    providerId: options.providerId,
+    systemPrompt: options.systemPrompt,
+    cwd: options.cwd,
+  });
+
+  const setup = createDefaultTools({
+    mode: options.mode,
+    ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
+    ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
+  });
+
+  const audit =
+    options.store === undefined
+      ? undefined
+      : new Audit({
+          store: options.store,
+          sessionId: () => session.id,
+          turn: () => session.turn,
+        });
+
+  const gate = new Gate({
+    policy: options.policy,
+    mode: setup.mode,
+    prompter: { ask: (request) => options.interaction.askPermission(request) },
+    ...(audit !== undefined ? { onDecision: (decision) => audit.permission(decision) } : {}),
+    onEscalate: async (request, needed) =>
+      (await options.interaction.confirmModeChange(request, needed)) ? needed : undefined,
+  });
+  setup.registry.setGate(gate);
+
+  return new SessionRuntime({
+    session,
+    tools: setup.registry,
+    gate,
+    sandboxNote: setup.sandbox.note,
+    audit,
+  });
+}
