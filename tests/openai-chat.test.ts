@@ -66,6 +66,26 @@ describe("P1 · openai-chat 归一化", () => {
       },
     });
   });
+
+  test("assistant reasoning 按 provider 策略回放", () => {
+    const messages: ChatMessage[] = [
+      { role: "assistant", parts: [{ type: "text", text: "answer" }], reasoning: "thinking" },
+    ];
+
+    expect(toWireMessages(messages, "reasoning")[0]).toMatchObject({
+      reasoning: "thinking",
+    });
+    expect(toWireMessages(messages, "reasoning")[0]?.reasoning_content).toBeUndefined();
+
+    expect(toWireMessages(messages, "reasoning_content")[0]).toMatchObject({
+      reasoning_content: "thinking",
+    });
+    expect(toWireMessages(messages, "both")[0]).toMatchObject({
+      reasoning: "thinking",
+      reasoning_content: "thinking",
+    });
+    expect(toWireMessages(messages, "none")[0]?.reasoning).toBeUndefined();
+  });
 });
 
 describe("P1 · openai-chat 流式映射", () => {

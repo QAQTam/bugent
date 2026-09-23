@@ -70,7 +70,7 @@ describe("P10 · 数据库", () => {
     second.close();
   });
 
-  test("v2 数据库会自动补 messages.workspace 列", async () => {
+  test("v2 数据库会自动补 workspace 与 reasoning 列", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bugent-store-migrate-"));
     dirs.push(dir);
     const path = join(dir, "v2.db");
@@ -117,6 +117,7 @@ describe("P10 · 数据库", () => {
     const upgraded = openDatabase({ path });
     const columns = upgraded.query("PRAGMA table_info(messages)").all() as { name: string }[];
     expect(columns.map((column) => column.name)).toContain("workspace");
+    expect(columns.map((column) => column.name)).toContain("reasoning");
     expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
     upgraded.close();
   });
@@ -204,6 +205,25 @@ describe("P10 · 会话与消息持久化", () => {
       reversible: true,
     });
     expect(restored?.workspace?.files[0]?.reverse.ops.length).toBeGreaterThan(0);
+  });
+
+  test("assistant reasoning 可以落盘并恢复", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1"));
+
+    const session = new AgentSession({
+      id: "s1",
+      system: "SYS",
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      now: () => 500,
+      onMessage: (message) => store.appendMessage("s1", message),
+    });
+
+    session.appendAssistant("答案", undefined, "先想一下");
+
+    const restored = store.loadMessages("s1").at(-1);
+    expect(restored?.reasoning).toBe("先想一下");
   });
 
   test("恢复后的 session 能继续追加，且 msgid 从历史最大值接着走", async () => {

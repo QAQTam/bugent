@@ -252,16 +252,32 @@ decision = "ask"
 
 ## 思考链路
 
-模型返回的 `reasoning_content`（思考过程）**不落库、不回传、不进上下文** ——
-它是临时产物，留着只会撑爆上下文、拖慢渲染。
+模型返回的 `reasoning_content`（思考过程）会：
 
-显示方式：输入框上方固定预留 5 行，思考只占**中间那一行**：
+- 实时推给 TUI；
+- 随 assistant 消息持久化；
+- 进入下一轮上下文，供需要 reasoning replay 的 provider 回放；
+- 不混入普通正文。
+
+这是 provider 兼容性要求，例如 WorkBuddy 的 `hy4-preview-f` 在带
+`tools + reasoning_effort` 时，会要求历史 assistant 消息携带 `reasoning`，
+否则可能返回 400 `11155 reasoning_content_missing`。
+
+OpenAI Chat adapter 默认回放 `reasoning`，可通过 provider 配置选择：
+
+```toml
+[[providers]]
+reasoning_replay = "reasoning" # reasoning | reasoning_content | both | none
+```
+
+TUI 展示仍保持 O(1) 内存：只保留当前思考行，输入框上方固定预留 3 行，
+思考占中间一行，超宽时横向滚动，右侧永远是最新字符。
 
 ```
-思考 The riddle: "一个农夫有17只羊…        ← 中间行，超宽时横向滚动，右侧永远是最新字符
+✻ 思考 The riddle: "一个农夫有17只羊…        ← 菊花动画，超宽时滚动
 ```
 
-遇到 `\n` 就销毁当前行重新开始，所以内存是 **O(一行)**，与总思考长度无关。
+遇到 `\n` 就销毁当前行重新开始。持久化的 reasoning 用于协议回放，不用于展开思考全文。
 
 > `deepseek-v4.1-flash` 需要显式设置 `extra_body = { reasoning_effort = "high" }`
 > 才会返回 `reasoning_content`；`glm-5.3-flash` 默认就有。

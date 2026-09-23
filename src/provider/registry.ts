@@ -11,6 +11,7 @@ import {
   type OpenAIChatOptions,
   type ProviderProxy,
   type ProviderTlsConfig,
+  type ReasoningReplay,
 } from "./adapters/openai-chat.ts";
 import { createMockClient } from "./adapters/mock.ts";
 
@@ -32,6 +33,8 @@ export interface ProviderConfig {
   proxy?: ProviderProxy | undefined;
   /** TLS 配置；字段与 Bun.fetch 的 tls 扩展兼容。 */
   tls?: ProviderTlsConfig | undefined;
+  /** assistant reasoning 回放的 wire 字段策略。 */
+  reasoningReplay?: ReasoningReplay | undefined;
 }
 
 export interface ModelRef {
@@ -50,6 +53,7 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
     if (config.extraBody !== undefined) options.extraBody = config.extraBody;
     if (config.proxy !== undefined) options.proxy = config.proxy;
     if (config.tls !== undefined) options.tls = config.tls;
+    if (config.reasoningReplay !== undefined) options.reasoningReplay = config.reasoningReplay;
     return createOpenAIChatClient(model, options);
   },
 

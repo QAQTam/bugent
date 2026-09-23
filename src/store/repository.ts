@@ -78,6 +78,7 @@ interface MessageRow {
   parts: string;
   tool_calls: string | null;
   workspace: string | null;
+  reasoning: string | null;
 }
 
 interface BranchRow {
@@ -127,6 +128,7 @@ function rowToMessage(row: MessageRow): StoredMessage {
     ...(row.workspace !== null
       ? { workspace: JSON.parse(row.workspace) as WorkspaceChange }
       : {}),
+    ...(row.reasoning !== null ? { reasoning: row.reasoning } : {}),
   });
 }
 
@@ -301,8 +303,8 @@ export class SessionStore {
     this.#db
       .query(
         `INSERT OR REPLACE INTO messages
-         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls, workspace)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls, workspace, reasoning)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionId,
@@ -315,6 +317,7 @@ export class SessionStore {
         JSON.stringify(message.parts),
         message.toolCalls === undefined ? null : JSON.stringify(message.toolCalls),
         message.workspace === undefined ? null : JSON.stringify(message.workspace),
+        message.reasoning ?? null,
       );
   }
 

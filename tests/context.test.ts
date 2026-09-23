@@ -58,6 +58,17 @@ describe("P2 · msgid 与上下文顺序", () => {
     expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3]);
     expect(session.messages[2]?.origin).toBe("inject");
   });
+
+  test("assistant reasoning 进入上下文，供 provider replay", () => {
+    const session = newSession();
+    session.appendUser("问题");
+    session.appendAssistant("答案", undefined, "先想一下");
+
+    expect(buildContext(session.messages).at(-1)).toMatchObject({
+      role: "assistant",
+      reasoning: "先想一下",
+    });
+  });
 });
 
 describe("P2 · 缓存前缀稳定性", () => {

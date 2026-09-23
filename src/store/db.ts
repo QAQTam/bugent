@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS messages (
   parts        TEXT NOT NULL,
   tool_calls   TEXT,
   workspace    TEXT,
+  reasoning    TEXT,
   PRIMARY KEY (session_id, msgid),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -166,6 +167,10 @@ function migrate(db: Database): void {
 
   if (version < 3) {
     ensureColumn(db, "messages", "workspace", "TEXT");
+  }
+
+  if (version < 4) {
+    ensureColumn(db, "messages", "reasoning", "TEXT");
   }
 }
 

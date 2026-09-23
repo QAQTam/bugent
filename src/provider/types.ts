@@ -28,6 +28,8 @@ export interface ToolCall {
 export interface ChatMessage {
   role: Role;
   parts: ContentPart[];
+  /** assistant 的思考链路，供需要 reasoning replay 的 provider 回放。 */
+  reasoning?: string;
   /** role === "tool" 时必填，指向被回应的 tool call id。 */
   toolCallId?: string;
   /** role === "assistant" 且本轮要求调用工具时存在。 */
@@ -85,8 +87,8 @@ export type ChatChunk =
   /**
    * 思考链路增量（DeepSeek 的 reasoning_content、部分模型的 reasoning）。
    *
-   * 刻意与 text 分开：思考内容**不落库、不回传、不进上下文**，
-   * 只用于前端实时展示 —— 它是临时产物，留着只会撑爆上下文和拖慢渲染。
+   * 它不直接作为普通正文展示；是否回放给 provider 由 adapter / 配置决定。
+   * 需要 replay 的模型会把最终 reasoning 挂回 assistant 消息。
    */
   | { type: "reasoning"; delta: string }
   | { type: "tool_call"; id: string; name: string; argsDelta: string }

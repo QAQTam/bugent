@@ -87,11 +87,12 @@ export class AgentSession {
     return this.#append({ role: "user", origin: "inject", parts: [textPart(text)] });
   }
 
-  appendAssistant(text: string, toolCalls?: readonly ToolCall[]): StoredMessage {
+  appendAssistant(text: string, toolCalls?: readonly ToolCall[], reasoning?: string): StoredMessage {
     return this.#append({
       role: "assistant",
       origin: "assistant",
       parts: text.length > 0 ? [textPart(text)] : [],
+      ...(reasoning !== undefined && reasoning.length > 0 ? { reasoning } : {}),
       ...(toolCalls !== undefined && toolCalls.length > 0 ? { toolCalls } : {}),
     });
   }
@@ -147,6 +148,7 @@ export class AgentSession {
     role: StoredMessage["role"];
     origin: StoredMessage["origin"];
     parts: StoredMessage["parts"];
+    reasoning?: string;
     toolCallId?: string;
     toolCalls?: readonly ToolCall[];
     workspace?: StoredMessage["workspace"];
@@ -162,6 +164,7 @@ export class AgentSession {
       origin: input.origin,
       parts: input.parts,
       createdAt: this.#now(),
+      ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
       ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),
       ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
       ...(input.workspace !== undefined ? { workspace: input.workspace } : {}),

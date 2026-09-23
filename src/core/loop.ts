@@ -186,6 +186,7 @@ export async function runTurn(
     };
 
     let text = "";
+    let reasoning = "";
     const pending = new Map<string, PendingCall>();
     let reason: FinishReason = "stop";
 
@@ -197,7 +198,8 @@ export async function runTurn(
           break;
 
         case "reasoning":
-          // 只转发给 UI，不累积、不进消息历史
+          // UI 实时展示 + 持久化到当前 assistant 消息，供需要 replay 的 provider 回放。
+          reasoning += chunk.delta;
           hooks.onReasoning?.(chunk.delta);
           break;
 
@@ -229,7 +231,11 @@ export async function runTurn(
       args: parseArgs(acc.args),
     }));
 
-    const assistantMessage = session.appendAssistant(text, calls);
+    const assistantMessage = session.appendAssistant(
+      text,
+      calls,
+      reasoning.length > 0 ? reasoning : undefined,
+    );
     hooks.onAssistant?.(assistantMessage);
 
     if (calls.length === 0) {

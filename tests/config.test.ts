@@ -43,4 +43,13 @@ server_name = "api.internal"
   test("非法 proxy 类型被拒绝", () => {
     expect(() => parseConfigToml(configWithProvider("proxy = 123"))).toThrow(/proxy/);
   });
+
+  test("解析 reasoning_replay 并拒绝非法值", () => {
+    expect(
+      parseConfigToml(configWithProvider(`reasoning_replay = "both"`)).providers[0]?.reasoningReplay,
+    ).toBe("both");
+    expect(() =>
+      parseConfigToml(configWithProvider(`reasoning_replay = "invalid"`)),
+    ).toThrow(/reasoning_replay/);
+  });
 });

@@ -26,12 +26,21 @@ export interface ProviderTlsConfig {
   serverName?: string;
 }
 
+export type ReasoningReplay = "none" | "reasoning" | "reasoning_content" | "both";
+
 export interface OpenAIChatOptions {
   baseUrl?: string;
   apiKey?: string;
   headers?: Record<string, string>;
   /** 额外塞进 body 的字段（如 `{"reasoning_effort":"high"}`）。 */
   extraBody?: Record<string, unknown>;
+  /**
+   * assistant 历史里的 reasoning 用什么 wire 字段回放。
+   *
+   * WorkBuddy / Codex 风格上游认 `reasoning`；部分 DeepSeek 风格客户端使用
+   * `reasoning_content`。默认只发 `reasoning`，需要时可显式配置 both。
+   */
+  reasoningReplay?: ReasoningReplay;
   /** 显式代理；false 表示直连。 */
   proxy?: ProviderProxy;
   /** TLS 配置；只暴露字符串/布尔值，便于 TOML 表达。 */
@@ -80,6 +89,8 @@ type WireContentPart =
 interface WireMessage {
   role: string;
   content: string | WireContentPart[] | null;
+  reasoning?: string;
+  reasoning_content?: string;
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
   tool_call_id?: string;
 }
@@ -98,10 +109,22 @@ function toWireContent(msg: ChatMessage): string | WireContentPart[] | null {
   return parts;
 }
 
-export function toWireMessages(messages: ChatMessage[]): WireMessage[] {
+export function toWireMessages(
+  messages: ChatMessage[],
+  reasoningReplay: ReasoningReplay = "reasoning",
+): WireMessage[] {
   return messages.map((msg) => {
     const content = toWireContent(msg);
     const out: WireMessage = { role: msg.role, content };
+
+    if (msg.reasoning !== undefined && msg.reasoning.length > 0 && msg.role === "assistant") {
+      if (reasoningReplay === "reasoning" || reasoningReplay === "both") {
+        out.reasoning = msg.reasoning;
+      }
+      if (reasoningReplay === "reasoning_content" || reasoningReplay === "both") {
+        out.reasoning_content = msg.reasoning;
+      }
+    }
 
     if (msg.toolCallId !== undefined) out.tool_call_id = msg.toolCallId;
 
@@ -275,7 +298,7 @@ export function createOpenAIChatClient(model: string, options: OpenAIChatOptions
     async *chat(req: ChatRequest): AsyncIterable<ChatChunk> {
       const body: Record<string, unknown> = {
         model: req.model,
-        messages: toWireMessages(req.messages),
+        messages: toWireMessages(req.messages, options.reasoningReplay ?? "reasoning"),
         stream: true,
         stream_options: { include_usage: true },
         ...(options.extraBody ?? {}),

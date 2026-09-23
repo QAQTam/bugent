@@ -28,6 +28,8 @@ export interface StoredMessage {
   readonly role: Role;
   readonly parts: readonly ContentPart[];
   readonly origin: MessageOrigin;
+  /** assistant 的思考链路；用于 provider reasoning replay，不作为正文展示。 */
+  readonly reasoning?: string;
   readonly toolCallId?: string;
   readonly toolCalls?: readonly ToolCall[];
   /**
@@ -81,6 +83,7 @@ export function freezeMessage(msg: StoredMessage): StoredMessage {
 /** 存储态 -> 归一化协议态。 */
 export function toChatMessage(msg: StoredMessage): ChatMessage {
   const out: ChatMessage = { role: msg.role, parts: [...msg.parts] };
+  if (msg.reasoning !== undefined) out.reasoning = msg.reasoning;
   if (msg.toolCallId !== undefined) out.toolCallId = msg.toolCallId;
   if (msg.toolCalls !== undefined && msg.toolCalls.length > 0) out.toolCalls = [...msg.toolCalls];
   return out;
@@ -94,6 +97,7 @@ export function makeMessage(input: {
   origin: MessageOrigin;
   parts: readonly ContentPart[];
   createdAt: number;
+  reasoning?: string;
   toolCallId?: string;
   toolCalls?: readonly ToolCall[];
   workspace?: WorkspaceChange;
@@ -105,6 +109,7 @@ export function makeMessage(input: {
     parts: input.parts,
     origin: input.origin,
     createdAt: input.createdAt,
+    ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
     ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),
     ...(input.toolCalls !== undefined && input.toolCalls.length > 0
       ? { toolCalls: input.toolCalls }

@@ -68,6 +68,25 @@ describe("P4 · agent loop", () => {
     expect(storedText(toolMessage!)).toBe("echo:hi");
   });
 
+  test("reasoning 增量会累积到 assistant 消息，供下一轮 replay", async () => {
+    const session = newSession([
+      {
+        chunks: [
+          { type: "reasoning", delta: "先想" },
+          { type: "reasoning", delta: "一步" },
+          { type: "text", delta: "答案" },
+          { type: "done", reason: "stop" },
+        ],
+      },
+    ]);
+
+    await runUserTurn(session, "问题", { cwd: "/tmp" });
+
+    const assistant = session.messages.find((message) => message.role === "assistant");
+    expect(assistant?.reasoning).toBe("先想一步");
+    expect(storedText(assistant!)).toBe("答案");
+  });
+
   test("未知工具不会让 loop 崩溃，而是把错误喂回模型", async () => {
     const session = newSession([
       { toolCalls: [{ id: "c1", name: "not_exist", args: {} }] },

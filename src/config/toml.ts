@@ -107,6 +107,7 @@ function asTls(raw: unknown, field: string): ProviderConfig["tls"] {
 }
 
 const DECISIONS: readonly PermissionDecision[] = ["allow", "ask", "deny"];
+const REASONING_REPLAYS = ["none", "reasoning", "reasoning_content", "both"] as const;
 
 function parseProvider(raw: unknown, index: number): ProviderConfig {
   if (raw === null || typeof raw !== "object") {
@@ -123,6 +124,18 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
   const apiKey = asString(pick(table, "api_key", "apiKey"), `${at}.api_key`);
   const proxy = asProxy(table.proxy, `${at}.proxy`);
   const tls = asTls(table.tls, `${at}.tls`);
+  const reasoningReplay = asString(
+    pick(table, "reasoning_replay", "reasoningReplay"),
+    `${at}.reasoning_replay`,
+  );
+  if (
+    reasoningReplay !== undefined &&
+    !(REASONING_REPLAYS as readonly string[]).includes(reasoningReplay)
+  ) {
+    throw new Error(
+      `config.toml: ${at}.reasoning_replay 必须是 ${REASONING_REPLAYS.join(" / ")}`,
+    );
+  }
 
   return {
     id,
@@ -134,6 +147,9 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
       : {}),
     ...(proxy !== undefined ? { proxy } : {}),
     ...(tls !== undefined ? { tls } : {}),
+    ...(reasoningReplay !== undefined
+      ? { reasoningReplay: reasoningReplay as (typeof REASONING_REPLAYS)[number] }
+      : {}),
   };
 }
 
@@ -287,6 +303,11 @@ api_key = ""
 
 # 开启思考链路：加了这个参数模型才会返回 reasoning_content
 # （实测 deepseek-v4.1-flash 必须显式开启）
+#
+# reasoning_replay：assistant 历史回放思考字段，可选
+#   "reasoning" | "reasoning_content" | "both" | "none"
+# WorkBuddy 上游认 reasoning；默认就是 reasoning。
+# reasoning_replay = "reasoning"
 extra_body = { reasoning_effort = "high" }
 `;
 
