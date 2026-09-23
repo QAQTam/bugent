@@ -10,6 +10,7 @@ export type MouseButton = "left" | "middle" | "right" | "wheelUp" | "wheelDown" 
 
 export type Key =
   | { type: "text"; value: string }
+  | { type: "paste"; value: string }
   | { type: "enter" }
   | { type: "backspace" }
   | { type: "delete" }
@@ -187,7 +188,19 @@ export class KeyDecoder {
     if (second === undefined) return undefined; // 可能是裸 ESC，交给 flush
 
     if (second === "[") {
-      let i = index + 2;
+      const start = index + 2;
+
+      // Bracketed paste：整个粘贴块作为一个事件，内部换行不能被当成 Enter。
+      if (this.#pending.startsWith("200~", start)) {
+        const end = this.#pending.indexOf("\x1b[201~", start + 4);
+        if (end === -1) return undefined; // 等粘贴结束标记
+        return {
+          keys: [{ type: "paste", value: this.#pending.slice(start + 4, end) }],
+          next: end + 6,
+        };
+      }
+
+      let i = start;
       let params = "";
       while (i < this.#pending.length) {
         const code = this.#pending.charCodeAt(i);

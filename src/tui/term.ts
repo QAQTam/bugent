@@ -59,6 +59,7 @@ export class Terminal {
     this.write("\x1b[2J\x1b[H"); // 清屏并归位
     this.write("\x1b[?1000h"); // 开启鼠标事件
     this.write("\x1b[?1006h"); // SGR 扩展坐标（支持 >223 列，且不混淆按键与坐标）
+    this.write("\x1b[?2004h"); // bracketed paste：粘贴内容与普通回车分开
 
     const stdin = process.stdin as unknown as StdinLike;
     stdin.setRawMode?.(true);
@@ -90,6 +91,7 @@ export class Terminal {
     stdin.pause?.();
 
     // 先关鼠标追踪再回主屏，否则退出后终端里鼠标行为会残留
+    this.write("\x1b[?2004l");
     this.write("\x1b[?1006l");
     this.write("\x1b[?1000l");
     this.write("\x1b[?25h"); // 显示光标

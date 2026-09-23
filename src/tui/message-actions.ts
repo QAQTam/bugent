@@ -40,3 +40,8 @@ export function messageActionFromKey(key: string): MessageAction | undefined {
       return undefined;
   }
 }
+
+/** 复制成功的用户反馈；按 Unicode code point 计数，避免 CJK/emoji 被按 UTF-16 长度误报。 */
+export function copyNotice(text: string): string {
+  return `[已复制 ${Array.from(text).length} 字符]`;
+}

@@ -3,6 +3,7 @@ import { Screen } from "../src/tui/screen.ts";
 import { KeyDecoder } from "../src/tui/keys.ts";
 import { truncateAnsi, visibleWidth } from "../src/tui/ansi.ts";
 import { renderMarkdown, wrapToLines } from "../src/tui/markdown.ts";
+import { copyNotice } from "../src/tui/message-actions.ts";
 
 describe("P5 · 差分渲染器", () => {
   test("首帧全量重绘，第二帧无变化则不输出", () => {
@@ -56,6 +57,25 @@ describe("P5 · 按键解析", () => {
     expect(decoder.push("\r")).toEqual([{ type: "enter" }]);
     expect(decoder.push("\x7f")).toEqual([{ type: "backspace" }]);
     expect(decoder.push("\t")).toEqual([{ type: "tab" }]);
+  });
+
+  test("bracketed paste 整体成为一个 paste 事件，内部换行不触发提交", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.push("\x1b[200~hello\nworld\x1b[201~")).toEqual([
+      { type: "paste", value: "hello\nworld" },
+    ]);
+  });
+
+  test("bracketed paste 跨 chunk 也能拼回", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.push("\x1b[200~hello")).toEqual([]);
+    expect(decoder.push("\nworld\x1b[201~")).toEqual([
+      { type: "paste", value: "hello\nworld" },
+    ]);
+  });
+
+  test("复制反馈按字符数显示，不被换行拆成多条消息", () => {
+    expect(copyNotice("你好\nworld")).toBe("[已复制 8 字符]");
   });
 
   test("方向键与 Home/End", () => {

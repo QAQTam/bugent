@@ -68,6 +68,7 @@ import {
 } from "./dialog.ts";
 import {
   MESSAGE_ACTIONS,
+  copyNotice,
   messageActionFromKey,
   type MessageAction,
 } from "./message-actions.ts";
@@ -511,6 +512,12 @@ export class TuiApp implements TuiInteraction {
         this.#insert(key.value);
         return;
       }
+
+      case "paste": {
+        // 当前输入框是单行模型：多行粘贴折成空格，不能把内部换行当成 Enter 提交。
+        this.#insert(key.value.replace(/\r\n?|\n/g, " "));
+        return;
+      }
     }
   }
 
@@ -844,9 +851,10 @@ export class TuiApp implements TuiInteraction {
         case "copy": {
           const message = this.#messageById(menu.msgid);
           if (message === undefined) throw new Error(`消息 ${menu.msgid} 已不存在`);
-          const payload = Buffer.from(storedText(message), "utf8").toString("base64");
-          this.#terminal.write(`\x1b]52;c;${payload}\x07`);
-          this.#transcript.pushNotice(`已复制消息 #${menu.msgid}（OSC 52）`);
+          const text = storedText(message);
+          const payload = Buffer.from(text, "utf8").toString("base64");
+          this.#terminal.write(`\x1b]52;c;${payload}\x1b\\`);
+          this.#transcript.pushNotice(copyNotice(text));
           this.#render(true);
           return;
         }
