@@ -285,7 +285,6 @@ describe("read_file 截断", () => {
 
     const out = await createReadFileTool().run({ path: "big.txt" }, ctxFor(cwd));
 
-    expect(out).toContain("还有");
     expect(out).toContain("offset=");
     // 输出本身不应超过字符上限太多（含头尾提示）
     expect(out.length).toBeLessThan(MAX_READ_CHARS + 500);

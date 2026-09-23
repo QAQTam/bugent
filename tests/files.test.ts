@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -40,7 +40,8 @@ describe("P7 · read_file", () => {
 
     const out = await readTool.run({ path: "a.txt" }, ctxFor(cwd));
 
-    expect(out).toContain("共 4 行");
+    // 3 行内容 + 结尾换行 —— 不再把结尾换行算成第 4 行（与 wc -l 一致）
+    expect(out).toContain("共 3 行");
     expect(out).toContain("1\tline1");
     expect(out).toContain("3\tline3");
   });
@@ -206,6 +207,88 @@ describe("P7 · 路径约束", () => {
   test("resolveWithin 对工作目录本身返回 root", async () => {
     const cwd = await workspace();
     expect(resolveWithin(cwd, ".")).toBe(cwd);
+  });
+});
+
+describe("P7 · read_file 的边界情况", () => {
+  test("目录给出明确提示，而不是误报「文件不存在」", async () => {
+    const cwd = await workspace();
+    await mkdir(join(cwd, "docs"), { recursive: true });
+    await writeFile(join(cwd, "docs/README.md"), "hi");
+
+    await expect(readTool.run({ path: "docs" }, ctxFor(cwd))).rejects.toThrow(/这是一个目录/);
+    await expect(readTool.run({ path: "docs/" }, ctxFor(cwd))).rejects.toThrow(/这是一个目录/);
+  });
+
+  test("无后缀文件按文本正常读", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "Makefile"), "all:\n\techo hi\n");
+
+    const out = await readTool.run({ path: "Makefile" }, ctxFor(cwd));
+    expect(out).toContain("all:");
+  });
+
+  test("二进制在流式读取中被拦截（不必先读完整个文件）", async () => {
+    const cwd = await workspace();
+    // 前 64KB 都是文本，NUL 藏在后面 —— 验证检测是跟着流走的
+    const head = Buffer.from("a".repeat(64 * 1024), "utf8");
+    await writeFile(join(cwd, "sneaky.bin"), Buffer.concat([head, Buffer.from([0x00, 0x01])]));
+
+    await expect(readTool.run({ path: "sneaky.bin" }, ctxFor(cwd))).rejects.toThrow(/二进制/);
+  });
+
+  test("行数与 wc -l 一致：结尾换行不算额外一行", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "a.txt"), "one\ntwo\nthree\n");
+    expect(await readTool.run({ path: "a.txt" }, ctxFor(cwd))).toContain("共 3 行");
+
+    await writeFile(join(cwd, "b.txt"), "one\ntwo\nthree");
+    expect(await readTool.run({ path: "b.txt" }, ctxFor(cwd))).toContain("共 3 行");
+  });
+
+  test("空文件给出明确提示", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "empty.txt"), "");
+    expect(await readTool.run({ path: "empty.txt" }, ctxFor(cwd))).toContain("空文件");
+  });
+
+  test("大文件流式读前 N 行，而不是直接拒绝", async () => {
+    const cwd = await workspace();
+    // 造一个远超旧的 8MB 上限的文件
+    const chunk = Array.from({ length: 5000 }, (_, i) => `line ${i}`).join("\n") + "\n";
+    const handle = Bun.file(join(cwd, "big.log"));
+    const writer = handle.writer();
+    for (let i = 0; i < 400; i += 1) writer.write(chunk); // ≈ 400 * 5000 行
+    await writer.end();
+
+    const started = Bun.nanoseconds();
+    const out = await readTool.run({ path: "big.log", limit: 10 }, ctxFor(cwd));
+    const ms = (Bun.nanoseconds() - started) / 1e6;
+
+    expect(out).toContain("1\tline 0");
+    expect(out).toContain("10\tline 9");
+    expect(out).toContain("offset=11");
+    // 只读 10 行就应该很快，不该把整个文件读完
+    expect(ms).toBeLessThan(500);
+  });
+
+  test("大文件用 offset 往后读", async () => {
+    const cwd = await workspace();
+    const content = Array.from({ length: 200_000 }, (_, i) => `L${i}`).join("\n");
+    await writeFile(join(cwd, "big2.log"), content);
+
+    const out = await readTool.run({ path: "big2.log", offset: 100_000, limit: 3 }, ctxFor(cwd));
+    expect(out).toContain("100000\tL99999");
+    expect(out).toContain("100002\tL100001");
+  });
+
+  test("offset 超出文件末尾时报错并给出真实行数", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "small.txt"), "a\nb\nc\n");
+
+    await expect(readTool.run({ path: "small.txt", offset: 999 }, ctxFor(cwd))).rejects.toThrow(
+      /offset 999 超出文件总行数 3/,
+    );
   });
 });
 

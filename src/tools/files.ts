@@ -8,6 +8,7 @@
  * 所有路径都过 resolveWithin()，逃不出工作目录。
  */
 
+import { statSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { JSONSchema } from "../provider/types.ts";
@@ -16,10 +17,119 @@ import { relativeTo, resolveWithin } from "./paths.ts";
 import { compactDiff, diffLines, formatDiff, type DiffLine } from "./diff.ts";
 
 export const MAX_READ_LINES = 500;
+
+export interface ReadWindow {
+  /** 形如 `"12\t内容"` 的行。 */
+  entries: string[];
+  /** 已读到的最后一个行号。 */
+  lastLine: number;
+  /** 是否读到了文件末尾（决定能不能报告总行数）。 */
+  reachedEnd: boolean;
+  /** 是否因为扫描上限而提前停下。 */
+  hitScanLimit: boolean;
+  /** 是否有单行超长被截断。 */
+  clippedLine: boolean;
+  /** 文件总行数 —— 只有 reachedEnd 时才准确。 */
+  totalLines: number;
+}
+
+/**
+ * 流式读取一个行窗口。
+ *
+ * 为什么不用 `Bun.file().text()`：那会把整个文件读进内存再截断。
+ * 对 1GB 的文件，用户可能只想看前 50 行，读完整份既慢又浪费内存。
+ * 流式读够就停，代价与"要看多少"成正比，而不是与"文件多大"成正比。
+ */
+async function readWindow(
+  path: string,
+  options: { startLine: number; maxLines: number; maxChars: number; maxScanBytes: number },
+): Promise<ReadWindow> {
+  const reader = Bun.file(path).stream().getReader();
+  const decoder = new TextDecoder();
+
+  const entries: string[] = [];
+  let pending = "";
+  let lineNumber = 0;
+  let chars = 0;
+  let scanned = 0;
+  let reachedEnd = false;
+  let hitScanLimit = false;
+  let clippedLine = false;
+
+  const hasRoom = (): boolean => entries.length < options.maxLines && chars < options.maxChars;
+
+  const consume = (line: string): void => {
+    lineNumber += 1;
+    if (lineNumber < options.startLine || !hasRoom()) return;
+
+    let entry = `${lineNumber}\t${line}`;
+    if (entry.length > options.maxChars) {
+      entry = `${entry.slice(0, options.maxChars)}…[本行超长，已截断]`;
+      clippedLine = true;
+    }
+    entries.push(entry);
+    chars += entry.length + 1;
+  };
+
+  try {
+    while (hasRoom()) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reachedEnd = true;
+        break;
+      }
+      if (value === undefined) continue;
+
+      // 二进制检测放在流里做 —— 不能等读完再查 NUL，那样大二进制文件会先撑爆内存
+      if (value.includes(0)) {
+        throw new Error("__BINARY__");
+      }
+
+      scanned += value.byteLength;
+      pending += decoder.decode(value, { stream: true });
+
+      let newline = pending.indexOf("\n");
+      while (newline >= 0) {
+        consume(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        if (!hasRoom()) break;
+        newline = pending.indexOf("\n");
+      }
+
+      if (scanned >= options.maxScanBytes) {
+        hitScanLimit = true;
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // 读到末尾时把最后一段（没有换行结尾的行）也收进来
+  if (reachedEnd) {
+    pending += decoder.decode();
+    if (pending.length > 0) consume(pending);
+  }
+
+  return {
+    entries,
+    lastLine: lineNumber,
+    reachedEnd,
+    hitScanLimit,
+    clippedLine,
+    totalLines: reachedEnd ? lineNumber : -1,
+  };
+}
 /** 回传给模型的字符上限（与行数上限谁先到算谁）。 */
 export const MAX_READ_CHARS = 9000;
-/** 单次读取的硬上限；超过就拒绝，避免把内存打爆。 */
-export const MAX_READ_HARD_BYTES = 8 * 1024 * 1024;
+/**
+ * 单次读取最多**扫过**多少字节。
+ *
+ * 注意这不再是"文件大小上限"，而是"愿意扫多远"：
+ * 读 1GB 日志的前 50 行只需要扫几十 KB，完全可以。
+ * 只有当你 offset 到一个很靠后的位置时才会撞上这个限制。
+ */
+export const MAX_READ_SCAN_BYTES = 8 * 1024 * 1024;
 export const MAX_WRITE_BYTES = 8 * 1024 * 1024;
 
 /* ------------------------------------------------------------------ */
@@ -85,63 +195,60 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
       const absolute = resolveWithin(ctx.cwd, rawPath);
       const display = relativeTo(ctx.cwd, absolute);
 
+      // 目录单独判断：否则 size 是 0，会掉进"文件不存在"分支，报错完全误导
+      if (statSync(absolute, { throwIfNoEntry: false })?.isDirectory() === true) {
+        throw new Error(`这是一个目录，不是文件：${display}。用 bash 的 ls 查看里面有什么`);
+      }
+
       const file = Bun.file(absolute);
       if (!(await file.exists())) {
         throw new Error(`文件不存在：${display}`);
       }
 
-      const size = file.size;
-      if (size > MAX_READ_HARD_BYTES) {
-        throw new Error(
-          `文件过大（${size} 字节，上限 ${MAX_READ_HARD_BYTES}），请先用 bash 缩小范围（如 grep / sed）`,
-        );
-      }
-
-      const text = await file.text();
-      if (text.includes("\0")) {
-        throw new Error(`拒绝读取二进制文件：${display}`);
-      }
-
-      const lines = text.split("\n");
-
-      if (offset > lines.length && lines.length > 0) {
-        throw new Error(`offset ${offset} 超出文件总行数 ${lines.length}`);
-      }
-
-      const start = offset - 1;
-
-      // 行数与字符数两个上限，谁先到算谁 —— 单行超长的文件（如压缩后的 JS）
-      // 只靠行数限制是挡不住的，所以还要单独把超长行本身截断
-      const collected: string[] = [];
-      let chars = 0;
-      let lastLine = start;
-      let clippedLine = false;
-
-      for (let index = start; index < lines.length && collected.length < limit; index += 1) {
-        let entry = `${index + 1}\t${lines[index] ?? ""}`;
-
-        if (collected.length > 0 && chars + entry.length + 1 > MAX_READ_CHARS) break;
-
-        if (entry.length > MAX_READ_CHARS) {
-          entry = `${entry.slice(0, MAX_READ_CHARS)}…[本行超长，已截断]`;
-          clippedLine = true;
+      let window: ReadWindow;
+      try {
+        window = await readWindow(absolute, {
+          startLine: offset,
+          maxLines: limit,
+          maxChars: MAX_READ_CHARS,
+          maxScanBytes: MAX_READ_SCAN_BYTES,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "__BINARY__") {
+          throw new Error(`拒绝读取二进制文件：${display}`);
         }
-
-        collected.push(entry);
-        chars += entry.length + 1;
-        lastLine = index + 1;
+        throw error;
       }
 
-      const numbered = collected.join("\n");
-      const hasMoreLines = lastLine < lines.length;
+      if (window.entries.length === 0 && window.reachedEnd) {
+        if (offset > 1) {
+          throw new Error(`offset ${offset} 超出文件总行数 ${window.totalLines}`);
+        }
+        return `# ${display}（空文件）`;
+      }
+
+      const numbered = window.entries.join("\n");
+      const lastLine = window.lastLine;
+      const totalKnown = window.totalLines >= 0;
 
       const notes: string[] = [];
-      if (hasMoreLines) notes.push(`还有 ${lines.length - lastLine} 行未显示，用 offset=${lastLine + 1} 继续读`);
-      if (clippedLine) notes.push("其中有单行过长，已被截断");
+      if (totalKnown) {
+        if (lastLine < window.totalLines) {
+          notes.push(`还有 ${window.totalLines - lastLine} 行未显示，用 offset=${lastLine + 1} 继续读`);
+        }
+      } else {
+        if (window.hitScanLimit) {
+          notes.push(`文件很大，已扫描 ${MAX_READ_SCAN_BYTES} 字节后停下`);
+        }
+        notes.push(`用 offset=${lastLine + 1} 继续往后读`);
+      }
+      if (window.clippedLine) notes.push("其中有单行过长，已被截断");
 
-      const header = `# ${display}（共 ${lines.length} 行${
-        notes.length > 0 ? `，已显示 ${offset}-${lastLine}` : ""
-      }）`;
+      const header = totalKnown
+        ? `# ${display}（共 ${window.totalLines} 行${
+            notes.length > 0 ? `，已显示 ${offset}-${lastLine}` : ""
+          }）`
+        : `# ${display}（已显示 ${offset}-${lastLine}，未读到文件末尾）`;
       const footer = notes.length > 0 ? `\n\n[${notes.join("；")}]` : "";
 
       return `${header}\n${numbered}${footer}`;
