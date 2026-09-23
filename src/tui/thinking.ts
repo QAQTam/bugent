@@ -11,9 +11,12 @@
  * 思考内容动辄上万字，全留在内存里既拖慢渲染又毫无价值 ——
  * 用户看的是"模型此刻在想什么"，不是思考全文。
  * 所以这里是 O(1) 内存：一行的字符数封顶，与总思考长度无关。
+ *
+ * reasoning 是 UI-only 数据：不写入 AgentSession、不分配 msgid、不进上下文。
+ * 它由 TUI 在 assistant 消息边界和 runtime 切换时 reset，避免跨 msgid 串线。
  */
 
-import { DIM, RESET, fg } from "./markdown.ts";
+import { BOLD, RESET, fg } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 
 /**
@@ -26,6 +29,9 @@ export const THINKING_BLOCK_ROWS = 3;
 
 /** 思考渲染在预留区的第几行（0-based）。1 = 中间。 */
 export const THINKING_LINE_INDEX = 1;
+
+/** Claude Code 风格的菊花闪烁帧。 */
+export const THINKING_FRAMES = ["✻", "✽", "✶", "✳", "✢"] as const;
 
 export class ThinkingBuffer {
   #current = "";
@@ -90,7 +96,7 @@ export function tailToWidth(text: string, width: number): { text: string; trunca
 export function composeThinkingBlock(
   buffer: ThinkingBuffer,
   width: number,
-  options: { rows?: number; lineIndex?: number } = {},
+  options: { rows?: number; lineIndex?: number; frame?: number } = {},
 ): string[] {
   const rows = Math.max(1, options.rows ?? THINKING_BLOCK_ROWS);
   const lineIndex = Math.min(options.lineIndex ?? THINKING_LINE_INDEX, rows - 1);
@@ -98,7 +104,9 @@ export function composeThinkingBlock(
 
   if (!buffer.active) return lines;
 
-  const label = "思考 ";
+  const frameIndex = Math.abs(Math.floor(options.frame ?? 0)) % THINKING_FRAMES.length;
+  const frame = THINKING_FRAMES[frameIndex]!;
+  const label = `${frame} 思考 `;
   const labelWidth = Bun.stringWidth(label);
 
   // 省略号那一格必须算进预算，否则整体宽度会超 1 格 —— 在 TUI 里就是错位
@@ -108,7 +116,10 @@ export function composeThinkingBlock(
 
   const { text } = tailToWidth(buffer.current, available);
   const prefix = truncated ? "…" : "";
-  const body = `${DIM}${fg(COLOR.reasoning)}${label}${prefix}${text}${RESET}`;
+  const spinner = `${BOLD}${fg(
+    frameIndex % 2 === 0 ? COLOR.reasoningSpinner : COLOR.reasoningSpinnerDim,
+  )}${frame}${RESET}`;
+  const body = `${spinner} ${fg(COLOR.reasoning)}思考 ${prefix}${text}${RESET}`;
 
   lines[lineIndex] = body;
   return lines;

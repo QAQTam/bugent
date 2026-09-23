@@ -4,6 +4,7 @@ import {
   tailToWidth,
   ThinkingBuffer,
   THINKING_BLOCK_ROWS,
+  THINKING_FRAMES,
   THINKING_LINE_INDEX,
 } from "../src/tui/thinking.ts";
 import { mapStreamEvent } from "../src/provider/adapters/openai-chat.ts";
@@ -91,6 +92,20 @@ describe("思考链路 · 区块渲染", () => {
     lines.forEach((line, index) => {
       if (index !== THINKING_LINE_INDEX) expect(line).toBe("");
     });
+  });
+
+  test("菊花帧切换，spinner 为青色，正文为土金色", () => {
+    const buffer = new ThinkingBuffer();
+    buffer.push("正在推理");
+
+    const first = composeThinkingBlock(buffer, 60, { frame: 0 })[THINKING_LINE_INDEX]!;
+    const second = composeThinkingBlock(buffer, 60, { frame: 1 })[THINKING_LINE_INDEX]!;
+
+    expect(first).toContain(THINKING_FRAMES[0]);
+    expect(second).toContain(THINKING_FRAMES[1]);
+    expect(first).not.toBe(second);
+    expect(first).toContain("\x1b[");
+    expect(first).not.toContain("\x1b[2m");
   });
 
   test("超宽时保留尾部并加省略号提示", () => {

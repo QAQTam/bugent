@@ -193,6 +193,9 @@ export class TuiApp implements TuiInteraction {
   #layout = new TranscriptLayout<DisplayItem>();
   /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
   #thinking = new ThinkingBuffer();
+  /** 菊花帧；只在 thinking.active 时驱动。 */
+  #thinkingFrame = 0;
+  #thinkingTimer: ReturnType<typeof setInterval> | undefined;
   #input = "";
   #cursor = 0;
   /** 主区滚动、钉底和历史抽屉的统一状态。 */
@@ -761,6 +764,8 @@ export class TuiApp implements TuiInteraction {
     this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
     this.#stopTodoShimmer();
+    this.#thinking.reset();
+    this.#stopThinkingAnimation();
     this.#todoCache = undefined;
     this.#messageHits = [];
     this.#toolHits = [];
@@ -1054,6 +1059,8 @@ export class TuiApp implements TuiInteraction {
     this.#todoCache = undefined;
     this.#messageHits = [];
     this.#toolHits = [];
+    this.#thinking.reset();
+    this.#stopThinkingAnimation();
     this.#input = "";
     this.#cursor = 0;
     this.#render(true);
@@ -1065,6 +1072,8 @@ export class TuiApp implements TuiInteraction {
   async #runTurn(input: string): Promise<void> {
     this.#busy = true;
     this.#abort = new AbortController();
+    this.#thinking.reset();
+    this.#stopThinkingAnimation();
     this.#render();
     this.#syncTodoShimmer();
 
@@ -1085,6 +1094,9 @@ export class TuiApp implements TuiInteraction {
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
       onAssistant: (message) => {
+        // reasoning 不落 msgid；assistant 消息边界就是思考链路的生命周期边界。
+        this.#thinking.reset();
+        this.#stopThinkingAnimation();
         this.#lastAssistantMsgid = message.msgid;
         this.#transcript.endAssistant(message.msgid);
       },
@@ -1132,11 +1144,39 @@ export class TuiApp implements TuiInteraction {
     } finally {
       this.#transcript.endAssistant();
       this.#thinking.reset();
+      this.#stopThinkingAnimation();
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
       this.#render();
     }
+  }
+
+  /** 思考中的菊花动画；没有 reasoning 时不常驻定时器。 */
+  #syncThinkingAnimation(): void {
+    const active = this.#busy && this.#thinking.active;
+    if (!active) {
+      this.#stopThinkingAnimation();
+      return;
+    }
+    if (this.#thinkingTimer !== undefined) return;
+
+    this.#thinkingTimer = setInterval(() => {
+      if (!this.#busy || !this.#thinking.active) {
+        this.#stopThinkingAnimation();
+        return;
+      }
+      this.#thinkingFrame += 1;
+      this.#render();
+    }, 80);
+  }
+
+  #stopThinkingAnimation(): void {
+    if (this.#thinkingTimer !== undefined) {
+      clearInterval(this.#thinkingTimer);
+      this.#thinkingTimer = undefined;
+    }
+    this.#thinkingFrame = 0;
   }
 
   /**
@@ -1186,6 +1226,7 @@ export class TuiApp implements TuiInteraction {
   #render(force = false): void {
     // 让渲染成为 shimmer 的最终校准点：即使 onToolResult 回调发生在
     // 工具结果落库之前，下一次实际渲染也会按最新历史停止或启动动画。
+    this.#syncThinkingAnimation();
     this.#syncTodoShimmer();
 
     const { width, height } = this.#terminal.size;
@@ -1201,7 +1242,10 @@ export class TuiApp implements TuiInteraction {
     // 思考区固定预留（默认 5 行，小终端自动收缩），不思考时是全空白 ——
     // 这块空间同时充当输入框上方的呼吸留白
     const thinkingRows = Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
-    const thinkingBlock = composeThinkingBlock(this.#thinking, width, { rows: thinkingRows });
+    const thinkingBlock = composeThinkingBlock(this.#thinking, width, {
+      rows: thinkingRows,
+      frame: this.#thinkingFrame,
+    });
 
     // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置
     const panelBudget = Math.max(

@@ -24,7 +24,9 @@ export const COLOR = {
   todoDone: "#4ade80",
 
   // 思考链路
-  reasoning: "#8b5cf6",
+  reasoning: "#c8a96b",
+  reasoningSpinner: "#22d3ee",
+  reasoningSpinnerDim: "#0891b2",
 
   // diff
   diffAdd: "#4ade80",
