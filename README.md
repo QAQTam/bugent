@@ -173,7 +173,7 @@ decision = "ask"
 | `read_file` | 读文件，带行号，支持 `offset`/`limit` | 路径约束 |
 | `write_file` | 原子写（临时文件 + rename），自动建父目录 | 路径约束 |
 | `edit_file` | 精确字符串替换，不唯一时报错而非猜测 | 路径约束 |
-| `todo_write` | 待办清单，前端以 sticky checkbox 面板实时显示 | 无副作用，默认放行 |
+| `todo_write` | 带 summary/id/completion 的待办清单，sticky 面板实时显示，进行中项带 shimmer | 无副作用，默认放行 |
 | `ask_user` | 分页问答表单（最多 5 题，选项 A~D + 自由回答） | 无副作用，默认放行 |
 
 ### 输出折叠
@@ -279,15 +279,22 @@ SSE 解析（`bun run scripts/bench-sse.ts`）：
 `tests/sse-perf.test.ts` 用低得多的门槛（30×）做回归，目的是发现数量级退化，
 而不是卡 CI 的毫秒数。
 
-`todo_write` 的三态用**纯 ASCII 等宽标记**渲染，避免花体字符在不同终端里宽度不一致：
+`todo_write` 的三态用**纯 ASCII 等宽标记**渲染，避免花体字符在不同终端里宽度不一致。
+清单支持计划级 `summary`、稳定 `id` 和完成项 `completion`：
 
 ```
-待办 2/4 · 进行中 1
-  [x] 读 src/core/loop.ts
-  [x] 重构 Transcript
+待办 · 重构 todo 状态模型                          2/4 · 进行中 1
+  [x] 读 src/core/loop.ts — 已确认 loop 边界
+  [x] 重构 Transcript — 338 tests pass
   [>] 正在补单测
   [ ] 跑 typecheck
 ```
+
+`in_progress` 使用独立颜色，并在当前 turn 内叠加一道从左向右流动的 shimmer；
+turn 结束后即使模型忘了收尾，动画也会停止，只保留静态的进行中状态。
+
+全部完成后，清单会保留到当前 turn 结束；下一次真实用户消息出现时自动隐藏。
+如果新 turn 里再次调用 `todo_write`，则显示新的清单。
 
 ## 加一个新工具要改什么
 

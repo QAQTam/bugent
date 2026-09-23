@@ -35,7 +35,7 @@ import {
   type AskUserAnswer,
   type AskUserQuestion,
 } from "./ask-user.ts";
-import { currentTodos, type Todo } from "../tools/todo.ts";
+import { currentTodoList, type TodoList } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
@@ -117,7 +117,11 @@ export class TuiApp {
   #dialogButtonHits: DialogButtonRowHit[] = [];
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
-  #todoCache: { key: string; todos: Todo[] } | undefined;
+  #todoCache: { key: string; list: TodoList } | undefined;
+  /** in_progress shimmer 相位；0..1。 */
+  #todoShimmer = 0;
+  /** shimmer 定时器。只在当前 turn 且有 in_progress 时运行。 */
+  #todoShimmerTimer: ReturnType<typeof setInterval> | undefined;
 
   /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
   #toolHits: { callId: string; start: number; end: number }[] = [];
@@ -249,9 +253,11 @@ export class TuiApp {
 
     try {
       this.#render(true);
+      this.#syncTodoShimmer();
       await exited;
     } finally {
       clearInterval(escapeTimer);
+      this.#stopTodoShimmer();
       offData();
       offResize();
       setHighlightReadyHandler(undefined);
@@ -476,6 +482,7 @@ export class TuiApp {
     this.#cursor = 0;
     this.#scrollOffset = 0;
     this.#usage = { input: 0, output: 0 };
+    this.#stopTodoShimmer();
     this.#session = this.#createSession();
     this.#transcript = new Transcript();
     this.#transcript.pushNotice(
@@ -524,6 +531,7 @@ export class TuiApp {
     this.#busy = true;
     this.#abort = new AbortController();
     this.#render();
+    this.#syncTodoShimmer();
 
     const hooks: LoopHooks = {
       onText: (delta) => {
@@ -555,6 +563,7 @@ export class TuiApp {
       onAskUser: (_call, questions) => this.askUser(questions),
       onToolResult: (call, result) => {
         this.#transcript.finishTool(call.id, result.output, result.ok);
+        this.#syncTodoShimmer();
         this.#scheduleRender();
       },
       onUsage: (usage) => {
@@ -577,9 +586,43 @@ export class TuiApp {
       this.#transcript.endAssistant();
       this.#thinking.reset();
       this.#busy = false;
+      this.#stopTodoShimmer();
       this.#abort = undefined;
       this.#render();
     }
+  }
+
+  /**
+   * 只在当前 turn 有 in_progress 时驱动 shimmer。
+   *
+   * 不把动画定时器常驻：turn 结束后即使模型忘了把某项改成 completed，
+   * 也只留下静态的进行中样式，不继续烧 CPU。
+   */
+  #syncTodoShimmer(): void {
+    const active =
+      this.#busy && this.#todos().todos.some((todo) => todo.status === "in_progress");
+    if (!active) {
+      this.#stopTodoShimmer();
+      return;
+    }
+    if (this.#todoShimmerTimer !== undefined) return;
+
+    this.#todoShimmerTimer = setInterval(() => {
+      if (!this.#busy) {
+        this.#stopTodoShimmer();
+        return;
+      }
+      this.#todoShimmer = (this.#todoShimmer + 0.04) % 1;
+      this.#render();
+    }, 50);
+  }
+
+  #stopTodoShimmer(): void {
+    if (this.#todoShimmerTimer !== undefined) {
+      clearInterval(this.#todoShimmerTimer);
+      this.#todoShimmerTimer = undefined;
+    }
+    this.#todoShimmer = 0;
   }
 
   #scheduleRender(): void {
@@ -594,6 +637,10 @@ export class TuiApp {
   /* --------------------------- 渲染 --------------------------- */
 
   #render(force = false): void {
+    // 让渲染成为 shimmer 的最终校准点：即使 onToolResult 回调发生在
+    // 工具结果落库之前，下一次实际渲染也会按最新历史停止或启动动画。
+    this.#syncTodoShimmer();
+
     const { width, height } = this.#terminal.size;
     if (this.#screen.resize(width, height)) force = true;
     if (force) this.#screen.invalidate();
@@ -614,8 +661,15 @@ export class TuiApp {
       0,
       Math.min(Math.floor(height * 0.4), height - 3 - thinkingBlock.length),
     );
+    const todoList = this.#todos();
     const todoPanel =
-      panelBudget >= 2 ? composeTodoPanel(this.#todos(), width, { maxLines: panelBudget }) : [];
+      panelBudget >= 2
+        ? composeTodoPanel(todoList.todos, width, {
+            maxLines: panelBudget,
+            ...(todoList.summary !== undefined ? { summary: todoList.summary } : {}),
+            ...(this.#todoShimmer > 0 ? { shimmer: this.#todoShimmer } : {}),
+          })
+        : [];
 
     // 2 = 状态栏 + 输入面板第一行；INPUT_ROWS - 1 = 面板其余留白行
     const bodyHeight = Math.max(
@@ -652,13 +706,16 @@ export class TuiApp {
    * 带缓存：渲染是 60fps 级别的，而派生要倒扫历史 ——
    * 没有 todo 的会话会每次都扫全量，白烧 CPU。
    */
-  #todos(): Todo[] {
+  #todos(): TodoList {
     const messages = this.#session.messages;
     const key = `${this.#session.id}:${messages.length}`;
     if (this.#todoCache === undefined || this.#todoCache.key !== key) {
-      this.#todoCache = { key, todos: currentTodos(messages) };
+      this.#todoCache = {
+        key,
+        list: currentTodoList(messages, { hideCompletedAfterUserTurn: true }),
+      };
     }
-    return this.#todoCache.todos;
+    return this.#todoCache.list;
   }
 
   #renderDialog(width: number): string[] {

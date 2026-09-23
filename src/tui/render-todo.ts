@@ -12,7 +12,7 @@
  */
 
 import { BOLD, DIM, RESET, fg } from "./markdown.ts";
-import { truncateAnsi } from "./ansi.ts";
+import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
 import { countTodos, tryParseTodos, type Todo, type TodoStatus } from "../tools/todo.ts";
@@ -29,20 +29,86 @@ const STATUS_COLOR: Record<TodoStatus, string> = {
   completed: COLOR.todoDone,
 };
 
+/** 纯文本按可见宽度截断，避免把 ANSI 当成 shimmer 的字符输入。 */
+function truncatePlain(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (visibleWidth(text) <= maxWidth) return text;
+
+  const ellipsis = "…";
+  const budget = Math.max(0, maxWidth - visibleWidth(ellipsis));
+  let out = "";
+  let width = 0;
+  for (const char of Array.from(text)) {
+    const charWidth = visibleWidth(char);
+    if (width + charWidth > budget) break;
+    out += char;
+    width += charWidth;
+  }
+  return `${out}${ellipsis}`;
+}
+
+/**
+ * 让一段高亮在文本上从右向左流动。
+ *
+ * phase 是 0..1 的循环相位；窗口宽度随文本长度变化，但至少 4 列。
+ * 这里逐字符上色，todo 行很短，不会成为性能瓶颈。
+ */
+function shimmerText(text: string, phase: number, base: string, highlight: string): string {
+  const chars = Array.from(text);
+  const total = visibleWidth(text);
+  const window = Math.max(4, Math.min(10, Math.ceil(total / 3)));
+  const position = phase * (total + window) - window;
+  let out = "";
+  let cursor = 0;
+
+  for (const char of chars) {
+    const charWidth = visibleWidth(char);
+    const active = cursor + charWidth > position && cursor < position + window;
+    out += `${fg(active ? highlight : base)}${char}`;
+    cursor += charWidth;
+  }
+
+  return `${out}${RESET}`;
+}
+
+export interface TodoLineOptions {
+  /** in_progress 的 shimmer 相位；0..1。 */
+  shimmer?: number;
+}
+
 /** 单条待办的一行。sticky 面板与 transcript 共用同一套外观。 */
-export function renderTodoLine(todo: Todo, width: number): string {
+export function renderTodoLine(todo: Todo, width: number, options: TodoLineOptions = {}): string {
   const marker = TODO_MARKERS[todo.status];
   const color = STATUS_COLOR[todo.status];
-  const text =
+  const baseText =
     todo.status === "in_progress" && todo.activeForm !== undefined ? todo.activeForm : todo.content;
+  const text =
+    todo.status === "completed" && todo.completion !== undefined
+      ? `${baseText} — ${todo.completion}`
+      : baseText;
+  const available = Math.max(1, width - 4);
+
+  if (todo.status === "in_progress" && options.shimmer !== undefined) {
+    const clipped = truncatePlain(text, available);
+    return `${fg(color)}${marker}${RESET} ${BOLD}${shimmerText(
+      clipped,
+      options.shimmer,
+      color,
+      COLOR.todoShimmer,
+    )}`;
+  }
 
   const decoration = todo.status === "completed" ? DIM : todo.status === "in_progress" ? BOLD : "";
-  return `${fg(color)}${marker}${RESET} ${decoration}${truncateAnsi(text, Math.max(1, width - 4))}${RESET}`;
+  return `${fg(color)}${marker}${RESET} ${decoration}${truncateAnsi(text, available)}${RESET}`;
 }
 
 export interface TodoPanelOptions {
   /** 面板最多占几行（含标题）。 */
   maxLines?: number;
+  /** 整份计划的一句话摘要。 */
+  summary?: string;
+  /** in_progress 的 shimmer 相位；0..1。 */
+  shimmer?: number;
 }
 
 /**
@@ -58,9 +124,12 @@ export function composeTodoPanel(
 
   const maxLines = Math.max(2, options.maxLines ?? 8);
   const counts = countTodos(todos);
-  const header = `${BOLD}待办${RESET} ${DIM}${counts.completed}/${todos.length}${
-    counts.in_progress > 0 ? ` · 进行中 1` : ""
-  }${RESET}`;
+  const progress = `${counts.completed}/${todos.length}${
+    counts.in_progress > 0 ? " · 进行中 1" : ""
+  }`;
+  const title = options.summary !== undefined ? `待办 · ${options.summary}` : "待办";
+  const titleBudget = Math.max(1, width - visibleWidth(progress) - 3);
+  const header = `${BOLD}${truncatePlain(title, titleBudget)}${RESET} ${DIM}${progress}${RESET}`;
 
   const budget = maxLines - 1; // 标题占一行
   let shown: Todo[];
@@ -83,7 +152,13 @@ export function composeTodoPanel(
 
   const lines = [header];
   for (const todo of shown) {
-    lines.push(`  ${renderTodoLine(todo, Math.max(1, width - 2))}`);
+    lines.push(
+      `  ${renderTodoLine(todo, Math.max(1, width - 2), {
+        ...(todo.status === "in_progress" && options.shimmer !== undefined
+          ? { shimmer: options.shimmer }
+          : {}),
+      })}`,
+    );
   }
   if (hidden > 0) {
     lines.push(`${DIM}  … 还有 ${hidden} 项${RESET}`);
@@ -95,8 +170,9 @@ export function composeTodoPanel(
  * transcript 里的 todo_write 只留一行摘要。
  * 完整列表交给 sticky 面板 —— 同一份清单出现两次只会让人分心。
  */
-export function renderTodoTool(item: ToolItem, _width: number): string[] {
-  const raw = (item.args as { todos?: unknown } | null)?.todos;
+export function renderTodoTool(item: ToolItem, width: number): string[] {
+  const args = item.args as { summary?: unknown; todos?: unknown } | null;
+  const raw = args?.todos;
   const todos = tryParseTodos(raw);
 
   if (todos === undefined) {
@@ -110,10 +186,15 @@ export function renderTodoTool(item: ToolItem, _width: number): string[] {
   if (counts.in_progress > 0) parts.push(`${counts.in_progress} 进行中`);
   if (counts.completed > 0) parts.push(`${counts.completed} 已完成`);
   if (counts.pending > 0) parts.push(`${counts.pending} 待办`);
+  const summary =
+    typeof args?.summary === "string" && args.summary.trim().length > 0
+      ? ` · ${args.summary.trim()}`
+      : "";
 
+  const line = `⏺ todo_write${summary} · 共 ${todos.length} 项${
+    parts.length > 0 ? ` · ${parts.join(" · ")}` : ""
+  }`;
   return [
-    `${fg(COLOR.tool)}⏺${RESET} ${BOLD}todo_write${RESET} ${DIM}共 ${todos.length} 项${
-      parts.length > 0 ? ` · ${parts.join(" · ")}` : ""
-    }${RESET}`,
+    `${fg(COLOR.tool)}${truncateAnsi(line, Math.max(1, width))}${RESET}`,
   ];
 }

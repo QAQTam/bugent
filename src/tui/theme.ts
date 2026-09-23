@@ -20,6 +20,7 @@ export const COLOR = {
   // 待办三态
   todoPending: "#64748b",
   todoActive: "#fbbf24",
+  todoShimmer: "#fff7d6",
   todoDone: "#4ade80",
 
   // 思考链路

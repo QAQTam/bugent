@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   countTodos,
   createTodoWriteTool,
+  currentTodoList,
   currentTodos,
   parseTodos,
   TODO_TOOL_NAME,
@@ -26,13 +27,24 @@ import { createMockClient } from "../src/provider/adapters/mock.ts";
 
 /* --------------------------- 构造测试数据 --------------------------- */
 
-function assistantWithTodo(callId: string, todos: unknown, msgid: number): StoredMessage {
+function assistantWithTodo(
+  callId: string,
+  todos: unknown,
+  msgid: number,
+  summary?: string,
+): StoredMessage {
   return makeMessage({
     msgid,
     role: "assistant",
     origin: "assistant",
     parts: [],
-    toolCalls: [{ id: callId, name: TODO_TOOL_NAME, args: { todos } }],
+    toolCalls: [
+      {
+        id: callId,
+        name: TODO_TOOL_NAME,
+        args: { todos, ...(summary !== undefined ? { summary } : {}) },
+      },
+    ],
     createdAt: 0,
   });
 }
@@ -49,9 +61,19 @@ function toolResult(callId: string, text: string, msgid: number): StoredMessage 
 }
 
 const sample: Todo[] = [
-  { content: "读 src/core/loop.ts", status: "completed" },
-  { content: "重构 Transcript", activeForm: "正在重构 Transcript", status: "in_progress" },
-  { content: "补单测", status: "pending" },
+  {
+    id: "read-loop",
+    content: "读 src/core/loop.ts",
+    status: "completed",
+    completion: "已确认 loop 边界",
+  },
+  {
+    id: "transcript",
+    content: "重构 Transcript",
+    activeForm: "正在重构 Transcript",
+    status: "in_progress",
+  },
+  { id: "tests", content: "补单测", status: "pending" },
 ];
 
 /* ------------------------------ 校验 ------------------------------ */
@@ -88,10 +110,30 @@ describe("todo_write · 参数校验", () => {
     ).toThrow(/最多只能有一项 in_progress/);
   });
 
-  test("content 被 trim，空 activeForm 被丢弃", () => {
+  test("content 被 trim，空 activeForm 被丢弃，缺失 id 自动生成", () => {
     const [todo] = parseTodos([{ content: "  有空格  ", activeForm: "   ", status: "pending" }]);
-    expect(todo).toEqual({ content: "有空格", status: "pending" });
+    expect(todo).toEqual({ id: "todo-1", content: "有空格", status: "pending" });
     expect(todo?.activeForm).toBeUndefined();
+  });
+
+  test("显式 id 被保留，重复 id 被拒绝", () => {
+    expect(parseTodos([{ id: "a", content: "x", status: "pending" }])[0]?.id).toBe("a");
+    expect(() =>
+      parseTodos([
+        { id: "same", content: "a", status: "pending" },
+        { id: "same", content: "b", status: "pending" },
+      ]),
+    ).toThrow(/id 重复/);
+  });
+
+  test("completion 只允许出现在 completed 项", () => {
+    expect(
+      parseTodos([{ content: "x", status: "completed", completion: " 338 tests pass " }])[0]
+        ?.completion,
+    ).toBe("338 tests pass");
+    expect(() =>
+      parseTodos([{ content: "x", status: "in_progress", completion: "done" }]),
+    ).toThrow(/completion 只能用于 completed/);
   });
 
   test("tryParseTodos 对畸形输入返回 undefined 而不抛错", () => {
@@ -120,6 +162,59 @@ describe("todo_write · 从消息历史派生当前清单", () => {
       toolResult("c2", "待办清单已更新", 4),
     ];
     expect(currentTodos(messages)).toEqual(sample);
+  });
+
+  test("currentTodoList 同时返回 summary", () => {
+    const messages = [
+      assistantWithTodo("c1", sample, 1, "重构 todo 状态模型"),
+      toolResult("c1", "待办清单已更新", 2),
+    ];
+    expect(currentTodoList(messages)).toEqual({
+      summary: "重构 todo 状态模型",
+      todos: sample,
+    });
+  });
+
+  test("全部 completed 后，下一条真实用户消息会让清单隐藏", () => {
+    const completed: Todo[] = [
+      { id: "a", content: "完成 A", status: "completed", completion: "ok" },
+      { id: "b", content: "完成 B", status: "completed", completion: "ok" },
+    ];
+    const beforeUser = [
+      assistantWithTodo("c1", completed, 1, "收尾"),
+      toolResult("c1", "待办清单已更新", 2),
+    ];
+    const afterUser = [
+      ...beforeUser,
+      makeMessage({
+        msgid: 3,
+        role: "user",
+        origin: "user",
+        parts: [textPart("下一件事")],
+        createdAt: 0,
+      }),
+    ];
+
+    expect(currentTodoList(beforeUser, { hideCompletedAfterUserTurn: true }).todos).toEqual(
+      completed,
+    );
+    expect(currentTodoList(afterUser, { hideCompletedAfterUserTurn: true }).todos).toEqual([]);
+  });
+
+  test("未全部 completed 时，下一条用户消息不会隐藏清单", () => {
+    const afterUser = [
+      assistantWithTodo("c1", sample, 1),
+      toolResult("c1", "待办清单已更新", 2),
+      makeMessage({
+        msgid: 3,
+        role: "user",
+        origin: "user",
+        parts: [textPart("继续")],
+        createdAt: 0,
+      }),
+    ];
+
+    expect(currentTodoList(afterUser, { hideCompletedAfterUserTurn: true }).todos).toEqual(sample);
   });
 
   test("被拒绝的调用不算数（否则会显示一份用户没批准的计划）", () => {
@@ -155,18 +250,23 @@ describe("todo_write · 工具行为", () => {
 
   test("name 与 describe 正确", () => {
     expect(tool.name).toBe(TODO_TOOL_NAME);
-    expect(tool.describe({ todos: sample })).toEqual({
+    expect(tool.describe({ summary: "重构 todo", todos: sample })).toEqual({
       resource: "3 项",
-      summary: "更新待办清单（3 项）",
+      summary: "更新待办清单（重构 todo · 3 项）",
     });
   });
 
-  test("run 返回各状态计数", async () => {
-    const out = await tool.run({ todos: sample }, { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" });
+  test("run 返回 summary、各状态计数与稳定 id", async () => {
+    const out = await tool.run(
+      { summary: "重构 todo", todos: sample },
+      { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" },
+    );
+    expect(out).toContain("计划：重构 todo");
     expect(out).toContain("共 3 项");
     expect(out).toContain("1 已完成");
     expect(out).toContain("1 进行中");
     expect(out).toContain("1 待办");
+    expect(out).toContain("read-loop=completed");
   });
 
   test("非法参数通过 registry 执行时转成 ok:false", async () => {
@@ -240,8 +340,26 @@ describe("todo_write · 渲染", () => {
   });
 
   test("没有 activeForm 时回退到 content", () => {
-    const line = renderTodoLine({ content: "跑测试", status: "in_progress" }, 60);
+    const line = renderTodoLine({ id: "test", content: "跑测试", status: "in_progress" }, 60);
     expect(line).toContain("跑测试");
+  });
+
+  test("completed 项显示 completion 结果", () => {
+    const line = renderTodoLine(
+      { id: "test", content: "跑测试", status: "completed", completion: "338 pass" },
+      60,
+    );
+    expect(line).toContain("338 pass");
+  });
+
+  test("shimmer 会改变 in_progress 行的 ANSI，但不改变文本", () => {
+    const todo: Todo = { id: "test", content: "正在执行一个比较长的任务", status: "in_progress" };
+    const first = renderTodoLine(todo, 60, { shimmer: 0 });
+    const later = renderTodoLine(todo, 60, { shimmer: 0.5 });
+    const plain = (line: string): string => line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+
+    expect(plain(first)).toBe(plain(later));
+    expect(first).not.toBe(later);
   });
 
   test("sticky 面板：没有待办时返回空数组", () => {
@@ -257,8 +375,15 @@ describe("todo_write · 渲染", () => {
     expect(lines[3]).toContain("[ ]");
   });
 
+  test("sticky 面板：标题展示计划 summary", () => {
+    const lines = composeTodoPanel(sample, 80, { summary: "重构 todo 状态模型" });
+    expect(lines[0]).toContain("重构 todo 状态模型");
+    expect(lines[0]).toContain("1/3");
+  });
+
   test("sticky 面板：超长时截断并给出溢出提示", () => {
     const many: Todo[] = Array.from({ length: 12 }, (_, i) => ({
+      id: `task-${i + 1}`,
       content: `任务 ${i + 1}`,
       status: "pending" as const,
     }));
@@ -270,10 +395,11 @@ describe("todo_write · 渲染", () => {
 
   test("sticky 面板：截断时把进行中的项钉在最前面", () => {
     const many: Todo[] = Array.from({ length: 12 }, (_, i) => ({
+      id: `task-${i + 1}`,
       content: `任务 ${i + 1}`,
       status: "pending" as const,
     }));
-    many[10] = { content: "关键任务", status: "in_progress" };
+    many[10] = { id: "key", content: "关键任务", status: "in_progress" };
 
     const lines = composeTodoPanel(many, 60, { maxLines: 4 });
     expect(lines[1]).toContain("关键任务");
@@ -284,7 +410,7 @@ describe("todo_write · 渲染", () => {
       kind: "tool",
       callId: "c1",
       name: TODO_TOOL_NAME,
-      args: { todos: sample },
+      args: { summary: "重构 todo 状态模型", todos: sample },
       output: "待办清单已更新",
       ok: true,
       done: true,
@@ -294,6 +420,7 @@ describe("todo_write · 渲染", () => {
     const lines = renderTodoTool(item, 80);
 
     expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("重构 todo 状态模型");
     expect(lines[0]).toContain("共 3 项");
     expect(lines[0]).toContain("1 进行中");
   });
