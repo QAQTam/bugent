@@ -29,6 +29,7 @@ import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
 import { sliceViewport } from "./viewport.ts";
+import { setHighlightReadyHandler } from "./highlight.ts";
 import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
@@ -104,6 +105,10 @@ export class TuiApp {
     // 注册内置工具的自定义外观（幂等）。放在构造函数里，
     // 保证任何入口构造 TuiApp 都能拿到，而不只是 CLI。
     registerBuiltinToolRenderers();
+
+    // 语言高亮模块是懒加载的：加载完成后要重绘一次，否则第一次看到的
+    // 永远是纯文本。渲染路径保持同步，靠这个回调补上第二遍。
+    setHighlightReadyHandler(() => this.#render(true));
 
     this.#session = options.session;
     this.#tools = options.tools;
@@ -187,6 +192,7 @@ export class TuiApp {
       clearInterval(escapeTimer);
       offData();
       offResize();
+      setHighlightReadyHandler(undefined);
       this.#abort?.abort();
       this.#terminal.exit();
     }

@@ -16,6 +16,7 @@ import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
 import { parseDiffStat, type DiffStat } from "../tools/diff.ts";
+import { highlightCode } from "./highlight.ts";
 
 /** 折叠规格：头几行 + 尾几行。 */
 export const FOLD_SPEC = {

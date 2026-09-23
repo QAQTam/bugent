@@ -16,5 +16,8 @@
     "test": "bun test",
     "typecheck": "tsgo --noEmit"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "highlight.js": "^11.12.0"
+  }
 }
