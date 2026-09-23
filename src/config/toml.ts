@@ -167,6 +167,9 @@ export function parseConfigToml(text: string): BugentConfig {
   );
   if (writablePaths !== undefined) sandbox.writablePaths = writablePaths;
 
+  const passEnv = asStringArray(pick(sandboxTable, "pass_env", "passEnv"), "sandbox.pass_env");
+  if (passEnv !== undefined) sandbox.passEnv = passEnv;
+
   const systemPrompt = asString(
     pick(agentTable, "system_prompt", "systemPrompt"),
     "agent.system_prompt",
@@ -225,6 +228,10 @@ decision = "deny"
 # 联网不走档位：默认断网，命令失败时按次询问授权。
 mode = "workspace-write"
 writable_paths = []
+
+# 环境变量是白名单制：只保留 PATH/HOME/TERM/LANG 等少数几个，
+# 其余（含各种 API key）一律不传给子进程。需要什么在这里显式加。
+pass_env = []
 
 # ---- provider ----
 # 任何 OpenAI 兼容端点都能这样接

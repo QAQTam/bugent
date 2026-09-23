@@ -26,6 +26,13 @@ export interface SandboxConfig {
   mode?: SandboxMode;
   /** 额外可写路径（仅沙箱档位有效）。 */
   writablePaths?: string[];
+  /**
+   * 额外放行给子进程的环境变量名。
+   *
+   * 默认是**白名单制** —— 只保留 PATH/HOME/TERM/LANG 等少数几个，
+   * 其余（含各种 API key）一律剔除。需要什么显式加进来。
+   */
+  passEnv?: string[];
 }
 
 export interface BugentConfig {

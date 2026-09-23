@@ -22,6 +22,8 @@ export interface DefaultToolsOptions {
   mode?: SandboxMode;
   /** 额外可写路径（仅沙箱档位有效）。 */
   writablePaths?: readonly string[];
+  /** 额外放行给子进程的环境变量名。 */
+  passEnv?: readonly string[];
   /** 直接覆盖执行层（测试用，优先级最高）。 */
   runner?: ShellRunner;
 }
@@ -77,11 +79,15 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     enabled = false;
     note = "未找到 bwrap，已降级为无沙箱执行（档位门控仍然生效）";
   } else {
-    runner = createSandboxedShellRunner({
-      workspaceWrite: caps.workspaceWrite,
-      ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
-      allowNetwork: false,
-    });
+    runner = createSandboxedShellRunner(
+      {
+        workspaceWrite: caps.workspaceWrite,
+        ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
+        allowNetwork: false,
+      },
+      undefined,
+      { ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}) },
+    );
     enabled = true;
     networkBlocked = true;
     note = `bwrap 沙箱 · ${caps.label}`;

@@ -14,6 +14,7 @@
 
 import {
   createProcessRunner,
+  type ProcessRunnerOptions,
   type ShellRunner,
   type ShellRunOptions,
 } from "../tools/bash.ts";
@@ -92,6 +93,10 @@ export function buildSandboxArgv(
 export function createSandboxedShellRunner(
   sandbox: SandboxOptions = {},
   shell = defaultShell(),
+  runnerOptions: ProcessRunnerOptions = {},
 ): ShellRunner {
-  return createProcessRunner((options) => buildSandboxArgv(options, sandbox, shell));
+  return createProcessRunner(
+    (options) => buildSandboxArgv(options, sandbox, shell),
+    runnerOptions,
+  );
 }

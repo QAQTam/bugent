@@ -14,6 +14,7 @@
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { spillOutput } from "./spill.ts";
+import { sanitizeEnv } from "../sandbox/env.ts";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const MAX_TIMEOUT_MS = 600_000;
@@ -158,24 +159,48 @@ function defaultShell(): string {
 /** 由调用方决定实际启动什么进程（本地 shell / bwrap 沙箱 / …）。 */
 export type ArgvBuilder = (options: ShellRunOptions) => string[];
 
+export interface ProcessRunnerOptions {
+  /**
+   * 是否过滤环境变量。默认 **true** —— 子进程默认继承整个 process.env，
+   * 意味着 API key 对沙箱内任意命令可读。
+   */
+  filterEnv?: boolean;
+  /** 额外放行的环境变量名（配置里的 `sandbox.pass_env`）。 */
+  passEnv?: readonly string[];
+}
+
 /**
  * 通用子进程 runner。
  *
  * 沙箱（Phase 6）就是换一个 ArgvBuilder —— 前面加上 bwrap 参数而已，
  * 超时、中断、输出截断这些逻辑完全复用。
  */
-export function createProcessRunner(buildArgv: ArgvBuilder): ShellRunner {
+export function createProcessRunner(
+  buildArgv: ArgvBuilder,
+  runnerOptions: ProcessRunnerOptions = {},
+): ShellRunner {
+  const filter = runnerOptions.filterEnv !== false;
+
   return {
     async run(options: ShellRunOptions): Promise<ShellResult> {
       const startedAt = Bun.nanoseconds();
       const argv = buildArgv(options);
+
+      // 环境变量过滤：默认只放行白名单里的，其余一律剔除。
+      // 不做这一步的话，`curl $OPENAI_API_KEY` 就能把 key 带出沙箱。
+      const env = filter
+        ? sanitizeEnv(process.env, {
+            ...(runnerOptions.passEnv !== undefined ? { allow: runnerOptions.passEnv } : {}),
+            ...(options.env !== undefined ? { extra: options.env } : {}),
+          }).env
+        : { ...process.env, ...(options.env ?? {}) };
 
       const proc = Bun.spawn(argv, {
         cwd: options.cwd,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env, ...(options.env ?? {}) },
+        env,
       });
 
       let timedOut = false;
@@ -219,9 +244,12 @@ export function createProcessRunner(buildArgv: ArgvBuilder): ShellRunner {
   };
 }
 
-/** 本地子进程 runner（默认实现，不做任何隔离）。 */
-export function createShellRunner(shell = defaultShell()): ShellRunner {
-  return createProcessRunner((options) => [shell, "-lc", options.command]);
+/** 本地子进程 runner（不做文件系统隔离，但**仍然过滤环境变量**）。 */
+export function createShellRunner(
+  shell = defaultShell(),
+  options: ProcessRunnerOptions = {},
+): ShellRunner {
+  return createProcessRunner((options_) => [shell, "-lc", options_.command], options);
 }
 
 /* ------------------------------------------------------------------ */

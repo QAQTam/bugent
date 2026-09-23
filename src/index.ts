@@ -359,6 +359,7 @@ async function main(): Promise<void> {
     ...(config.sandbox?.writablePaths !== undefined
       ? { writablePaths: config.sandbox.writablePaths }
       : {}),
+    ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
   });
 
   // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底
