@@ -8,6 +8,7 @@
 
 import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
 import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
+import type { WorkspaceFileEdit } from "../core/workspace.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 import {
   denialMessage,
@@ -53,6 +54,13 @@ export interface ToolCtx {
    * 未提供说明当前环境没有交互界面。
    */
   askUser?: (questions: readonly AskUserQuestion[]) => Promise<AskUserAnswer[] | undefined>;
+  /**
+   * 工具成功修改工作区时报告 before/after。
+   *
+   * 这不是展示信息，而是 undo 的持久化输入；文件工具必须如实调用。
+   * 工具本身不负责落盘，loop 会把结果挂到对应的 tool result 消息上。
+   */
+  onWorkspaceChange?: (edit: WorkspaceFileEdit) => void;
 }
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */
@@ -96,6 +104,8 @@ export interface Tool<I = unknown, O = unknown> {
 export interface ToolExecution {
   ok: boolean;
   output: string;
+  /** 本次调用成功修改的工作区文件；只用于 undo，不喂给模型。 */
+  workspace?: readonly WorkspaceFileEdit[];
 }
 
 export function toToolSchema(tool: Tool): ToolSchema {
@@ -195,8 +205,21 @@ export class ToolRegistry {
     }
 
     try {
-      const value = await tool.run(call.args, ctx);
-      return { ok: true, output: serializeToolOutput(value) };
+      const workspace: WorkspaceFileEdit[] = [];
+      const previousWorkspaceChange = ctx.onWorkspaceChange;
+      const executionCtx: ToolCtx = {
+        ...ctx,
+        onWorkspaceChange: (edit) => {
+          workspace.push(edit);
+          previousWorkspaceChange?.(edit);
+        },
+      };
+      const value = await tool.run(call.args, executionCtx);
+      return {
+        ok: true,
+        output: serializeToolOutput(value),
+        ...(workspace.length > 0 ? { workspace } : {}),
+      };
     } catch (error) {
       return { ok: false, output: errorMessage(error) };
     }

@@ -8,6 +8,7 @@
 import type { Database } from "bun:sqlite";
 import type { ContentPart, Role, ToolCall } from "../provider/types.ts";
 import { makeMessage, type MessageOrigin, type StoredMessage } from "../core/message.ts";
+import type { WorkspaceChange } from "../core/workspace.ts";
 import { databasePath } from "../config/toml.ts";
 import { openDatabase } from "./db.ts";
 
@@ -76,6 +77,7 @@ interface MessageRow {
   tool_call_id: string | null;
   parts: string;
   tool_calls: string | null;
+  workspace: string | null;
 }
 
 interface BranchRow {
@@ -122,6 +124,9 @@ function rowToMessage(row: MessageRow): StoredMessage {
     createdAt: row.created_at,
     ...(row.tool_call_id !== null ? { toolCallId: row.tool_call_id } : {}),
     ...(row.tool_calls !== null ? { toolCalls: JSON.parse(row.tool_calls) as ToolCall[] } : {}),
+    ...(row.workspace !== null
+      ? { workspace: JSON.parse(row.workspace) as WorkspaceChange }
+      : {}),
   });
 }
 
@@ -296,8 +301,8 @@ export class SessionStore {
     this.#db
       .query(
         `INSERT OR REPLACE INTO messages
-         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls, workspace)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionId,
@@ -309,6 +314,7 @@ export class SessionStore {
         message.toolCallId ?? null,
         JSON.stringify(message.parts),
         message.toolCalls === undefined ? null : JSON.stringify(message.toolCalls),
+        message.workspace === undefined ? null : JSON.stringify(message.workspace),
       );
   }
 

@@ -42,6 +42,18 @@ export function displayMsgId(item: DisplayItem): MsgId | undefined {
   return item.msgid;
 }
 
+/**
+ * 消息操作使用的锚点。
+ *
+ * 工具卡片完成后显示的是 tool result，但“撤销这次工具动作”真正需要移除的
+ * 是请求它的 assistant tool-call 消息，以及紧随其后的 tool result。因此操作
+ * 锚点优先指向 assistantMsgid。
+ */
+export function displayActionMsgId(item: DisplayItem): MsgId | undefined {
+  if (item.kind === "tool") return item.assistantMsgid ?? item.msgid;
+  return displayMsgId(item);
+}
+
 /** 运行中保留的进度行数。 */
 export const TOOL_PROGRESS_LINES = 6;
 

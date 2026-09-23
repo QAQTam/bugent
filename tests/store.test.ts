@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,6 +70,57 @@ describe("P10 · 数据库", () => {
     second.close();
   });
 
+  test("v2 数据库会自动补 messages.workspace 列", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bugent-store-migrate-"));
+    dirs.push(dir);
+    const path = join(dir, "v2.db");
+
+    const legacy = new Database(path, { create: true });
+    legacy.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        provider_id TEXT,
+        system_prompt TEXT NOT NULL,
+        title TEXT,
+        cwd TEXT,
+        active_branch_id TEXT
+      );
+      CREATE TABLE messages (
+        session_id TEXT NOT NULL,
+        msgid INTEGER NOT NULL,
+        parent_msgid INTEGER,
+        role TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        tool_call_id TEXT,
+        parts TEXT NOT NULL,
+        tool_calls TEXT,
+        PRIMARY KEY (session_id, msgid)
+      );
+      CREATE TABLE events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        turn INTEGER,
+        msgid INTEGER,
+        payload TEXT NOT NULL
+      );
+      INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+    `);
+    legacy.close();
+
+    const upgraded = openDatabase({ path });
+    const columns = upgraded.query("PRAGMA table_info(messages)").all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain("workspace");
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
+    upgraded.close();
+  });
+
   test("busy_timeout 被显式设置（并发写的前提）", async () => {
     const store = await makeStore();
     // 回归：曾把 busy_timeout 设在 journal_mode 之后，导致并发建库必然失败
@@ -117,6 +169,41 @@ describe("P10 · 会话与消息持久化", () => {
     expect(restored[2]?.toolCalls).toEqual([{ id: "c1", name: "bash", args: { command: "ls" } }]);
     expect(restored[3]?.toolCallId).toBe("c1");
     expect(store.countMessages("s1")).toBe(4);
+  });
+
+  test("tool result 的工作区 patch 元数据可以落盘并恢复", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1"));
+
+    const session = new AgentSession({
+      id: "s1",
+      system: "SYS",
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      now: () => 500,
+      onMessage: (message) => store.appendMessage("s1", message),
+    });
+
+    session.appendAssistant("", [{ id: "c1", name: "edit_file", args: {} }]);
+    session.appendToolResult("c1", "edited", [
+      {
+        path: "a.txt",
+        before: "one\n",
+        after: "two\n",
+        beforeExists: true,
+        afterExists: true,
+      },
+    ]);
+
+    const restored = store.loadMessages("s1").at(-1);
+    expect(restored?.workspace?.files).toHaveLength(1);
+    expect(restored?.workspace?.files[0]).toMatchObject({
+      path: "a.txt",
+      beforeExists: true,
+      afterExists: true,
+      reversible: true,
+    });
+    expect(restored?.workspace?.files[0]?.reverse.ops.length).toBeGreaterThan(0);
   });
 
   test("恢复后的 session 能继续追加，且 msgid 从历史最大值接着走", async () => {

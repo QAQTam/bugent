@@ -320,6 +320,15 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
         throw error;
       }
 
+      ctx.onWorkspaceChange?.({
+        path: display,
+        before,
+        after: content,
+        beforeExists: existed,
+        afterExists: true,
+        reversible: true,
+      });
+
       const lineCount = content.split("\n").length;
       const summary = existed
         ? `已覆盖 ${display}（${bytes} 字节，${lineCount} 行）`
@@ -431,6 +440,15 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
         await unlink(temp).catch(() => {});
         throw error;
       }
+
+      ctx.onWorkspaceChange?.({
+        path: display,
+        before: original,
+        after: updated,
+        beforeExists: true,
+        afterExists: true,
+        reversible: true,
+      });
 
       const replaced = replaceAll ? occurrences : 1;
       return formatDiff(

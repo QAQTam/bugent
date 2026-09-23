@@ -12,6 +12,7 @@
 
 import type { ChatMessage, ContentPart, Role, ToolCall } from "../provider/types.ts";
 import { messageText } from "../provider/types.ts";
+import type { WorkspaceChange } from "./workspace.ts";
 
 export type MsgId = number;
 
@@ -29,6 +30,13 @@ export interface StoredMessage {
   readonly origin: MessageOrigin;
   readonly toolCallId?: string;
   readonly toolCalls?: readonly ToolCall[];
+  /**
+   * 本次 tool result 造成的工作区变更。
+   *
+   * 只用于 undo / 回放，不进入模型上下文；挂在消息上而不是单独建 journal，
+   * 是为了让分支路径天然决定“哪些变更还属于当前上下文”。
+   */
+  readonly workspace?: WorkspaceChange;
   readonly createdAt: number;
 }
 
@@ -53,6 +61,20 @@ export function freezeMessage(msg: StoredMessage): StoredMessage {
     for (const call of msg.toolCalls) Object.freeze(call);
     Object.freeze(msg.toolCalls);
   }
+  if (msg.workspace !== undefined) {
+    for (const file of msg.workspace.files) {
+      for (const op of file.reverse.ops) {
+        Object.freeze(op.remove);
+        Object.freeze(op.insert);
+        Object.freeze(op);
+      }
+      Object.freeze(file.reverse.ops);
+      Object.freeze(file.reverse);
+      Object.freeze(file);
+    }
+    Object.freeze(msg.workspace.files);
+    Object.freeze(msg.workspace);
+  }
   return Object.freeze(msg);
 }
 
@@ -74,6 +96,7 @@ export function makeMessage(input: {
   createdAt: number;
   toolCallId?: string;
   toolCalls?: readonly ToolCall[];
+  workspace?: WorkspaceChange;
 }): StoredMessage {
   const msg: StoredMessage = {
     msgid: input.msgid,
@@ -86,6 +109,7 @@ export function makeMessage(input: {
     ...(input.toolCalls !== undefined && input.toolCalls.length > 0
       ? { toolCalls: input.toolCalls }
       : {}),
+    ...(input.workspace !== undefined ? { workspace: input.workspace } : {}),
   };
   return freezeMessage(msg);
 }

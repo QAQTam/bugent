@@ -262,6 +262,7 @@ export async function runTurn(
       const resultMessage = session.appendToolResult(
         call.id,
         result.ok ? result.output : `Error: ${result.output}`,
+        result.workspace,
       );
       hooks.onToolResult?.(call, result, resultMessage);
     }

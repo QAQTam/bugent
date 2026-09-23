@@ -8,6 +8,7 @@
 import type { ChatMessage, ModelClient, ToolCall } from "../provider/types.ts";
 import { buildContext, lastMsgId, prefixHash } from "./context.ts";
 import { makeMessage, SYSTEM_MSGID, textPart, type MsgId, type StoredMessage } from "./message.ts";
+import { createWorkspaceChange, type WorkspaceFileEdit } from "./workspace.ts";
 
 export interface SessionInit {
   id: string;
@@ -95,12 +96,19 @@ export class AgentSession {
     });
   }
 
-  appendToolResult(toolCallId: string, text: string): StoredMessage {
+  appendToolResult(
+    toolCallId: string,
+    text: string,
+    workspaceEdits?: readonly WorkspaceFileEdit[],
+  ): StoredMessage {
+    const workspace =
+      workspaceEdits === undefined ? undefined : createWorkspaceChange(workspaceEdits);
     return this.#append({
       role: "tool",
       origin: "tool",
       parts: [textPart(text)],
       toolCallId,
+      ...(workspace !== undefined ? { workspace } : {}),
     });
   }
 
@@ -141,6 +149,7 @@ export class AgentSession {
     parts: StoredMessage["parts"];
     toolCallId?: string;
     toolCalls?: readonly ToolCall[];
+    workspace?: StoredMessage["workspace"];
   }): StoredMessage {
     const msgid = this.#nextMsgId;
     this.#nextMsgId += 1;
@@ -155,6 +164,7 @@ export class AgentSession {
       createdAt: this.#now(),
       ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),
       ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}),
+      ...(input.workspace !== undefined ? { workspace: input.workspace } : {}),
     });
 
     this.#messages.push(msg);

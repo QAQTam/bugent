@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { makeMessage, textPart } from "../src/core/message.ts";
-import { Transcript, displayMsgId, type DisplayItem } from "../src/tui/transcript.ts";
+import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "../src/tui/transcript.ts";
 
 type AssistantItem = Extract<DisplayItem, { kind: "assistant" }>;
 type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
@@ -157,6 +157,7 @@ describe("P5 · Transcript 显示块归并", () => {
     expect(displayMsgId(t.items[0]!)).toBe(1);
     expect(displayMsgId(t.items[1]!)).toBe(3);
     expect(displayMsgId(t.items[2]!)).toBe(4);
+    expect(displayActionMsgId(t.items[1]!)).toBe(2);
     expect(t.items[1]?.kind === "tool" && t.items[1].output).toBe("a.txt");
   });
 });

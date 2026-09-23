@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_call_id TEXT,
   parts        TEXT NOT NULL,
   tool_calls   TEXT,
+  workspace    TEXT,
   PRIMARY KEY (session_id, msgid),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -106,61 +107,66 @@ function ensureColumn(db: Database, table: string, column: string, definition: s
  */
 function migrate(db: Database): void {
   const version = schemaVersion(db);
-  if (version >= SCHEMA_VERSION) return;
 
-  ensureColumn(db, "sessions", "active_branch_id", "TEXT");
-  ensureColumn(db, "messages", "parent_msgid", "INTEGER");
+  if (version < 2) {
+    ensureColumn(db, "sessions", "active_branch_id", "TEXT");
+    ensureColumn(db, "messages", "parent_msgid", "INTEGER");
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS branches (
-      id               TEXT PRIMARY KEY,
-      session_id       TEXT NOT NULL,
-      parent_branch_id TEXT,
-      from_msgid       INTEGER,
-      head_msgid       INTEGER,
-      created_at       INTEGER NOT NULL,
-      title            TEXT,
-      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-      FOREIGN KEY (parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS branches (
+        id               TEXT PRIMARY KEY,
+        session_id       TEXT NOT NULL,
+        parent_branch_id TEXT,
+        from_msgid       INTEGER,
+        head_msgid       INTEGER,
+        created_at       INTEGER NOT NULL,
+        title            TEXT,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
+    `);
+
+    const sessions = db.query("SELECT id, created_at FROM sessions").all() as {
+      id: string;
+      created_at: number;
+    }[];
+    const insertBranch = db.query(
+      `INSERT OR IGNORE INTO branches
+       (id, session_id, parent_branch_id, from_msgid, head_msgid, created_at, title)
+       VALUES (?, ?, NULL, NULL, ?, ?, 'main')`,
     );
-    CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
-  `);
+    const headQuery = db.query(
+      "SELECT MAX(msgid) AS head FROM messages WHERE session_id = ?",
+    );
+    const setActive = db.query(
+      "UPDATE sessions SET active_branch_id = COALESCE(active_branch_id, ?) WHERE id = ?",
+    );
 
-  const sessions = db.query("SELECT id, created_at FROM sessions").all() as {
-    id: string;
-    created_at: number;
-  }[];
-  const insertBranch = db.query(
-    `INSERT OR IGNORE INTO branches
-     (id, session_id, parent_branch_id, from_msgid, head_msgid, created_at, title)
-     VALUES (?, ?, NULL, NULL, ?, ?, 'main')`,
-  );
-  const headQuery = db.query(
-    "SELECT MAX(msgid) AS head FROM messages WHERE session_id = ?",
-  );
-  const setActive = db.query(
-    "UPDATE sessions SET active_branch_id = COALESCE(active_branch_id, ?) WHERE id = ?",
-  );
+    for (const session of sessions) {
+      const branchId = `${session.id}:main`;
+      const head = headQuery.get(session.id) as { head: number | null } | null;
+      insertBranch.run(branchId, session.id, head?.head ?? null, session.created_at);
+      setActive.run(branchId, session.id);
+    }
 
-  for (const session of sessions) {
-    const branchId = `${session.id}:main`;
-    const head = headQuery.get(session.id) as { head: number | null } | null;
-    insertBranch.run(branchId, session.id, head?.head ?? null, session.created_at);
-    setActive.run(branchId, session.id);
+    // 旧历史原本是线性的：按 msgid 顺序回填父指针。
+    db.exec(`
+      UPDATE messages
+         SET parent_msgid = (
+           SELECT MAX(prev.msgid)
+             FROM messages AS prev
+            WHERE prev.session_id = messages.session_id
+              AND prev.msgid < messages.msgid
+         )
+       WHERE parent_msgid IS NULL
+         AND msgid <> 0;
+    `);
   }
 
-  // 旧历史原本是线性的：按 msgid 顺序回填父指针。
-  db.exec(`
-    UPDATE messages
-       SET parent_msgid = (
-         SELECT MAX(prev.msgid)
-           FROM messages AS prev
-          WHERE prev.session_id = messages.session_id
-            AND prev.msgid < messages.msgid
-       )
-     WHERE parent_msgid IS NULL
-       AND msgid <> 0;
-  `);
+  if (version < 3) {
+    ensureColumn(db, "messages", "workspace", "TEXT");
+  }
 }
 
 /**

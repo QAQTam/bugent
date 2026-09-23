@@ -18,6 +18,7 @@ import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
 import { BranchService } from "../core/branch-service.ts";
+import { applyWorkspaceUndo, planWorkspaceUndo } from "../core/workspace-undo.ts";
 import type { MsgId, StoredMessage } from "../core/message.ts";
 import { storedText } from "../core/message.ts";
 import type { ToolRegistry } from "../tools/types.ts";
@@ -26,7 +27,7 @@ import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
-import { Transcript, displayMsgId, type DisplayItem } from "./transcript.ts";
+import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
@@ -54,6 +55,7 @@ import {
   type AskUserQuestion,
 } from "./ask-user.ts";
 import { currentTodoList, type TodoList } from "../tools/todo.ts";
+import { createWorkspaceFs } from "../tools/workspace-fs.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
@@ -94,7 +96,10 @@ interface PendingDialog {
 
 /** 点击消息后弹出的操作菜单；动作不是布尔值，所以与授权弹窗分开存。 */
 interface PendingMessageMenu {
+  /** 用于复制 / 检查 / 分叉 / 重试的实际消息。 */
   msgid: MsgId;
+  /** 用于撤回的分支锚点；工具卡片通常指向 assistant tool-call。 */
+  undoMsgid: MsgId;
   title: string;
   body: string[];
   hint: string;
@@ -227,7 +232,7 @@ export class TuiApp implements TuiInteraction {
   /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
   #toolHits: { callId: string; start: number; end: number }[] = [];
   /** 上一次渲染时每条可操作消息占用的 body 行区间。 */
-  #messageHits: { msgid: MsgId; start: number; end: number }[] = [];
+  #messageHits: { msgid: MsgId; undoMsgid: MsgId; start: number; end: number }[] = [];
   /** body 视窗在完整内容里的起始下标。 */
   #bodyWindowStart = 0;
 
@@ -609,13 +614,15 @@ export class TuiApp implements TuiInteraction {
       }
     }
 
-    const msgid = this.#messageAt(bodyIndex);
-    if (msgid !== undefined) this.#openMessageMenu(msgid);
+    const hit = this.#messageAt(bodyIndex);
+    if (hit !== undefined) this.#openMessageMenu(hit.msgid, hit.undoMsgid);
   }
 
-  #messageAt(bodyIndex: number): MsgId | undefined {
+  #messageAt(bodyIndex: number): { msgid: MsgId; undoMsgid: MsgId } | undefined {
     for (const hit of this.#messageHits) {
-      if (bodyIndex >= hit.start && bodyIndex <= hit.end) return hit.msgid;
+      if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
+        return { msgid: hit.msgid, undoMsgid: hit.undoMsgid };
+      }
     }
     return undefined;
   }
@@ -750,7 +757,7 @@ export class TuiApp implements TuiInteraction {
     return this.#session.messages.find((message) => message.msgid === msgid);
   }
 
-  #openMessageMenu(msgid: MsgId): void {
+  #openMessageMenu(msgid: MsgId, undoMsgid: MsgId = msgid): void {
     const message = this.#messageById(msgid);
     if (message === undefined) return;
     if (this.#branchService === undefined || this.#createRuntime === undefined) {
@@ -769,6 +776,7 @@ export class TuiApp implements TuiInteraction {
 
     this.#pendingMessageMenu = {
       msgid,
+      undoMsgid,
       title: `消息操作 · #${msgid}`,
       body: detail,
       hint: "点击动作，或按对应字母",
@@ -815,32 +823,7 @@ export class TuiApp implements TuiInteraction {
     try {
       switch (action) {
         case "undo": {
-          const preview = this.#branchService.previewUndo(this.#session.id, menu.msgid, "at");
-          const before = this.#todos();
-          const after = currentTodoList(preview.retained, { hideCompletedAfterUserTurn: true });
-          void this.#openDialog({
-            title: `撤回预览 · #${menu.msgid}`,
-            body: [
-              `当前分支：${preview.sourceBranchId}`,
-              `保留 ${preview.retained.length} 条消息，移出 ${preview.removed.length} 条`,
-              todoImpact(before, after),
-              "工作区文件暂不反向 patch；原分支会完整保留。",
-            ],
-            hint: `[y] 确认撤回    [n] 取消    ${DIM}Esc / Enter 取消${RESET}`,
-            actions: [
-              { label: "确认撤回", value: true, tone: "warn" },
-              { label: "取消", value: false, tone: "error" },
-            ],
-          }).then((confirmed) => {
-            if (!confirmed) return;
-            try {
-              const result = this.#branchService!.undoTo(this.#session.id, menu.msgid, "at");
-              this.#switchRuntime(result.branchId, `已撤回到 #${menu.msgid}；原分支仍保留`);
-            } catch (error) {
-              this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-              this.#render(true);
-            }
-          });
+          void this.#requestUndoPreview(menu.undoMsgid);
           return;
         }
 
@@ -888,6 +871,84 @@ export class TuiApp implements TuiInteraction {
           return;
         }
       }
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render(true);
+    }
+  }
+
+  async #requestUndoPreview(msgid: MsgId): Promise<void> {
+    const branchService = this.#branchService;
+    if (branchService === undefined) return;
+
+    try {
+      const target = this.#messageById(msgid);
+      const mode =
+        target?.role === "tool" || (target?.role === "assistant" && (target.toolCalls?.length ?? 0) > 0)
+          ? "before"
+          : "at";
+      const preview = branchService.previewUndo(this.#session.id, msgid, mode);
+      const fs = createWorkspaceFs(this.#cwd);
+      const workspacePlan = await planWorkspaceUndo(preview.removed, fs);
+      const before = this.#todos();
+      const after = currentTodoList(preview.retained, { hideCompletedAfterUserTurn: true });
+
+      if (workspacePlan.conflicts.length > 0) {
+        await this.#openDialog({
+          title: `撤回冲突 · #${msgid}`,
+          body: [
+            "以下文件已被外部修改，撤回不会写入任何文件：",
+            ...workspacePlan.conflicts.map((path) => `  ${path}`),
+            "",
+            "请先处理这些文件，再重新发起撤回。",
+          ],
+          hint: `${DIM}Esc / Enter 关闭${RESET}`,
+          actions: [{ label: "关闭", value: false, tone: "error" }],
+        });
+        return;
+      }
+
+      const workspaceLines = workspacePlan.files.length > 0
+        ? [`工作区：${workspacePlan.files.length} 个文件将反向 patch`]
+        : ["工作区：无已记录的 edit_file / write_file 变更"];
+      const workspaceNote = "说明：bash 的副作用暂不追踪；原分支会完整保留。";
+      const irreversibleLines = workspacePlan.irreversible.length > 0
+        ? [`不可逆：${workspacePlan.irreversible.join("、")}`]
+        : [];
+
+      const confirmed = await this.#openDialog({
+        title: `撤回预览 · #${msgid}`,
+        body: [
+          `当前分支：${preview.sourceBranchId}`,
+          `保留 ${preview.retained.length} 条消息，移出 ${preview.removed.length} 条`,
+          ...workspaceLines,
+          ...irreversibleLines,
+          todoImpact(before, after),
+          workspaceNote,
+        ],
+        hint: `[y] 确认撤回    [n] 取消    ${DIM}Esc / Enter 取消${RESET}`,
+        actions: [
+          { label: "确认撤回", value: true, tone: "warn" },
+          { label: "取消", value: false, tone: "error" },
+        ],
+      });
+      if (!confirmed) return;
+
+      const workspaceResult = await applyWorkspaceUndo(workspacePlan, fs);
+      if (!workspaceResult.ok) {
+        this.#transcript.pushError(
+          `工作区撤回失败：${workspaceResult.conflicts.join("、") || "未知冲突"}`,
+        );
+        this.#render(true);
+        return;
+      }
+
+      const result = branchService.undoTo(this.#session.id, msgid, mode);
+      const files = workspaceResult.applied.length;
+      this.#switchRuntime(
+        result.branchId,
+        `已撤回到 #${msgid}；原分支仍保留${files > 0 ? `；已回滚 ${files} 个文件` : ""}`,
+      );
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
       this.#render(true);
@@ -1351,9 +1412,10 @@ export class TuiApp implements TuiInteraction {
     );
     this.#messageHits = viewport.blocks.flatMap((block) => {
       const msgid = displayMsgId(block.item);
-      return msgid === undefined
+      const undoMsgid = displayActionMsgId(block.item);
+      return msgid === undefined || undoMsgid === undefined
         ? []
-        : [{ msgid, start: block.start, end: block.contentEnd }];
+        : [{ msgid, undoMsgid, start: block.start, end: block.contentEnd }];
     });
 
     if (!showMore) {
