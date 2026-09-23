@@ -1,0 +1,122 @@
+/**
+ * ★ 归一化协议层 —— Phase 1 的核心契约
+ *
+ * 规则（不可违反）：
+ *   1. 本文件只依赖标准 TS 类型，不 import 任何 adapter / SDK / 网络库。
+ *   2. agent loop、session、context 只允许 import 本文件来跟"模型"打交道。
+ *   3. 新增一个 provider = 新增一个 adapter 文件，本文件保持不变。
+ *
+ * 这样 loop 对 endpoint 类型（openai-chat / openai-responses / anthropic-messages …）
+ * 完全无感，这是 Phase 1 的验收标准。
+ */
+
+export type Role = "system" | "user" | "assistant" | "tool";
+
+/** 消息内容的原子单元。多模态以后加 `audio` / `file` 只需扩展这个 union。 */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; mime: string; data: string };
+
+/** 模型请求调用某个工具。`args` 是解析后的对象，不是 JSON 字符串。 */
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+/** 归一化消息：adapter 负责把它翻译成各家 wire format。 */
+export interface ChatMessage {
+  role: Role;
+  parts: ContentPart[];
+  /** role === "tool" 时必填，指向被回应的 tool call id。 */
+  toolCallId?: string;
+  /** role === "assistant" 且本轮要求调用工具时存在。 */
+  toolCalls?: ToolCall[];
+}
+
+export type JSONSchemaType =
+  | "object"
+  | "array"
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "null";
+
+/** 够用的 JSON Schema 子集。`type` 可省略（如 `{}` 表示任意值）。 */
+export interface JSONSchema {
+  type?: JSONSchemaType;
+  properties?: Record<string, JSONSchema>;
+  required?: readonly string[];
+  items?: JSONSchema;
+  enum?: readonly unknown[];
+  description?: string;
+  default?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ToolSchema {
+  name: string;
+  description: string;
+  parameters: JSONSchema;
+}
+
+export interface ChatRequest {
+  model: string;
+  messages: ChatMessage[];
+  tools?: ToolSchema[];
+  temperature?: number;
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+
+export type FinishReason = "stop" | "tool_calls" | "length" | "error";
+
+export interface Usage {
+  input: number;
+  output: number;
+  /** 命中 provider 前缀缓存的 token 数（能拿到时才有）。 */
+  cached?: number;
+}
+
+/** 流式增量。adapter 必须把各家流式格式归一到这四种。 */
+export type ChatChunk =
+  | { type: "text"; delta: string }
+  | { type: "tool_call"; id: string; name: string; argsDelta: string }
+  | { type: "usage"; usage: Usage }
+  | { type: "done"; reason: FinishReason };
+
+/**
+ * loop 眼里的"模型"就长这样。任何 provider 只要实现它就能插进来。
+ * `id` 形如 `openai/openai-chat/gpt-4o`，仅用于日志与 UI 展示。
+ */
+export interface ModelClient {
+  readonly id: string;
+  chat(req: ChatRequest): AsyncIterable<ChatChunk>;
+}
+
+/* ------------------------------------------------------------------ */
+/* 小工具：构造与提取                                                   */
+/* ------------------------------------------------------------------ */
+
+export function textPart(text: string): ContentPart {
+  return { type: "text", text };
+}
+
+export function textMessage(role: Role, text: string): ChatMessage {
+  return { role, parts: [textPart(text)] };
+}
+
+/** 取出消息里所有文本片段拼接。 */
+export function messageText(msg: ChatMessage): string {
+  let out = "";
+  for (const part of msg.parts) {
+    if (part.type === "text") out += part.text;
+  }
+  return out;
+}
+
+/** 判断一条消息是否"有内容"（空 assistant 消息在多数 provider 上会被拒）。 */
+export function hasContent(msg: ChatMessage): boolean {
+  return msg.parts.length > 0 || (msg.toolCalls?.length ?? 0) > 0;
+}
