@@ -13,10 +13,20 @@
 
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
+import { spillOutput } from "./spill.ts";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const MAX_TIMEOUT_MS = 600_000;
 export const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
+
+/**
+ * 回传给模型的字符上限。
+ *
+ * 超出就截断，并把**完整输出**写到 `~/.bugent/output/<session>/<call>.txt`，
+ * 在结果里给出路径引导模型自己去读。这样既不撑爆上下文，
+ * 又不丢信息 —— 模型需要细节时能按需取。
+ */
+export const MAX_MODEL_OUTPUT_CHARS = 3000;
 
 export interface ShellRunOptions {
   command: string;
@@ -25,6 +35,8 @@ export interface ShellRunOptions {
   timeoutMs: number;
   maxOutputBytes: number;
   signal: AbortSignal;
+  /** 流式回调：边跑边把输出推给 UI（不参与最终结果）。 */
+  onProgress?: (chunk: string) => void;
 }
 
 export interface ShellResult {
@@ -54,7 +66,11 @@ interface CappedText {
  * 注意：即使已经超限也要**继续消费**流，否则子进程会因为管道写满而卡死，
  * 后续 `await proc.exited` 会永远挂住。
  */
-async function readCapped(stream: ReadableStream<Uint8Array>, cap: number): Promise<CappedText> {
+async function readCapped(
+  stream: ReadableStream<Uint8Array>,
+  cap: number,
+  onChunk?: (text: string) => void,
+): Promise<CappedText> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let text = "";
@@ -71,15 +87,23 @@ async function readCapped(stream: ReadableStream<Uint8Array>, cap: number): Prom
 
       if (bytes + value.byteLength > cap) {
         const remaining = Math.max(0, cap - bytes);
-        text += decoder.decode(value.subarray(0, remaining), { stream: true });
+        const piece = decoder.decode(value.subarray(0, remaining), { stream: true });
+        text += piece;
+        onChunk?.(piece);
         truncated = true;
         continue;
       }
 
       bytes += value.byteLength;
-      text += decoder.decode(value, { stream: true });
+      const piece = decoder.decode(value, { stream: true });
+      text += piece;
+      onChunk?.(piece);
     }
-    text += decoder.decode();
+    const tail = decoder.decode();
+    if (tail.length > 0) {
+      text += tail;
+      onChunk?.(tail);
+    }
   } finally {
     reader.releaseLock();
   }
@@ -129,8 +153,12 @@ export function createProcessRunner(buildArgv: ArgvBuilder): ShellRunner {
 
       try {
         const [stdout, stderr] = await Promise.all([
-          readCapped(proc.stdout as ReadableStream<Uint8Array>, options.maxOutputBytes),
-          readCapped(proc.stderr as ReadableStream<Uint8Array>, options.maxOutputBytes),
+          readCapped(proc.stdout as ReadableStream<Uint8Array>, options.maxOutputBytes, options.onProgress),
+          readCapped(
+            proc.stderr as ReadableStream<Uint8Array>,
+            options.maxOutputBytes,
+            options.onProgress,
+          ),
         ]);
         const exitCode = await proc.exited;
 
@@ -204,6 +232,32 @@ function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: nu
   return parts.join("\n");
 }
 
+/**
+ * 超长输出：截断给模型 + 完整版落盘。
+ *
+ * 头 7 : 尾 3 的分配是有意的 —— bash 的失败原因通常出现在结尾，
+ * 只给头部会让模型看不到为什么失败。
+ */
+async function clampForModel(text: string, ctx: ToolCtx): Promise<string> {
+  if (text.length <= MAX_MODEL_OUTPUT_CHARS) return text;
+
+  const path = await spillOutput(ctx.sessionId, ctx.callId, text);
+
+  const headBudget = Math.floor(MAX_MODEL_OUTPUT_CHARS * 0.7);
+  const tailBudget = MAX_MODEL_OUTPUT_CHARS - headBudget;
+  const omitted = text.length - MAX_MODEL_OUTPUT_CHARS;
+
+  return [
+    text.slice(0, headBudget),
+    "",
+    `[... 已省略 ${omitted} 字符 ...]`,
+    text.slice(text.length - tailBudget),
+    "",
+    `[完整输出共 ${text.length} 字符，已写入：${path}]`,
+    `[需要细节时用 read_file 读取该路径]`,
+  ].join("\n");
+}
+
 export function createBashTool(
   runner: ShellRunner,
   options: BashToolOptions = {},
@@ -253,9 +307,10 @@ export function createBashTool(
         timeoutMs,
         maxOutputBytes,
         signal: ctx.signal,
+        ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
       });
 
-      return formatResult(result, timeoutMs, maxOutputBytes);
+      return clampForModel(formatResult(result, timeoutMs, maxOutputBytes), ctx);
     },
   };
 }

@@ -13,8 +13,11 @@ import { dirname } from "node:path";
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { relativeTo, resolveWithin } from "./paths.ts";
+import { compactDiff, diffLines, formatDiff } from "./diff.ts";
 
-export const MAX_READ_LINES = 2000;
+export const MAX_READ_LINES = 500;
+/** 回传给模型的字符上限（与行数上限谁先到算谁）。 */
+export const MAX_READ_CHARS = 9000;
 /** 单次读取的硬上限；超过就拒绝，避免把内存打爆。 */
 export const MAX_READ_HARD_BYTES = 8 * 1024 * 1024;
 export const MAX_WRITE_BYTES = 8 * 1024 * 1024;
@@ -106,16 +109,40 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
       }
 
       const start = offset - 1;
-      const slice = lines.slice(start, start + limit);
-      const numbered = slice.map((line, index) => `${start + index + 1}\t${line}`).join("\n");
 
-      const lastLine = start + slice.length;
-      const truncated = lastLine < lines.length;
+      // 行数与字符数两个上限，谁先到算谁 —— 单行超长的文件（如压缩后的 JS）
+      // 只靠行数限制是挡不住的，所以还要单独把超长行本身截断
+      const collected: string[] = [];
+      let chars = 0;
+      let lastLine = start;
+      let clippedLine = false;
 
-      const header = `# ${display}（共 ${lines.length} 行${truncated ? `，已显示 ${offset}-${lastLine}` : ""}）`;
-      const footer = truncated
-        ? `\n\n[还有 ${lines.length - lastLine} 行未显示，用 offset=${lastLine + 1} 继续读]`
-        : "";
+      for (let index = start; index < lines.length && collected.length < limit; index += 1) {
+        let entry = `${index + 1}\t${lines[index] ?? ""}`;
+
+        if (collected.length > 0 && chars + entry.length + 1 > MAX_READ_CHARS) break;
+
+        if (entry.length > MAX_READ_CHARS) {
+          entry = `${entry.slice(0, MAX_READ_CHARS)}…[本行超长，已截断]`;
+          clippedLine = true;
+        }
+
+        collected.push(entry);
+        chars += entry.length + 1;
+        lastLine = index + 1;
+      }
+
+      const numbered = collected.join("\n");
+      const hasMoreLines = lastLine < lines.length;
+
+      const notes: string[] = [];
+      if (hasMoreLines) notes.push(`还有 ${lines.length - lastLine} 行未显示，用 offset=${lastLine + 1} 继续读`);
+      if (clippedLine) notes.push("其中有单行过长，已被截断");
+
+      const header = `# ${display}（共 ${lines.length} 行${
+        notes.length > 0 ? `，已显示 ${offset}-${lastLine}` : ""
+      }）`;
+      const footer = notes.length > 0 ? `\n\n[${notes.join("；")}]` : "";
 
       return `${header}\n${numbered}${footer}`;
     },
@@ -167,6 +194,10 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       const absolute = resolveWithin(ctx.cwd, rawPath);
       const display = relativeTo(ctx.cwd, absolute);
 
+      // 先读旧内容，写完才能给出 diff（新建文件时旧内容为空）
+      const existed = await Bun.file(absolute).exists();
+      const before = existed ? await Bun.file(absolute).text() : "";
+
       await mkdir(dirname(absolute), { recursive: true });
 
       // 原子写：先写同目录下的临时文件，再 rename，避免写一半崩掉留下半截文件
@@ -180,7 +211,11 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       }
 
       const lineCount = content.split("\n").length;
-      return `已写入 ${display}（${bytes} 字节，${lineCount} 行）`;
+      const summary = existed
+        ? `已覆盖 ${display}（${bytes} 字节，${lineCount} 行）`
+        : `已创建 ${display}（${bytes} 字节，${lineCount} 行）`;
+
+      return formatDiff(compactDiff(diffLines(before, content)), summary);
     },
   };
 }
@@ -281,7 +316,10 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       }
 
       const replaced = replaceAll ? occurrences : 1;
-      return `已编辑 ${display}（替换 ${replaced} 处）`;
+      return formatDiff(
+        compactDiff(diffLines(original, updated)),
+        `已编辑 ${display}（替换 ${replaced} 处）`,
+      );
     },
   };
 }

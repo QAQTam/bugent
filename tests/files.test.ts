@@ -26,6 +26,7 @@ const ctxFor = (cwd: string): ToolCtx => ({
   cwd,
   signal: new AbortController().signal,
   callId: "c1",
+  sessionId: "test-session",
 });
 
 const readTool = createReadFileTool();
@@ -80,7 +81,8 @@ describe("P7 · write_file", () => {
 
     const out = await writeTool.run({ path: "nested/deep/b.txt", content: "hello" }, ctxFor(cwd));
 
-    expect(out).toContain("已写入");
+    expect(out).toContain("已创建");
+    expect(out).toContain("+hello"); // 新内容以 diff 形式呈现
     expect(await readFile(join(cwd, "nested/deep/b.txt"), "utf8")).toBe("hello");
   });
 

@@ -132,7 +132,12 @@ describe("P6 · 闸门接入 ToolRegistry", () => {
   }
 
   const call: ToolCall = { id: "c1", name: "spy", args: { value: "hello" } };
-  const ctx = { cwd: "/tmp", signal: new AbortController().signal, callId: "c1" };
+  const ctx = {
+    cwd: "/tmp",
+    signal: new AbortController().signal,
+    callId: "c1",
+    sessionId: "test-session",
+  };
 
   test("被拒绝的工具根本不会执行，且拒绝理由回流给模型", async () => {
     const ran: string[] = [];

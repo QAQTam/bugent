@@ -32,10 +32,17 @@ describe("P9 · 多进程并发写同一个库", () => {
       dirs.push(dir);
 
       const count = 3;
+      // 会话库现在落在 $HOME/.bugent/sessions.db，所以把 HOME 指到临时目录做隔离，
+      // 顺便验证"多个进程共享同一个 HOME 并发建库"这个真实场景
       const procs = Array.from({ length: count }, (_, index) =>
         Bun.spawn(
           ["bun", "run", "src/index.ts", "--mock", "--cwd", dir, "-p", `并发第 ${index + 1} 句`],
-          { cwd: PROJECT_ROOT, stdout: "pipe", stderr: "pipe" },
+          {
+            cwd: PROJECT_ROOT,
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, HOME: dir },
+          },
         ),
       );
 
@@ -51,7 +58,7 @@ describe("P9 · 多进程并发写同一个库", () => {
         expect(result.code).toBe(0);
       }
 
-      const store = new SessionStore({ path: join(dir, ".bugent/bugent.db") });
+      const store = new SessionStore({ path: join(dir, ".bugent/sessions.db") });
       try {
         const sessions = store.listSessions();
         expect(sessions).toHaveLength(count);

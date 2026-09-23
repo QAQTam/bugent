@@ -20,8 +20,23 @@ export type DisplayItem =
       output: string;
       ok: boolean;
       done: boolean;
+      /**
+       * 运行中的流式输出。**只保留最后几行** ——
+       * 一个跑十分钟的命令可能产出几十万行，全留着会拖垮渲染。
+       */
+      progress: string;
     }
   | { kind: "error"; text: string };
+
+/** 运行中保留的进度行数。 */
+export const TOOL_PROGRESS_LINES = 6;
+
+/** 只保留末尾 N 行，防止进度缓冲无限增长。 */
+export function keepLastLines(text: string, maxLines: number): string {
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return text;
+  return lines.slice(-maxLines).join("\n");
+}
 
 export class Transcript {
   #items: DisplayItem[] = [];
@@ -68,7 +83,20 @@ export class Transcript {
       output: "",
       ok: true,
       done: false,
+      progress: "",
     });
+  }
+
+  /** 工具运行中的流式输出。只保留末尾若干行，内存有界。 */
+  appendToolProgress(callId: string, chunk: string): void {
+    if (chunk.length === 0) return;
+    for (let i = this.#items.length - 1; i >= 0; i -= 1) {
+      const item = this.#items[i];
+      if (item !== undefined && item.kind === "tool" && item.callId === callId && !item.done) {
+        item.progress = keepLastLines(item.progress + chunk, TOOL_PROGRESS_LINES);
+        return;
+      }
+    }
   }
 
   finishTool(callId: string, output: string, ok: boolean): void {

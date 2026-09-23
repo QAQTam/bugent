@@ -79,9 +79,16 @@ export interface Usage {
   cached?: number;
 }
 
-/** 流式增量。adapter 必须把各家流式格式归一到这四种。 */
+/** 流式增量。adapter 必须把各家流式格式归一到这几种。 */
 export type ChatChunk =
   | { type: "text"; delta: string }
+  /**
+   * 思考链路增量（DeepSeek 的 reasoning_content、部分模型的 reasoning）。
+   *
+   * 刻意与 text 分开：思考内容**不落库、不回传、不进上下文**，
+   * 只用于前端实时展示 —— 它是临时产物，留着只会撑爆上下文和拖慢渲染。
+   */
+  | { type: "reasoning"; delta: string }
   | { type: "tool_call"; id: string; name: string; argsDelta: string }
   | { type: "usage"; usage: Usage }
   | { type: "done"; reason: FinishReason };

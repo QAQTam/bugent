@@ -14,6 +14,7 @@
 
 import { registerToolRenderer } from "./renderers.ts";
 import { renderTodoTool } from "./render-todo.ts";
+import { renderBashTool, renderDiffTool, renderReadFileTool } from "./render-tools.ts";
 import { TODO_TOOL_NAME } from "../tools/todo.ts";
 
 let registered = false;
@@ -23,4 +24,8 @@ export function registerBuiltinToolRenderers(): void {
   registered = true;
 
   registerToolRenderer(TODO_TOOL_NAME, renderTodoTool);
+  registerToolRenderer("bash", renderBashTool);
+  registerToolRenderer("read_file", renderReadFileTool);
+  registerToolRenderer("write_file", renderDiffTool);
+  registerToolRenderer("edit_file", renderDiffTool);
 }

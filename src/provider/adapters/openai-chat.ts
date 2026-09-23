@@ -136,7 +136,14 @@ interface WireToolCallDelta {
 interface WireStreamEvent {
   choices?: {
     index?: number;
-    delta?: { content?: string | null; tool_calls?: WireToolCallDelta[] };
+    delta?: {
+      content?: string | null;
+      /** DeepSeek / 部分国产模型的思考链路字段。 */
+      reasoning_content?: string | null;
+      /** 另一派命名（OpenRouter / 部分网关）。 */
+      reasoning?: string | null;
+      tool_calls?: WireToolCallDelta[];
+    };
     finish_reason?: string | null;
   }[];
   usage?: {
@@ -159,6 +166,11 @@ export function mapStreamEvent(
 
   for (const choice of event.choices ?? []) {
     const delta = choice.delta;
+
+    // 思考链路：两种命名都认，且优先于 content（有些模型两者同时发）
+    const reasoning = delta?.reasoning_content ?? delta?.reasoning;
+    if (reasoning) chunks.push({ type: "reasoning", delta: reasoning });
+
     if (delta?.content) chunks.push({ type: "text", delta: delta.content });
 
     for (const call of delta?.tool_calls ?? []) {

@@ -8,6 +8,7 @@
 import type { Database } from "bun:sqlite";
 import type { ContentPart, Role, ToolCall } from "../provider/types.ts";
 import { makeMessage, type MessageOrigin, type StoredMessage } from "../core/message.ts";
+import { databasePath } from "../config/toml.ts";
 import { openDatabase } from "./db.ts";
 
 export interface SessionRecord {
@@ -237,7 +238,7 @@ export class SessionStore {
   }
 }
 
-/** 默认落盘位置：项目内的 .bugent/bugent.db（已加进 .gitignore）。 */
-export function defaultDatabasePath(cwd: string): string {
-  return `${cwd.replace(/\/+$/, "")}/.bugent/bugent.db`;
+/** 会话库位置：`~/.bugent/sessions.db`（与 config.toml 同目录）。 */
+export function defaultDatabasePath(home?: string): string {
+  return databasePath(home);
 }

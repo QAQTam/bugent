@@ -17,8 +17,17 @@ import type { ToolExecution, ToolRegistry } from "../tools/types.ts";
 
 export interface LoopHooks {
   onText?(delta: string): void;
+  /**
+   * 思考链路增量。
+   *
+   * 注意：**不落库、不回传、不进上下文** —— 只在回调里转瞬即逝。
+   * 这是有意的：思考内容动辄上万字，留着只会撑爆上下文、拖慢渲染。
+   */
+  onReasoning?(delta: string): void;
   onAssistant?(message: StoredMessage): void;
   onToolCall?(call: ToolCall): void;
+  /** 工具运行中的流式输出（仅用于 UI 展示，不影响回传给模型的结果）。 */
+  onToolProgress?(call: ToolCall, chunk: string): void;
   onToolResult?(call: ToolCall, result: ToolExecution): void;
   onUsage?(usage: Usage): void;
 }
@@ -75,11 +84,17 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     onText: (delta) => {
       for (const group of active) group.onText?.(delta);
     },
+    onReasoning: (delta) => {
+      for (const group of active) group.onReasoning?.(delta);
+    },
     onAssistant: (message) => {
       for (const group of active) group.onAssistant?.(message);
     },
     onToolCall: (call) => {
       for (const group of active) group.onToolCall?.(call);
+    },
+    onToolProgress: (call, chunk) => {
+      for (const group of active) group.onToolProgress?.(call, chunk);
     },
     onToolResult: (call, result) => {
       for (const group of active) group.onToolResult?.(call, result);
@@ -147,6 +162,11 @@ export async function runTurn(
           hooks.onText?.(chunk.delta);
           break;
 
+        case "reasoning":
+          // 只转发给 UI，不累积、不进消息历史
+          hooks.onReasoning?.(chunk.delta);
+          break;
+
         case "tool_call": {
           const existing = pending.get(chunk.id);
           if (existing === undefined) {
@@ -191,7 +211,16 @@ export async function runTurn(
 
     for (const call of calls) {
       hooks.onToolCall?.(call);
-      const result = await tools.execute(call, { cwd, signal, callId: call.id });
+      const progress = hooks.onToolProgress;
+      const result = await tools.execute(call, {
+        cwd,
+        signal,
+        callId: call.id,
+        sessionId: session.id,
+        ...(progress !== undefined
+          ? { onProgress: (chunk: string) => progress(call, chunk) }
+          : {}),
+      });
       hooks.onToolResult?.(call, result);
       session.appendToolResult(call.id, result.ok ? result.output : `Error: ${result.output}`);
     }

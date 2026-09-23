@@ -16,4 +16,11 @@ export const COLOR = {
   todoPending: "#64748b",
   todoActive: "#fbbf24",
   todoDone: "#4ade80",
+
+  // 思考链路
+  reasoning: "#8b5cf6",
+
+  // diff
+  diffAdd: "#4ade80",
+  diffRemove: "#f87171",
 } as const;

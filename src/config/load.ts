@@ -1,13 +1,18 @@
 /**
- * 配置加载：优先读 cwd 下的 `bugent.config.ts`，没有就退回环境变量。
- * 环境变量覆盖（Phase 5 会扩展成完整的优先级链）。
+ * 配置加载。
+ *
+ * 解析顺序（先命中先用）：
+ *   1. `~/.bugent/config.toml`   —— 首选，缺失时自动生成一份带注释的默认配置
+ *   2. `./bugent.config.ts`      —— 项目级覆盖（Bun 原生 import TS）
+ *   3. 环境变量                   —— 最后的兜底
  */
 
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_SYSTEM_PROMPT, type BugentConfig } from "./schema.ts";
+import { configFilePath, ensureConfigFile, parseConfigToml } from "./toml.ts";
 
-const CONFIG_FILENAMES = ["bugent.config.ts", "bugent.config.js", "bugent.config.mjs"];
+const PROJECT_CONFIG_FILENAMES = ["bugent.config.ts", "bugent.config.js", "bugent.config.mjs"];
 
 function configFromEnv(): BugentConfig {
   const apiKey = Bun.env.BUGENT_API_KEY ?? Bun.env.OPENAI_API_KEY;
@@ -28,8 +33,8 @@ function configFromEnv(): BugentConfig {
   };
 }
 
-async function loadConfigFile(cwd: string): Promise<BugentConfig | undefined> {
-  for (const name of CONFIG_FILENAMES) {
+async function loadProjectConfig(cwd: string): Promise<BugentConfig | undefined> {
+  for (const name of PROJECT_CONFIG_FILENAMES) {
     const path = join(cwd, name);
     if (!(await Bun.file(path).exists())) continue;
 
@@ -45,17 +50,49 @@ async function loadConfigFile(cwd: string): Promise<BugentConfig | undefined> {
 
 export interface LoadConfigOptions {
   cwd?: string;
-  /** 强制忽略 config 文件，只用环境变量（`--mock` 等场景用）。 */
+  /** 跳过所有配置文件，只用环境变量。 */
   ignoreFile?: boolean;
+  /** 覆盖 home 目录（测试用）。 */
+  home?: string;
+  /** 缺失时不生成默认配置（测试用，避免污染真实 HOME）。 */
+  noCreate?: boolean;
 }
 
-export async function loadConfig(options: LoadConfigOptions = {}): Promise<BugentConfig> {
+export interface LoadedConfig {
+  config: BugentConfig;
+  /** 配置来源，用于在 UI 上如实告知用户"读的是哪份配置"。 */
+  source: string;
+  /** 本次是否新建了默认配置文件。 */
+  created: boolean;
+}
+
+export async function loadConfig(options: LoadConfigOptions = {}): Promise<LoadedConfig> {
   const cwd = options.cwd ?? process.cwd();
+
   if (!options.ignoreFile) {
-    const fromFile = await loadConfigFile(cwd);
-    if (fromFile !== undefined) return fromFile;
+    // 1) ~/.bugent/config.toml
+    const userPath = configFilePath(options.home);
+    const created = options.noCreate === true ? false : await ensureConfigFile(userPath);
+
+    if (await Bun.file(userPath).exists()) {
+      const text = await Bun.file(userPath).text();
+      try {
+        return { config: parseConfigToml(text), source: userPath, created };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${userPath} 解析失败：${detail}`);
+      }
+    }
+
+    // 2) 项目内配置
+    const projectConfig = await loadProjectConfig(cwd);
+    if (projectConfig !== undefined) {
+      return { config: projectConfig, source: "bugent.config.ts", created };
+    }
   }
-  return configFromEnv();
+
+  // 3) 环境变量
+  return { config: configFromEnv(), source: "环境变量", created: false };
 }
 
 export { DEFAULT_SYSTEM_PROMPT };

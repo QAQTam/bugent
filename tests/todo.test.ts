@@ -162,7 +162,7 @@ describe("todo_write · 工具行为", () => {
   });
 
   test("run 返回各状态计数", async () => {
-    const out = await tool.run({ todos: sample }, { cwd: "/tmp", signal: new AbortController().signal, callId: "c1" });
+    const out = await tool.run({ todos: sample }, { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" });
     expect(out).toContain("共 3 项");
     expect(out).toContain("1 已完成");
     expect(out).toContain("1 进行中");
@@ -173,7 +173,7 @@ describe("todo_write · 工具行为", () => {
     const registry = new ToolRegistry().register(tool);
     const result = await registry.execute(
       { id: "c1", name: TODO_TOOL_NAME, args: { todos: "nope" } },
-      { cwd: "/tmp", signal: new AbortController().signal, callId: "c1" },
+      { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" },
     );
     expect(result.ok).toBe(false);
     expect(result.output).toContain("必须是数组");
@@ -284,6 +284,7 @@ describe("todo_write · 渲染", () => {
       output: "待办清单已更新",
       ok: true,
       done: true,
+      progress: "",
     };
     const lines = renderTodoTool(item, 80);
 
@@ -304,6 +305,7 @@ describe("渲染扩展点", () => {
     output: "out",
     ok: true,
     done: true,
+    progress: "",
   };
 
   test("未注册的工具走通用外观", () => {

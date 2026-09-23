@@ -76,9 +76,9 @@ describe("P10 · 数据库", () => {
     expect(row?.timeout).toBe(5000);
   });
 
-  test("默认数据库路径落在项目内的 .bugent 下", () => {
-    expect(defaultDatabasePath("/work/proj")).toBe("/work/proj/.bugent/bugent.db");
-    expect(defaultDatabasePath("/work/proj/")).toBe("/work/proj/.bugent/bugent.db");
+  test("默认数据库路径落在 ~/.bugent 下（与 config.toml 同目录）", () => {
+    expect(defaultDatabasePath("/home/tester")).toBe("/home/tester/.bugent/sessions.db");
+    expect(defaultDatabasePath("/home/tester/")).toBe("/home/tester/.bugent/sessions.db");
   });
 });
 

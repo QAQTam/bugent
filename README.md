@@ -21,8 +21,7 @@ bun install
 # 无需网络与密钥，验证链路
 bun run src/index.ts --mock -p "你好"
 
-# 接真实模型
-export OPENAI_API_KEY=sk-xxx
+# 接真实模型（配置在 ~/.bugent/config.toml，首次运行自动生成）
 bun run src/index.ts -p "写个 hello world"
 
 # 交互式（自动进入 TUI，需要 TTY）
@@ -36,21 +35,42 @@ bun run src/index.ts --yes            # 跳过所有权限确认（危险）
 bun run src/index.ts --no-sandbox     # 关闭 bwrap 沙箱
 bun run src/index.ts --allow-network  # 沙箱内允许联网（默认断网）
 
-# 会话持久化（默认写入 ./.bugent/bugent.db）
+# 会话
 bun run src/index.ts --sessions       # 列出已保存的会话
 bun run src/index.ts --resume <id>    # 恢复会话继续聊
 bun run src/index.ts --no-persist     # 不落盘
-```
-
-TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可用 `--resume` 回去）。
 
 # 测试与类型检查
 bun test
 bun run typecheck
 ```
 
-配置：复制 `bugent.config.example.ts` 为 `bugent.config.ts`；不建配置文件时走环境变量
-（`BUGENT_API_KEY` / `OPENAI_API_KEY`、`BUGENT_BASE_URL`、`BUGENT_MODEL`）。
+TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可用 `--resume` 回去）。
+
+### 配置与数据
+
+全部放在 `~/.bugent/`：
+
+| 路径 | 内容 |
+| --- | --- |
+| `~/.bugent/config.toml` | 配置（TOML，带注释，首次运行自动生成） |
+| `~/.bugent/sessions.db` | 会话与审计记录（SQLite + WAL） |
+| `~/.bugent/output/<session>/` | 工具的超长输出落盘，模型按需读取 |
+
+解析顺序：`~/.bugent/config.toml` → `./bugent.config.ts` → 环境变量。
+
+最小配置：
+
+```toml
+default_model = "openai/deepseek-v4.1-flash"
+
+[[providers]]
+id = "openai"
+endpoint = "openai-chat"
+base_url = "http://127.0.0.1:8787/v1"
+# 开启思考链路：实测该模型必须显式打开才会返回 reasoning_content
+extra_body = { reasoning_effort = "high" }
+```
 
 ## 当前进度
 
@@ -79,6 +99,52 @@ bun run typecheck
 | `write_file` | 原子写（临时文件 + rename），自动建父目录 | 路径约束 |
 | `edit_file` | 精确字符串替换，不唯一时报错而非猜测 | 路径约束 |
 | `todo_write` | 待办清单，前端以 sticky checkbox 面板实时显示 | 无副作用，默认放行 |
+
+### 输出折叠
+
+工具输出可能极长，屏幕只给固定几行，超出的部分折叠成「已忽略 N 行」：
+
+| 工具 | 展示 |
+| --- | --- |
+| `bash` | 头 2 行 + `… 已忽略 N 行 …` + 尾 2 行（共 5 行）；运行中显示最新 6 行进度 |
+| `read_file` | 头 3 行 + `… 已忽略 N 行 …` + 尾 3 行 |
+| `write_file` / `edit_file` | diff（`+`/`-` 着色），同样折叠 |
+
+### 回传给模型的截断
+
+| 工具 | 上限 | 超出时 |
+| --- | --- | --- |
+| `bash` | 3000 字符（头 7 : 尾 3） | 完整输出写入 `~/.bugent/output/<session>/<call>.txt`，结果里给出路径引导模型读取 |
+| `read_file` | 500 行 **或** 9000 字符（谁先到算谁） | 提示用 `offset` 继续读；单行超长时截断该行本身 |
+
+## 思考链路
+
+模型返回的 `reasoning_content`（思考过程）**不落库、不回传、不进上下文** ——
+它是临时产物，留着只会撑爆上下文、拖慢渲染。
+
+显示方式：输入框上方固定预留 5 行，思考只占**中间那一行**：
+
+```
+思考 The riddle: "一个农夫有17只羊…        ← 中间行，超宽时横向滚动，右侧永远是最新字符
+```
+
+遇到 `\n` 就销毁当前行重新开始，所以内存是 **O(一行)**，与总思考长度无关。
+
+> `deepseek-v4.1-flash` 需要显式设置 `extra_body = { reasoning_effort = "high" }`
+> 才会返回 `reasoning_content`；`glm-5.3-flash` 默认就有。
+
+## 性能
+
+SSE 解析（`bun run scripts/bench-sse.ts`）：
+
+| 场景 | 结果 | 相对 300 tok/s 的余量 |
+| --- | --- | --- |
+| 突发 20 万条 | 878,675 tok/s | **2929×** |
+| 节流 300 tok/s | 326 tok/s，无积压 | 1.1× |
+| 超大 delta | 333 MB/s | — |
+
+`tests/sse-perf.test.ts` 用低得多的门槛（30×）做回归，目的是发现数量级退化，
+而不是卡 CI 的毫秒数。
 
 `todo_write` 的三态用**纯 ASCII 等宽标记**渲染，避免花体字符在不同终端里宽度不一致：
 

@@ -18,6 +18,13 @@ export interface ToolCtx {
   cwd: string;
   signal: AbortSignal;
   callId: string;
+  /** 当前会话 id，用于把工具产物按会话分目录。 */
+  sessionId: string;
+  /**
+   * 流式进度回调：长时间运行的工具（如 bash）可以边跑边把输出推给 UI。
+   * 这只是展示用，**不参与**最终回传给模型的结果。
+   */
+  onProgress?: (chunk: string) => void;
 }
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */

@@ -17,6 +17,7 @@ import type { ModelClient } from "./provider/types.ts";
 import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
+import type { BugentConfig } from "./config/schema.ts";
 import { TuiApp } from "./tui/app.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
@@ -153,8 +154,10 @@ export function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-async function buildRegistry(options: CliOptions): Promise<{ registry: ProviderRegistry; model: string }> {
-  const config = await loadConfig({ cwd: options.cwd, ignoreFile: options.mock });
+async function buildRegistry(
+  options: CliOptions,
+  config: BugentConfig,
+): Promise<{ registry: ProviderRegistry; model: string }> {
   const registry = new ProviderRegistry();
   for (const provider of config.providers) registry.register(provider);
   if (options.mock) registry.register({ id: "mock", endpoint: "mock" });
@@ -286,17 +289,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { registry, model } = await buildRegistry(options);
+  // 配置只加载一次：loadConfig 在缺失时会生成 ~/.bugent/config.toml，
+  // 重复调用会产生"到底建了几次"的困惑
+  const loaded = await loadConfig({ cwd: options.cwd });
+  const config = loaded.config;
+
+  const { registry, model } = await buildRegistry(options, config);
   const ref = parseModelRef(model);
   const client = registry.resolve(ref);
-  const config = await loadConfig({ cwd: options.cwd, ignoreFile: options.mock });
   const systemPrompt = config.agent?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
 
   /* ----------------------- 持久化（Phase 10） ----------------------- */
 
   const store = options.noPersist
     ? undefined
-    : new SessionStore({ path: defaultDatabasePath(options.cwd) });
+    : new SessionStore({ path: defaultDatabasePath() });
 
   if (options.sessions) {
     listSessions(store);

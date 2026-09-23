@@ -27,6 +27,7 @@ import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
+import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
 import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 
@@ -56,6 +57,8 @@ export class TuiApp {
   #createSession: (() => AgentSession) | undefined;
 
   #transcript = new Transcript();
+  /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
+  #thinking = new ThinkingBuffer();
   #input = "";
   #cursor = 0;
   #scrollOffset = 0;
@@ -318,6 +321,11 @@ export class TuiApp {
         this.#transcript.appendAssistantText(delta);
         this.#scheduleRender();
       },
+      // 思考链路：只进滚动缓冲，不进消息区、不落库
+      onReasoning: (delta) => {
+        this.#thinking.push(delta);
+        this.#scheduleRender();
+      },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
       onAssistant: () => {
@@ -325,6 +333,11 @@ export class TuiApp {
       },
       onToolCall: (call) => {
         this.#transcript.startTool(call);
+        this.#scheduleRender();
+      },
+      // 运行中的流式输出：只保留末尾若干行，内存有界
+      onToolProgress: (call, chunk) => {
+        this.#transcript.appendToolProgress(call.id, chunk);
         this.#scheduleRender();
       },
       onToolResult: (call, result) => {
@@ -349,6 +362,7 @@ export class TuiApp {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     } finally {
       this.#transcript.endAssistant();
+      this.#thinking.reset();
       this.#busy = false;
       this.#abort = undefined;
       this.#render();
@@ -377,12 +391,20 @@ export class TuiApp {
   }
 
   #compose(width: number, height: number): string[] {
+    // 思考区固定预留（默认 5 行，小终端自动收缩），不思考时是全空白 ——
+    // 这块空间同时充当输入框上方的呼吸留白
+    const thinkingRows = Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
+    const thinkingBlock = composeThinkingBlock(this.#thinking, width, { rows: thinkingRows });
+
     // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置
-    const panelBudget = Math.max(0, Math.min(Math.floor(height * 0.4), height - 3));
+    const panelBudget = Math.max(
+      0,
+      Math.min(Math.floor(height * 0.4), height - 3 - thinkingBlock.length),
+    );
     const todoPanel =
       panelBudget >= 2 ? composeTodoPanel(this.#todos(), width, { maxLines: panelBudget }) : [];
 
-    const bodyHeight = Math.max(1, height - 2 - todoPanel.length);
+    const bodyHeight = Math.max(1, height - 2 - todoPanel.length - thinkingBlock.length);
     const body = this.#composeBody(width, bodyHeight);
 
     // 权限弹窗以覆盖层形式压在消息区底部
@@ -394,7 +416,13 @@ export class TuiApp {
       }
     }
 
-    return [this.#composeStatus(width), ...body, ...todoPanel, this.#composeInput(width)];
+    return [
+      this.#composeStatus(width),
+      ...body,
+      ...todoPanel,
+      ...thinkingBlock,
+      this.#composeInput(width),
+    ];
   }
 
   /**

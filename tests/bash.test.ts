@@ -7,6 +7,7 @@ function ctx(overrides: Partial<ToolCtx> = {}): ToolCtx {
     cwd: process.cwd(),
     signal: new AbortController().signal,
     callId: "call_1",
+    sessionId: "test-session",
     ...overrides,
   };
 }
