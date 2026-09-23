@@ -223,3 +223,47 @@ P1 ──► P2 ──► P4 ──┬─► P3 ──► P6 ──► P7
                               └─► P9 ──► P10
 ```
 即：**先搭骨架（P1/P2）→ 跑通最小 loop（P4）→ 再并行铺工具链（P3/P5）→ 补安全与体验（P6~P8）→ 收口并发与持久化（P9/P10）**。
+
+---
+
+## 8. 实施复盘（10 个 Phase 落地后回填）
+
+### 与原计划的三处偏离
+
+| 原计划 | 实际做法 | 原因 |
+| --- | --- | --- |
+| TUI 用 `@opentui/core` | **Bun 原生自研** | 实测 `Bun.markdown.ansi` 已自带 markdown→ANSI 与 ts/js 高亮，`wrapAnsi`/`stringWidth` 解决折行与 CJK 宽度。OpenTUI 换来的只剩布局与组件，却要引入原生二进制 + 一层 Babel 转换，性价比不成立。最终**运行时依赖为零** |
+| bash 工具走 `Bun.Terminal` PTY | **管道（非 PTY）** | 工具输出最终喂给模型，PTY 会掺入 `\r\n`、ANSI 转义、stdout/stderr 交织，对 LLM 全是噪声。交互式命令本就不是 agent 工具的职责。执行层抽成 `ShellRunner`，将来要 PTY 直接换 |
+| 先 P9 后 P10 | **先 P10 后 P9** | session 注册表天然要建立在存储之上；先有 store 再有多会话更顺 |
+
+### 真实踩到的坑（都是"只跑单测发现不了"的类型）
+
+1. **PTY 里 `process.stdout.columns/rows` 返回 `0` 而非 `undefined`**
+   `?? 80` 兜不住，屏幕被压成 1×1，TUI 只画一行。必须用 `||`。
+   —— 只有真起 PTY 跑才会暴露。
+
+2. **TUI 从来没把用户消息写进 session**
+   直接调 `runTurn` 漏了 `appendUser`，模型完全读不到用户输入。
+   修法不是补一行，而是新增 `runUserTurn()` 把这一步收进 API，让错误不可表达。
+
+3. **一次 runTurn 的多条 assistant 消息被拼进同一个显示块**
+   "我来看看目录。命令执行完毕。" 挤在一行。
+   修法：抽出纯逻辑的 `Transcript`，`onAssistant` 负责断开流式块，并加单测。
+
+4. **多进程并发建库必然 `database is locked`**
+   两个叠加的根因：`busy_timeout` 设在了 `journal_mode = WAL` 之后（而切 WAL 本身要抢锁）；
+   且 Bun 的 `DatabaseOptions` **没有 `timeout` 字段**，传了会被静默忽略。
+   修法：`busy_timeout` 提到最前 + 同步重试 + 真起多进程做回归测试。
+
+5. **`Bun.wrapAnsi` 默认只按空格断行**
+   中文没有空格 → 完全不折行。必须传 `{ hard: true }`。
+
+6. **SIGKILL 后 Bun 只给 `exit code: 137`，`signalCode` 是 null**
+   不自己记录 `timedOut` / `aborted`，模型就分不清"命令自己退出"还是"被我们杀了"。
+
+### 经验
+
+- **纯逻辑与 I/O 必须分开**：`Screen` / `KeyDecoder` / `Transcript` / `PermissionPolicy` 都是纯的，所以能单测；TUI 的 bug 全部是通过"把逻辑抽出来"才锁住的。
+- **PTY 冒烟不可省**：三个 TUI bug 里有两个只有真起伪终端才会暴露。
+- **`bun test` 通过 ≠ 类型正确**：`tsgo` 当场抓出 16 个 Bun 跑得通但类型错的错误（例如 `JSONSchema.type` 写死成 `"object"`）。
+- **验收标准要可执行**：P1 的"loop 层零 provider 依赖"是用 `grep` 验的，不是嘴上说的。
