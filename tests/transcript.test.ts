@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { Transcript, type DisplayItem } from "../src/tui/transcript.ts";
+import { makeMessage, textPart } from "../src/core/message.ts";
+import { Transcript, displayMsgId, type DisplayItem } from "../src/tui/transcript.ts";
 
 type AssistantItem = Extract<DisplayItem, { kind: "assistant" }>;
 type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
@@ -110,5 +111,52 @@ describe("P5 · Transcript 显示块归并", () => {
 
     const b = Transcript.mergeUsage(a, { input: 3, output: 1, cached: 7 });
     expect(b).toEqual({ input: 18, output: 4, cached: 7 });
+  });
+
+  test("restore 从持久消息重建块，并把工具卡片指向结果 msgid", () => {
+    const t = new Transcript();
+    const messages = [
+      makeMessage({
+        msgid: 1,
+        role: "user",
+        origin: "user",
+        parts: [textPart("看一下")],
+        createdAt: 1,
+      }),
+      makeMessage({
+        msgid: 2,
+        parentMsgId: 1,
+        role: "assistant",
+        origin: "assistant",
+        parts: [],
+        createdAt: 2,
+        toolCalls: [{ id: "c1", name: "bash", args: { command: "ls" } }],
+      }),
+      makeMessage({
+        msgid: 3,
+        parentMsgId: 2,
+        role: "tool",
+        origin: "tool",
+        parts: [textPart("a.txt")],
+        createdAt: 3,
+        toolCallId: "c1",
+      }),
+      makeMessage({
+        msgid: 4,
+        parentMsgId: 3,
+        role: "assistant",
+        origin: "assistant",
+        parts: [textPart("完成")],
+        createdAt: 4,
+      }),
+    ];
+
+    t.restore(messages);
+
+    expect(t.items.map((item) => item.kind)).toEqual(["user", "tool", "assistant"]);
+    expect(displayMsgId(t.items[0]!)).toBe(1);
+    expect(displayMsgId(t.items[1]!)).toBe(3);
+    expect(displayMsgId(t.items[2]!)).toBe(4);
+    expect(t.items[1]?.kind === "tool" && t.items[1].output).toBe("a.txt");
   });
 });

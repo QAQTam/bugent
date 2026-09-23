@@ -12,29 +12,29 @@ import { COLOR } from "./theme.ts";
 
 export type DialogActionTone = "ok" | "warn" | "error";
 
-export interface DialogAction {
+export interface DialogAction<T = boolean> {
   label: string;
-  value: boolean;
+  value: T;
   tone?: DialogActionTone;
 }
 
-export interface DialogButtonHit {
+export interface DialogButtonHit<T = boolean> {
   /** 0-based 可见列，包含左侧边框。 */
   start: number;
   /** 0-based 可见列，包含右侧边框。 */
   end: number;
-  value: boolean;
+  value: T;
 }
 
-export interface DialogButtonRowHit {
+export interface DialogButtonRowHit<T = boolean> {
   /** 相对弹窗顶部的 0-based 行号。 */
   line: number;
-  hit: DialogButtonHit;
+  hit: DialogButtonHit<T>;
 }
 
-export interface ComposedDialogActions {
+export interface ComposedDialogActions<T = boolean> {
   text: string;
-  hits: DialogButtonHit[];
+  hits: DialogButtonHit<T>[];
 }
 
 function toneColor(tone: DialogActionTone | undefined): string {
@@ -55,10 +55,10 @@ function toneColor(tone: DialogActionTone | undefined): string {
  * 行文本本身不包含对话框左右边框；`start/end` 按包含左边框的整行坐标计算。
  * 这样 TuiApp 可以直接用 `key.x - 1` 做命中，不需要重复知道边框宽度。
  */
-export function composeDialogActions(
-  actions: readonly DialogAction[],
-): ComposedDialogActions {
-  const hits: DialogButtonHit[] = [];
+export function composeDialogActions<T = boolean>(
+  actions: readonly DialogAction<T>[],
+): ComposedDialogActions<T> {
+  const hits: DialogButtonHit<T>[] = [];
   let text = " ";
   // 第 0 列是对话框左边框；文本从第 1 列开始。
   let cursor = 2;
@@ -86,10 +86,10 @@ export function composeDialogActions(
 }
 
 /** 判断某一行的可见列是否命中按钮；返回按钮值，未命中返回 undefined。 */
-export function hitDialogAction(
-  hits: readonly DialogButtonHit[],
+export function hitDialogAction<T = boolean>(
+  hits: readonly DialogButtonHit<T>[],
   column: number,
-): boolean | undefined {
+): T | undefined {
   for (const hit of hits) {
     if (column >= hit.start && column <= hit.end) return hit.value;
   }
@@ -97,11 +97,11 @@ export function hitDialogAction(
 }
 
 /** 按行过滤后再命中；同一行可能有多个按钮。 */
-export function hitDialogActionAtLine(
-  rows: readonly DialogButtonRowHit[],
+export function hitDialogActionAtLine<T = boolean>(
+  rows: readonly DialogButtonRowHit<T>[],
   line: number,
   column: number,
-): boolean | undefined {
+): T | undefined {
   const hits = rows.filter((entry) => entry.line === line).map((entry) => entry.hit);
   return hits.length === 0 ? undefined : hitDialogAction(hits, column);
 }

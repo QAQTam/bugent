@@ -17,6 +17,8 @@ import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 
 export interface LoopHooks {
+  /** 用户消息落库后触发；TUI 用它拿到可点击的 msgid。 */
+  onUser?(message: StoredMessage): void;
   onText?(delta: string): void;
   /**
    * 思考链路增量。
@@ -29,7 +31,7 @@ export interface LoopHooks {
   onToolCall?(call: ToolCall): void;
   /** 工具运行中的流式输出（仅用于 UI 展示，不影响回传给模型的结果）。 */
   onToolProgress?(call: ToolCall, chunk: string): void;
-  onToolResult?(call: ToolCall, result: ToolExecution): void;
+  onToolResult?(call: ToolCall, result: ToolExecution, message?: StoredMessage): void;
   /**
    * 工具请求一次性能力授权（目前是联网）。
    *
@@ -94,6 +96,9 @@ interface PendingCall {
 export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
   const active = groups.filter((group): group is LoopHooks => group !== undefined);
   return {
+    onUser: (message) => {
+      for (const group of active) group.onUser?.(message);
+    },
     onText: (delta) => {
       for (const group of active) group.onText?.(delta);
     },
@@ -109,8 +114,8 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     onToolProgress: (call, chunk) => {
       for (const group of active) group.onToolProgress?.(call, chunk);
     },
-    onToolResult: (call, result) => {
-      for (const group of active) group.onToolResult?.(call, result);
+    onToolResult: (call, result, message) => {
+      for (const group of active) group.onToolResult?.(call, result, message);
     },
     // 用户交互只走第一个提供了它的 hook —— 不该被广播多次
     onRequestCapability: async (call, escalation) => {
@@ -144,7 +149,8 @@ export async function runUserTurn(
   text: string,
   options: RunTurnOptions = {},
 ): Promise<TurnResult> {
-  session.appendUser(text);
+  const message = session.appendUser(text);
+  options.hooks?.onUser?.(message);
   return runTurn(session, options);
 }
 
@@ -253,8 +259,11 @@ export async function runTurn(
           : {}),
         ...(askUser !== undefined ? { askUser: (qs: readonly AskUserQuestion[]) => askUser(call, qs) } : {}),
       });
-      hooks.onToolResult?.(call, result);
-      session.appendToolResult(call.id, result.ok ? result.output : `Error: ${result.output}`);
+      const resultMessage = session.appendToolResult(
+        call.id,
+        result.ok ? result.output : `Error: ${result.output}`,
+      );
+      hooks.onToolResult?.(call, result, resultMessage);
     }
 
     // 带着工具结果回到循环，让模型继续。

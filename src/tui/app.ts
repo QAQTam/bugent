@@ -17,13 +17,16 @@ import type { Usage } from "../provider/types.ts";
 import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
+import { BranchService } from "../core/branch-service.ts";
+import type { MsgId, StoredMessage } from "../core/message.ts";
+import { storedText } from "../core/message.ts";
 import type { ToolRegistry } from "../tools/types.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
-import { Transcript, type DisplayItem } from "./transcript.ts";
+import { Transcript, displayMsgId, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
@@ -61,6 +64,11 @@ import {
   type DialogAction,
   type DialogButtonRowHit,
 } from "./dialog.ts";
+import {
+  MESSAGE_ACTIONS,
+  messageActionFromKey,
+  type MessageAction,
+} from "./message-actions.ts";
 
 /** 输入面板的行数（带底色的"阴影"区块）。 */
 export const INPUT_ROWS = 4;
@@ -84,6 +92,41 @@ interface PendingDialog {
   resolve: (value: boolean) => void;
 }
 
+/** 点击消息后弹出的操作菜单；动作不是布尔值，所以与授权弹窗分开存。 */
+interface PendingMessageMenu {
+  msgid: MsgId;
+  title: string;
+  body: string[];
+  hint: string;
+  actions: readonly DialogAction<MessageAction>[];
+}
+
+/** 请求 TUI 宿主创建/切换 runtime。 */
+export interface RuntimeRequest {
+  /** 省略时表示新建 session。 */
+  sessionId?: string;
+  branchId?: string;
+  mode?: SandboxMode;
+}
+
+function oneLine(text: string, max = 64): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, Math.max(1, max - 1))}…`;
+}
+
+function todoImpact(before: TodoList, after: TodoList): string {
+  const beforeById = new Map(before.todos.map((todo) => [todo.id, todo]));
+  const afterById = new Map(after.todos.map((todo) => [todo.id, todo]));
+  let changed = 0;
+  for (const [id, todo] of beforeById) {
+    const next = afterById.get(id);
+    if (next === undefined || next.status !== todo.status || next.content !== todo.content) changed += 1;
+  }
+  for (const id of afterById.keys()) if (!beforeById.has(id)) changed += 1;
+  return changed === 0 ? "Todo：无状态变化" : `Todo：${changed} 项将回滚或恢复`;
+}
+
 /** 屏幕坐标命中区间；row 为 1-based。 */
 
 export interface TuiInteraction {
@@ -104,13 +147,17 @@ export interface TuiOptions {
   /** 当前 session 的审计流水；TUI hooks 会把它和渲染 hooks 合并。 */
   audit?: AuditTrail;
   /**
-   * 新建对话时调用（`/new`）。
-   * 返回完整的 session runtime，避免复用旧 session 的 gate/sandbox。
-   * 省略时回退到旧的 createSession（仅用于兼容）。
+   * 新建/切换分支时调用（`/new`、fork、undo、retry）。
+   * 返回完整 runtime，避免复用旧 session 的 gate/sandbox。
    */
-  createRuntime?: (interaction: TuiInteraction) => SessionRuntime;
+  createRuntime?: (
+    interaction: TuiInteraction,
+    request?: RuntimeRequest,
+  ) => SessionRuntime;
   /** 旧接口：只换 AgentSession，工具与 gate 复用当前 runtime。 */
   createSession?: () => AgentSession;
+  /** 分支操作入口；`--no-persist` 时省略。 */
+  branchService?: BranchService;
 }
 
 export class TuiApp implements TuiInteraction {
@@ -121,9 +168,14 @@ export class TuiApp implements TuiInteraction {
   #session: AgentSession;
   #tools: ToolRegistry;
   #cwd: string;
-  #createRuntime: ((interaction: TuiInteraction) => SessionRuntime) | undefined;
+  #createRuntime:
+    | ((interaction: TuiInteraction, request?: RuntimeRequest) => SessionRuntime)
+    | undefined;
   #createSession: (() => AgentSession) | undefined;
+  #branchService: BranchService | undefined;
   #audit: AuditTrail | undefined;
+  /** 最近一条 assistant 消息；工具卡片用它建立可点击目标。 */
+  #lastAssistantMsgid: MsgId | undefined;
 
   #transcript = new Transcript();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
@@ -153,6 +205,8 @@ export class TuiApp implements TuiInteraction {
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
+  /** 待处理的消息操作菜单。 */
+  #pendingMessageMenu: PendingMessageMenu | undefined;
   /** 进行中的 ask_user 问答流程。 */
   #askFlow: AskUserFlow | undefined;
   #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
@@ -160,6 +214,8 @@ export class TuiApp implements TuiInteraction {
   #dialogTopRow = -1;
   /** 当前权限弹窗按钮的鼠标命中区间（行号相对覆盖层顶部）。 */
   #dialogButtonHits: DialogButtonRowHit[] = [];
+  /** 当前消息操作菜单按钮的鼠标命中区间。 */
+  #messageButtonHits: DialogButtonRowHit<MessageAction>[] = [];
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; list: TodoList } | undefined;
@@ -170,6 +226,8 @@ export class TuiApp implements TuiInteraction {
 
   /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
   #toolHits: { callId: string; start: number; end: number }[] = [];
+  /** 上一次渲染时每条可操作消息占用的 body 行区间。 */
+  #messageHits: { msgid: MsgId; start: number; end: number }[] = [];
   /** body 视窗在完整内容里的起始下标。 */
   #bodyWindowStart = 0;
 
@@ -187,6 +245,7 @@ export class TuiApp implements TuiInteraction {
     this.#cwd = options.cwd;
     this.#createRuntime = options.createRuntime;
     this.#createSession = options.createSession;
+    this.#branchService = options.branchService;
     this.#audit = options.audit;
     this.#mode = options.mode ?? "workspace-write";
     const { width, height } = this.#terminal.size;
@@ -338,6 +397,13 @@ export class TuiApp implements TuiInteraction {
       return;
     }
 
+    // 消息操作菜单：鼠标走统一路由，键盘支持快捷字母与 Esc。
+    if (this.#pendingMessageMenu !== undefined) {
+      if (key.type === "mouse") this.#handleMouse(key);
+      else this.#resolveMessageMenuKey(key);
+      return;
+    }
+
     // 有对话框时，所有按键都归它 —— 不能漏到下面的输入逻辑。
     // 鼠标要交给统一的鼠标路由，才能命中按钮。
     if (this.#pendingDialog !== undefined) {
@@ -443,50 +509,81 @@ export class TuiApp implements TuiInteraction {
     }
   }
 
-  /** 处理鼠标事件：左键点击按钮/折叠行，滚轮滚动主视窗或历史抽屉。 */
+  /** 处理鼠标事件：左键点击按钮/折叠行，右键打开消息操作，滚轮滚动视窗。 */
   #handleMouse(key: Extract<Key, { type: "mouse" }>): void {
     if (key.button === "wheelUp") {
+      if (
+        this.#pendingMessageMenu !== undefined ||
+        this.#pendingDialog !== undefined ||
+        this.#askFlow !== undefined
+      ) {
+        return;
+      }
       if (this.#viewState.historyOpen) this.#scrollHistoryBy(3);
       else this.#scrollBy(3);
       return;
     }
     if (key.button === "wheelDown") {
+      if (
+        this.#pendingMessageMenu !== undefined ||
+        this.#pendingDialog !== undefined ||
+        this.#askFlow !== undefined
+      ) {
+        return;
+      }
       if (this.#viewState.historyOpen) this.#scrollHistoryBy(-3);
       else this.#scrollBy(-3);
       return;
     }
-    if (!key.pressed || key.button !== "left") return;
+    if (!key.pressed) return;
 
     // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
     const bodyRow = key.y - 2;
 
+    // 消息操作菜单：点击任意动作按钮。
+    if (this.#pendingMessageMenu !== undefined && this.#dialogTopRow >= 0) {
+      const menuLine = bodyRow - this.#dialogTopRow;
+      const action = hitDialogActionAtLine(this.#messageButtonHits, menuLine, key.x - 1);
+      if (action !== undefined) {
+        this.#resolveMessageAction(action);
+        return;
+      }
+      return;
+    }
+
     // 权限 / 能力 / 升档弹窗：点击按钮直接确认或拒绝。
-    if (this.#pendingDialog !== undefined && this.#dialogTopRow >= 0) {
+    if (
+      key.button === "left" &&
+      this.#pendingDialog !== undefined &&
+      this.#dialogTopRow >= 0
+    ) {
       const dialogLine = bodyRow - this.#dialogTopRow;
-      const column = key.x - 1;
-      const answer = hitDialogActionAtLine(this.#dialogButtonHits, dialogLine, column);
+      const answer = hitDialogActionAtLine(this.#dialogButtonHits, dialogLine, key.x - 1);
       if (answer !== undefined) {
         this.#finishDialog(answer);
         return;
       }
+      return;
     }
 
     // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
     // 覆盖层第 0 行是上边框，所以 flow 行号要再减 1。
-    if (this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
+    if (key.button === "left" && this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
       const flowLine = bodyRow - this.#dialogTopRow - 1;
       if (flowLine >= 0 && this.#askFlow.clickLine(flowLine)) {
         this.#render(true);
         return;
       }
+      return;
     }
 
-    if (hitTest(this.#returnToLatestHit, key.x, key.y)) {
+    if (key.button === "left" && hitTest(this.#returnToLatestHit, key.x, key.y)) {
       this.#returnToLatest();
       return;
     }
 
     if (
+      key.button === "left" &&
       !this.#viewState.historyOpen &&
       hitTest(this.#moreHistoryHit, key.x, bodyRow)
     ) {
@@ -495,17 +592,32 @@ export class TuiApp implements TuiInteraction {
     }
 
     if (this.#viewState.historyOpen || bodyRow < 0) return;
+    if (key.button !== "left" && key.button !== "right") return;
 
     const bodyIndex = this.#bodyWindowStart + (bodyRow - this.#bodyContentOffset);
-    for (const hit of this.#toolHits) {
-      if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
-        if (this.#transcript.toggleToolExpanded(hit.callId)) {
-          // 展开会改变布局，必须整屏重绘而不是走差分
-          this.#render(true);
+
+    // 工具卡片左键仍用于展开；右键留给消息操作。
+    if (key.button === "left") {
+      for (const hit of this.#toolHits) {
+        if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
+          if (this.#transcript.toggleToolExpanded(hit.callId)) {
+            // 展开会改变布局，必须整屏重绘而不是走差分
+            this.#render(true);
+          }
+          return;
         }
-        return;
       }
     }
+
+    const msgid = this.#messageAt(bodyIndex);
+    if (msgid !== undefined) this.#openMessageMenu(msgid);
+  }
+
+  #messageAt(bodyIndex: number): MsgId | undefined {
+    for (const hit of this.#messageHits) {
+      if (bodyIndex >= hit.start && bodyIndex <= hit.end) return hit.msgid;
+    }
+    return undefined;
   }
 
   #insert(text: string): void {
@@ -556,7 +668,6 @@ export class TuiApp implements TuiInteraction {
     this.#input = "";
     this.#cursor = 0;
     this.#viewState = initialHistoryView();
-    this.#transcript.pushUser(text);
     this.#render();
     void this.#runTurn(text);
   }
@@ -581,15 +692,14 @@ export class TuiApp implements TuiInteraction {
     this.#usage = { input: 0, output: 0 };
     this.#stopTodoShimmer();
     this.#todoCache = undefined;
+    this.#messageHits = [];
+    this.#toolHits = [];
 
     if (this.#createRuntime !== undefined) {
-      const runtime = this.#createRuntime(this);
-      this.#session = runtime.session;
-      this.#tools = runtime.tools;
-      this.#mode = runtime.mode;
-      this.#audit = runtime.audit;
+      this.#adoptRuntime(this.#createRuntime(this, { mode: this.#mode }));
     } else {
       this.#session = this.#createSession!();
+      this.#lastAssistantMsgid = undefined;
     }
 
     this.#transcript = new Transcript();
@@ -634,6 +744,194 @@ export class TuiApp implements TuiInteraction {
     this.#render(true);
   }
 
+  /* --------------------------- 消息操作 / 分支 --------------------------- */
+
+  #messageById(msgid: MsgId): StoredMessage | undefined {
+    return this.#session.messages.find((message) => message.msgid === msgid);
+  }
+
+  #openMessageMenu(msgid: MsgId): void {
+    const message = this.#messageById(msgid);
+    if (message === undefined) return;
+    if (this.#branchService === undefined || this.#createRuntime === undefined) {
+      this.#transcript.pushError("当前会话未启用持久化分支，无法执行消息操作");
+      this.#render();
+      return;
+    }
+
+    const toolCount = message.toolCalls?.length ?? 0;
+    const detail = [
+      `${message.role} / ${message.origin} · msgid ${message.msgid}`,
+      oneLine(storedText(message)) || (toolCount > 0 ? `${toolCount} 个工具调用` : "(无文本)"),
+      "",
+      "快捷键：u 撤回 · f 分叉 · r 重试 · c 复制 · i 检查 · Esc 取消",
+    ];
+
+    this.#pendingMessageMenu = {
+      msgid,
+      title: `消息操作 · #${msgid}`,
+      body: detail,
+      hint: "点击动作，或按对应字母",
+      actions: MESSAGE_ACTIONS.map((item) => ({
+        label: item.label,
+        value: item.action,
+        ...(item.tone !== undefined ? { tone: item.tone } : {}),
+      })),
+    };
+    this.#render(true);
+  }
+
+  #resolveMessageMenuKey(key: Key): void {
+    if (key.type === "escape" || key.type === "enter") {
+      this.#resolveMessageAction("cancel");
+      return;
+    }
+    if (key.type !== "text") return;
+    const action = messageActionFromKey(key.value.trim());
+    if (action !== undefined) this.#resolveMessageAction(action);
+  }
+
+  #resolveMessageAction(action: MessageAction): void {
+    const menu = this.#pendingMessageMenu;
+    if (menu === undefined) return;
+    this.#pendingMessageMenu = undefined;
+    this.#messageButtonHits = [];
+
+    if (action === "cancel") {
+      this.#render(true);
+      return;
+    }
+    if (this.#busy) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再操作消息");
+      this.#render(true);
+      return;
+    }
+    if (this.#branchService === undefined || this.#createRuntime === undefined) {
+      this.#transcript.pushError("当前会话未启用持久化分支");
+      this.#render(true);
+      return;
+    }
+
+    try {
+      switch (action) {
+        case "undo": {
+          const preview = this.#branchService.previewUndo(this.#session.id, menu.msgid, "at");
+          const before = this.#todos();
+          const after = currentTodoList(preview.retained, { hideCompletedAfterUserTurn: true });
+          void this.#openDialog({
+            title: `撤回预览 · #${menu.msgid}`,
+            body: [
+              `当前分支：${preview.sourceBranchId}`,
+              `保留 ${preview.retained.length} 条消息，移出 ${preview.removed.length} 条`,
+              todoImpact(before, after),
+              "工作区文件暂不反向 patch；原分支会完整保留。",
+            ],
+            hint: `[y] 确认撤回    [n] 取消    ${DIM}Esc / Enter 取消${RESET}`,
+            actions: [
+              { label: "确认撤回", value: true, tone: "warn" },
+              { label: "取消", value: false, tone: "error" },
+            ],
+          }).then((confirmed) => {
+            if (!confirmed) return;
+            try {
+              const result = this.#branchService!.undoTo(this.#session.id, menu.msgid, "at");
+              this.#switchRuntime(result.branchId, `已撤回到 #${menu.msgid}；原分支仍保留`);
+            } catch (error) {
+              this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+              this.#render(true);
+            }
+          });
+          return;
+        }
+
+        case "fork": {
+          const result = this.#branchService.fork(this.#session.id, menu.msgid);
+          this.#switchRuntime(result.branchId, `已从 #${menu.msgid} 分叉；原分支仍保留`);
+          return;
+        }
+
+        case "retry": {
+          const plan = this.#branchService.retryFrom(this.#session.id, menu.msgid);
+          if (this.#switchRuntime(plan.branchId, `正在从 #${plan.userMsgid} 重试`)) {
+            void this.#runTurn(plan.input);
+          }
+          return;
+        }
+
+        case "copy": {
+          const message = this.#messageById(menu.msgid);
+          if (message === undefined) throw new Error(`消息 ${menu.msgid} 已不存在`);
+          const payload = Buffer.from(storedText(message), "utf8").toString("base64");
+          this.#terminal.write(`\x1b]52;c;${payload}\x07`);
+          this.#transcript.pushNotice(`已复制消息 #${menu.msgid}（OSC 52）`);
+          this.#render(true);
+          return;
+        }
+
+        case "inspect": {
+          const message = this.#messageById(menu.msgid);
+          if (message === undefined) throw new Error(`消息 ${menu.msgid} 已不存在`);
+          void this.#openDialog({
+            title: `消息详情 · #${menu.msgid}`,
+            body: [
+              `role: ${message.role}`,
+              `origin: ${message.origin}`,
+              `parent: ${message.parentMsgId ?? "(root)"}`,
+              `created: ${new Date(message.createdAt).toLocaleString()}`,
+              `toolCallId: ${message.toolCallId ?? "(none)"}`,
+              "",
+              ...storedText(message).split("\n").slice(0, 6),
+            ],
+            hint: `${DIM}Esc / Enter 关闭${RESET}`,
+            actions: [{ label: "关闭", value: false, tone: "error" }],
+          });
+          return;
+        }
+      }
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render(true);
+    }
+  }
+
+  #adoptRuntime(runtime: SessionRuntime): void {
+    this.#session = runtime.session;
+    this.#tools = runtime.tools;
+    this.#mode = runtime.mode;
+    this.#audit = runtime.audit;
+    this.#lastAssistantMsgid = undefined;
+  }
+
+  #switchRuntime(branchId: string, notice?: string): boolean {
+    if (this.#createRuntime === undefined) {
+      this.#transcript.pushError("当前未启用 runtime 切换");
+      this.#render(true);
+      return false;
+    }
+
+    const runtime = this.#createRuntime(this, {
+      sessionId: this.#session.id,
+      branchId,
+      mode: this.#mode,
+    });
+    this.#adoptRuntime(runtime);
+    this.#transcript = new Transcript();
+    this.#transcript.restore(runtime.session.messages);
+    if (notice !== undefined) this.#transcript.pushNotice(notice);
+
+    this.#layout = new TranscriptLayout<DisplayItem>();
+    this.#viewState = initialHistoryView();
+    this.#lastLayoutTotal = 0;
+    this.#usage = { input: 0, output: 0 };
+    this.#todoCache = undefined;
+    this.#messageHits = [];
+    this.#toolHits = [];
+    this.#input = "";
+    this.#cursor = 0;
+    this.#render(true);
+    return true;
+  }
+
   /* --------------------------- 对话推进 --------------------------- */
 
   async #runTurn(input: string): Promise<void> {
@@ -643,6 +941,10 @@ export class TuiApp implements TuiInteraction {
     this.#syncTodoShimmer();
 
     const uiHooks: LoopHooks = {
+      onUser: (message) => {
+        this.#transcript.pushUser(storedText(message), message.msgid);
+        this.#scheduleRender();
+      },
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
         this.#scheduleRender();
@@ -654,11 +956,12 @@ export class TuiApp implements TuiInteraction {
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
-      onAssistant: () => {
-        this.#transcript.endAssistant();
+      onAssistant: (message) => {
+        this.#lastAssistantMsgid = message.msgid;
+        this.#transcript.endAssistant(message.msgid);
       },
       onToolCall: (call) => {
-        this.#transcript.startTool(call);
+        this.#transcript.startTool(call, this.#lastAssistantMsgid);
         this.#scheduleRender();
       },
       // 运行中的流式输出：只保留末尾若干行，内存有界
@@ -670,8 +973,8 @@ export class TuiApp implements TuiInteraction {
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
       // ask_user：多页问答表单
       onAskUser: (_call, questions) => this.askUser(questions),
-      onToolResult: (call, result) => {
-        this.#transcript.finishTool(call.id, result.output, result.ok);
+      onToolResult: (call, result, message) => {
+        this.#transcript.finishTool(call.id, result.output, result.ok, message?.msgid);
         this.#syncTodoShimmer();
         this.#scheduleRender();
       },
@@ -788,8 +1091,12 @@ export class TuiApp implements TuiInteraction {
     );
     const body = this.#composeBody(width, bodyHeight);
 
-    // 对话框 / 问答以覆盖层形式压在消息区底部
-    if (this.#pendingDialog !== undefined || this.#askFlow !== undefined) {
+    // 对话框 / 问答 / 消息操作以覆盖层形式压在消息区底部
+    if (
+      this.#pendingDialog !== undefined ||
+      this.#pendingMessageMenu !== undefined ||
+      this.#askFlow !== undefined
+    ) {
       const overlay = this.#renderDialog(width);
       const start = Math.max(0, bodyHeight - overlay.length);
       this.#dialogTopRow = start;
@@ -799,6 +1106,7 @@ export class TuiApp implements TuiInteraction {
     } else {
       this.#dialogTopRow = -1;
       this.#dialogButtonHits = [];
+      this.#messageButtonHits = [];
     }
 
     // “回到最新消息”放在思考区最后一行：它本来就是输入框上方的留白，
@@ -843,6 +1151,7 @@ export class TuiApp implements TuiInteraction {
 
   #renderDialog(width: number): string[] {
     this.#dialogButtonHits = [];
+    this.#messageButtonHits = [];
     const inner = Math.max(16, Math.min(width - 2, 74));
     const color = fg(COLOR.warn);
     const bar = `${color}│${RESET}`;
@@ -856,6 +1165,31 @@ export class TuiApp implements TuiInteraction {
         ...this.#askFlow.render(inner).map((line) => row(` ${line}`)),
         `${color}└${"─".repeat(inner)}┘${RESET}`,
       ];
+    }
+
+    if (this.#pendingMessageMenu !== undefined) {
+      const menu = this.#pendingMessageMenu;
+      const lines = [
+        `${color}┌${"─".repeat(inner)}┐${RESET}`,
+        row(` ${BOLD}${truncateAnsi(menu.title, inner - 2)}${RESET}`),
+      ];
+      for (const entry of menu.body) lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
+      lines.push(row(""));
+
+      for (let offset = 0; offset < menu.actions.length; offset += 3) {
+        const actions = composeDialogActions<MessageAction>(
+          menu.actions.slice(offset, offset + 3),
+        );
+        lines.push(row(actions.text));
+        const actionLine = lines.length - 1;
+        this.#messageButtonHits.push(
+          ...actions.hits.map((hit) => ({ line: actionLine, hit })),
+        );
+      }
+
+      lines.push(row(` ${menu.hint}`));
+      lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
+      return lines;
     }
 
     const dialog = this.#pendingDialog;
@@ -999,6 +1333,7 @@ export class TuiApp implements TuiInteraction {
       this.#bodyWindowStart = older.start;
       this.#bodyContentOffset = 0;
       this.#toolHits = [];
+      this.#messageHits = [];
       this.#moreHistoryHit = undefined;
       return drawer.lines;
     }
@@ -1014,6 +1349,12 @@ export class TuiApp implements TuiInteraction {
         ? []
         : [{ callId: block.callId, start: block.start, end: block.contentEnd }],
     );
+    this.#messageHits = viewport.blocks.flatMap((block) => {
+      const msgid = displayMsgId(block.item);
+      return msgid === undefined
+        ? []
+        : [{ msgid, start: block.start, end: block.contentEnd }];
+    });
 
     if (!showMore) {
       this.#moreHistoryHit = undefined;

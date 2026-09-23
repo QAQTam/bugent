@@ -87,4 +87,36 @@ describe("SessionRuntime 隔离", () => {
     expect(store.listEvents(a.id).map((e) => e.kind)).toEqual(["turn_start"]);
     expect(store.listEvents(b.id).map((e) => e.kind)).toEqual(["turn_start"]);
   });
+
+  test("createSessionRuntime 可以恢复到指定分支", () => {
+    const store = makeStore();
+    const runtime = makeRuntime(store, "workspace-write");
+    runtime.session.appendUser("u1");
+    runtime.session.appendAssistant("a1");
+    runtime.session.appendUser("u2");
+
+    const fork = store.createBranch(runtime.id, 1, {
+      ...(runtime.session.branchId !== undefined
+        ? { parentBranchId: runtime.session.branchId }
+        : {}),
+      title: "fork",
+    });
+
+    const restored = createSessionRuntime({
+      sessionId: runtime.id,
+      branchId: fork,
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      providerId: "test",
+      systemPrompt: "SYS",
+      cwd: "/tmp",
+      store,
+      mode: "workspace-write",
+      policy: new PermissionPolicy({ default: "allow" }),
+      interaction,
+    });
+
+    expect(restored.session.branchId).toBe(fork);
+    expect(restored.session.messages.map((message) => message.msgid)).toEqual([0, 1]);
+  });
 });

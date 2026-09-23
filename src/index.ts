@@ -16,9 +16,10 @@ import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
 import type { BugentConfig } from "./config/schema.ts";
-import { TuiApp, type TuiInteraction } from "./tui/app.ts";
+import { TuiApp, type RuntimeRequest, type TuiInteraction } from "./tui/app.ts";
 import { openSession } from "./core/open-session.ts";
 import { createSessionRuntime, type SessionRuntime } from "./core/runtime.ts";
+import { BranchService } from "./core/branch-service.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
 import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
@@ -373,21 +374,27 @@ async function main(): Promise<void> {
           }`,
           "",
           "输入消息开始对话；`/new` 开新对话；`/exit` 退出；运行中按 `ESC` 中断。",
+          "右键消息可撤回 / 分叉 / 重试（原分支会保留）。",
         ].join("\n"),
         ...(audit !== undefined ? { audit } : {}),
         ...(store === undefined
           ? {}
           : {
-              createRuntime: (interaction: TuiInteraction): SessionRuntime => {
+              branchService: new BranchService(store),
+              createRuntime: (
+                interaction: TuiInteraction,
+                request?: RuntimeRequest,
+              ): SessionRuntime => {
                 const runtime = createSessionRuntime({
-                  sessionId: newSessionId(),
+                  sessionId: request?.sessionId ?? newSessionId(),
+                  ...(request?.branchId !== undefined ? { branchId: request.branchId } : {}),
                   client: registry.resolve(ref),
                   model: ref.model,
                   providerId: ref.provider,
                   systemPrompt,
                   cwd: options.cwd,
                   store,
-                  mode,
+                  mode: request?.mode ?? mode,
                   ...(config.sandbox?.writablePaths !== undefined
                     ? { writablePaths: config.sandbox.writablePaths }
                     : {}),

@@ -55,6 +55,8 @@ export interface SessionInteraction {
 
 export interface CreateSessionRuntimeOptions {
   sessionId: string;
+  /** 指定恢复/切换到的分支；省略时沿用 session.activeBranchId。 */
+  branchId?: string;
   client: ModelClient;
   model: string;
   providerId: string;
@@ -78,6 +80,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
   const session = openSession({
     store: options.store,
     sessionId: options.sessionId,
+    ...(options.branchId !== undefined ? { branchId: options.branchId } : {}),
     client: options.client,
     model: options.model,
     providerId: options.providerId,

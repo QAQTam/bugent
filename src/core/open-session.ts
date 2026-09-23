@@ -12,6 +12,8 @@ import { AgentSession } from "./session.ts";
 export interface OpenSessionOptions {
   store: SessionStore | undefined;
   sessionId: string;
+  /** 指定要恢复的分支；省略时使用 session.activeBranchId。 */
+  branchId?: string;
   client: ModelClient;
   model: string;
   providerId: string;
@@ -25,6 +27,7 @@ export function openSession(options: OpenSessionOptions): AgentSession {
   if (store === undefined) {
     return new AgentSession({
       id: sessionId,
+      ...(options.branchId !== undefined ? { branchId: options.branchId } : {}),
       system: options.systemPrompt,
       client: options.client,
       model: options.model,
@@ -33,7 +36,10 @@ export function openSession(options: OpenSessionOptions): AgentSession {
 
   const existing = store.getSession(sessionId);
   if (existing !== undefined) {
-    const branchId = existing.activeBranchId ?? mainBranchId(sessionId);
+    const branchId = options.branchId ?? existing.activeBranchId ?? mainBranchId(sessionId);
+    if (store.getBranch(sessionId, branchId) === undefined) {
+      throw new Error(`会话 ${sessionId} 不存在分支：${branchId}`);
+    }
     return new AgentSession({
       id: sessionId,
       branchId,
@@ -49,6 +55,9 @@ export function openSession(options: OpenSessionOptions): AgentSession {
   }
 
   const now = Date.now();
+  if (options.branchId !== undefined) {
+    throw new Error(`新会话 ${sessionId} 不能指定分支：${options.branchId}`);
+  }
   store.createSession({
     id: sessionId,
     createdAt: now,
