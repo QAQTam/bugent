@@ -23,7 +23,7 @@
 | --- | --- | --- |
 | 运行时 | **Bun 1.4.2** | 直接跑 TS、内置 SQLite/PTY/Serve，零构建 |
 | 类型检查 | **tsgo（TS7 native）** | 只做 `--noEmit` 校验；Bun 运行时是**擦除类型**，所以 tsconfig 开 `erasableSyntaxOnly`，禁用 `enum`/`namespace`/参数属性，避免"本地过、Bun 挂" |
-| TUI | **@opentui/core** | 原生 Zig 渲染、局部 diff 更新，天然满足 O(1) 更新诉求；比自研 ANSI 省 2~3 天，比 Ink 快得多。**自研 ANSI 渲染器仅作 fallback**（约 300 行） |
+| TUI | **Bun 原生自研** | `Bun.markdown.ansi` / `Bun.wrapAnsi` / `Bun.stringWidth` / `Bun.color` 已经覆盖了内容格式化的难点，剩下的布局与渲染自研约 400 行，换来零第三方依赖。~~@opentui/core~~ 曾评估：需引入原生二进制 + Babel 转换，收益不足以抵消成本 |
 | WebUI | **Bun.serve + HTML imports** | 零打包零配置，前端直接 import TS/TSX |
 | 配置 | **`bugent.config.ts`** | Bun 原生 import TS，比 JSON 强（有类型、可写逻辑） |
 | 持久化 | **`bun:sqlite` + WAL** | 内置、同步、够快；单写连接 |

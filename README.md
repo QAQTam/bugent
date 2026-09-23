@@ -25,8 +25,11 @@ bun run src/index.ts --mock -p "你好"
 export OPENAI_API_KEY=sk-xxx
 bun run src/index.ts -p "写个 hello world"
 
-# 交互式
+# 交互式（自动进入 TUI，需要 TTY）
 bun run src/index.ts
+
+# 纯文本 REPL（不走 TUI）
+bun run src/index.ts --plain
 
 # 测试与类型检查
 bun test
@@ -44,10 +47,10 @@ bun run typecheck
 | P2 msgid 上下文与缓存前缀 | ✅ | msgid0 不可变、只追加、前缀指纹 + 逐字节稳定性测试 |
 | P3 bash 工具 | ⬜ | 待做（走 `Bun.Terminal` PTY） |
 | P4 最小 loop | ✅ | `src/core/loop.ts`，含工具往返、maxSteps 防死循环 |
-| P5 config + TUI | 🟡 | config 已可用；TUI 待做（OpenTUI + Solid） |
+| P5 config + TUI | ✅ | config 可用；TUI 基于 **Bun 原生能力**自研（差分渲染 + raw mode，零第三方依赖） |
 | P6 权限与沙箱 | ⬜ | 待做（bwrap） |
 | P7 文件工具 | ⬜ | 待做 |
-| P8 markdown / 高亮 | ⬜ | 待做 |
+| P8 markdown / 高亮 | ✅ | `Bun.markdown.ansi` + `Bun.wrapAnsi` + `Bun.stringWidth`（代码高亮限 ts/js） |
 | P9 多 session | ⬜ | 待做 |
 | P10 落盘与审计 | ⬜ | 待做 |
 

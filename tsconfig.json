@@ -8,7 +8,7 @@
     "types": ["bun"],
 
     "jsx": "preserve",
-    "jsxImportSource": "@opentui/solid",
+    "jsxImportSource": "solid-js",
 
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,

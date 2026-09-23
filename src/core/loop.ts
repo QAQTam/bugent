@@ -68,6 +68,21 @@ interface PendingCall {
   args: string;
 }
 
+/**
+ * 用户发一句话并推进一轮。
+ *
+ * 存在的意义：把"追加用户消息"这一步收进 API，避免调用方（CLI / TUI）忘记写 session。
+ * 之前 TUI 就因为漏了 `appendUser` 导致模型看不到用户输入。
+ */
+export async function runUserTurn(
+  session: AgentSession,
+  text: string,
+  options: RunTurnOptions = {},
+): Promise<TurnResult> {
+  session.appendUser(text);
+  return runTurn(session, options);
+}
+
 export async function runTurn(
   session: AgentSession,
   options: RunTurnOptions = {},

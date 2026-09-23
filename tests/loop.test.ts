@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AgentSession } from "../src/core/session.ts";
-import { runTurn } from "../src/core/loop.ts";
+import { runTurn, runUserTurn } from "../src/core/loop.ts";
+import { ProviderRegistry } from "../src/provider/registry.ts";
 import { createMockClient, type MockTurn } from "../src/provider/adapters/mock.ts";
 import { ToolRegistry, type Tool } from "../src/tools/types.ts";
 import { storedText } from "../src/core/message.ts";
@@ -141,5 +142,26 @@ describe("P4 · agent loop", () => {
     expect(seen).toEqual(["one", "two"]);
     expect(result.steps).toBe(3);
     expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+});
+
+describe("P4 · runUserTurn 契约", () => {
+  test("runUserTurn 负责把用户消息写进 session", async () => {
+    const session = newSession([{ text: "ok" }]);
+
+    await runUserTurn(session, "你好", { cwd: "/tmp" });
+
+    expect(session.messages.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
+    expect(storedText(session.messages[1]!)).toBe("你好");
+  });
+
+  test("回归：模型必须能读到用户输入（TUI 曾因漏写 session 只回显空串）", async () => {
+    const registry = new ProviderRegistry().register({ id: "mock", endpoint: "mock" });
+    const client = registry.resolve({ provider: "mock", model: "echo" });
+    const session = new AgentSession({ id: "regression", system: "SYS", client, model: "echo" });
+
+    const result = await runUserTurn(session, "你好 bugent", { cwd: "/tmp" });
+
+    expect(result.text).toContain("你好 bugent");
   });
 });

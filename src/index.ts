@@ -11,10 +11,11 @@
 
 import { createInterface } from "node:readline/promises";
 import { AgentSession } from "./core/session.ts";
-import { runTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
+import { runUserTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
 import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
 import { ToolRegistry } from "./tools/types.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
+import { TuiApp } from "./tui/app.ts";
 
 interface CliOptions {
   prompt?: string;
@@ -23,6 +24,7 @@ interface CliOptions {
   cwd: string;
   maxSteps?: number;
   help: boolean;
+  plain: boolean;
 }
 
 const HELP = `bugent — 终端里的 AI agent
@@ -35,13 +37,14 @@ const HELP = `bugent — 终端里的 AI agent
   -p, --prompt <text>        一次性执行给定提示词
   -m, --model <ref>          指定模型，格式 provider/model
       --mock                 使用内置 mock provider（无需网络与密钥）
+      --plain                不使用 TUI，退回纯文本 REPL
       --cwd <dir>            工作目录
       --max-steps <n>        单轮最大工具往返次数（默认 16）
   -h, --help                 显示帮助
 `;
 
 export function parseArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { mock: false, cwd: process.cwd(), help: false };
+  const options: CliOptions = { mock: false, cwd: process.cwd(), help: false, plain: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -74,6 +77,9 @@ export function parseArgs(argv: string[]): CliOptions {
       }
       case "--mock":
         options.mock = true;
+        break;
+      case "--plain":
+        options.plain = true;
         break;
       case "-h":
       case "--help":
@@ -153,13 +159,24 @@ async function main(): Promise<void> {
   };
 
   const run = async (input: string): Promise<TurnResult> => {
-    session.appendUser(input);
-    return runTurn(session, baseOptions);
+    return runUserTurn(session, input, baseOptions);
   };
 
   if (options.prompt !== undefined) {
     const result = await run(options.prompt);
     if (result.text.length > 0) process.stdout.write("\n");
+    return;
+  }
+
+  // 交互式：优先 TUI（需要 TTY），否则退回纯文本 REPL
+  if (!options.plain && process.stdout.isTTY) {
+    const app = new TuiApp({
+      session,
+      tools,
+      cwd: options.cwd,
+      banner: `**bugent** 已就绪 · \`${client.id}\`\n\n输入消息开始对话；\`/exit\` 退出；运行中按 \`ESC\` 中断。`,
+    });
+    await app.run();
     return;
   }
 
