@@ -76,7 +76,7 @@ const HELP = `bugent — 终端里的 AI agent
       --sessions             列出已保存的会话后退出
       --no-persist           不落盘（会话不写入 SQLite）
       --cwd <dir>            工作目录
-      --max-steps <n>        单轮最大工具往返次数（默认 16）
+      --max-steps <n>        单轮最大工具往返次数（默认 800）
   -h, --help                 显示帮助
 `;
 

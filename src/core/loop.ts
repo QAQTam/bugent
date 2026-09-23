@@ -47,12 +47,14 @@ export interface LoopHooks {
   onUsage?(usage: Usage): void;
 }
 
+export const DEFAULT_MAX_STEPS = 800;
+
 export interface RunTurnOptions {
   tools?: ToolRegistry;
   hooks?: LoopHooks;
   cwd?: string;
   signal?: AbortSignal;
-  /** 单轮内最多几次"模型->工具->模型"往返，防死循环。 */
+  /** 单轮内最多几次"模型->工具->模型"往返；默认 800，真正的死循环交给重复调用检测。 */
   maxSteps?: number;
 }
 
@@ -162,7 +164,7 @@ export async function runTurn(
   const tools = options.tools;
   const cwd = options.cwd ?? process.cwd();
   const signal = options.signal ?? new AbortController().signal;
-  const maxSteps = options.maxSteps ?? 16;
+  const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
 
   session.advanceTurn();
 

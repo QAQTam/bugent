@@ -11,6 +11,7 @@ import type { SandboxMode } from "../permission/mode.ts";
 
 export interface AgentConfig {
   systemPrompt?: string;
+  /** 单轮最大模型-工具往返次数；默认 800。 */
   maxSteps?: number;
   cwd?: string;
 }

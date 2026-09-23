@@ -134,6 +134,23 @@ describe("P4 · agent loop", () => {
     expect(storedText(toolMessage!)).toContain("没有注册任何工具");
   });
 
+  test("默认 maxSteps 允许超过 16 轮工具往返", async () => {
+    const script: MockTurn[] = Array.from({ length: 20 }, (_, index) => ({
+      toolCalls: [{ id: `c${index}`, name: "echo", args: { text: String(index) } }],
+    }));
+    script.push({ text: "done" });
+
+    const session = newSession(script);
+    session.appendUser("跑二十轮");
+    const result = await runTurn(session, {
+      tools: new ToolRegistry().register(echoTool([])),
+      cwd: "/tmp",
+    });
+
+    expect(result.steps).toBe(21);
+    expect(result.text).toBe("done");
+  });
+
   test("maxSteps 能拦住工具调用死循环", async () => {
     const loopTurn = (): ChatChunk[] => [
       { type: "tool_call", id: "c1", name: "echo", argsDelta: '{"text":"x"}' },

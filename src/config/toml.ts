@@ -255,7 +255,7 @@ default_model = "openai/deepseek-v4.1-flash"
 
 [agent]
 # system_prompt = "You are bugent..."
-max_steps = 16
+max_steps = 800
 
 # ---- 权限 ----
 # 放行交给**沙箱档位**判断，这里只写硬性禁令。
