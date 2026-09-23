@@ -6,6 +6,11 @@
  */
 
 import { createBashTool, createShellRunner, type ShellRunner } from "./bash.ts";
+import {
+  createEditFileTool,
+  createReadFileTool,
+  createWriteFileTool,
+} from "./files.ts";
 import { ToolRegistry } from "./types.ts";
 import {
   createSandboxedShellRunner,
@@ -34,37 +39,37 @@ export interface ToolsSetup {
 }
 
 export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetup {
+  // 文件工具是进程内操作，靠路径约束而不是 bwrap 隔离
+  const registry = new ToolRegistry()
+    .register(createReadFileTool())
+    .register(createWriteFileTool())
+    .register(createEditFileTool());
+
+  let runner: ShellRunner;
+  let sandbox: ToolsSetup["sandbox"];
+
   if (options.runner !== undefined) {
-    return {
-      registry: new ToolRegistry().register(createBashTool(options.runner)),
-      sandbox: { enabled: false, note: "使用自定义执行层" },
+    runner = options.runner;
+    sandbox = { enabled: false, note: "使用自定义执行层" };
+  } else if (options.sandbox === null) {
+    runner = createShellRunner();
+    sandbox = { enabled: false, note: "沙箱已被显式禁用（--no-sandbox）" };
+  } else if (!isSandboxAvailable()) {
+    runner = createShellRunner();
+    sandbox = {
+      enabled: false,
+      note: "未找到 bwrap，已降级为无沙箱执行（权限确认仍然生效）",
     };
-  }
-
-  if (options.sandbox === null) {
-    return {
-      registry: new ToolRegistry().register(createBashTool(createShellRunner())),
-      sandbox: { enabled: false, note: "沙箱已被显式禁用（--no-sandbox）" },
-    };
-  }
-
-  if (!isSandboxAvailable()) {
-    return {
-      registry: new ToolRegistry().register(createBashTool(createShellRunner())),
-      sandbox: {
-        enabled: false,
-        note: "未找到 bwrap，已降级为无沙箱执行（权限确认仍然生效）",
-      },
-    };
-  }
-
-  const sandbox = options.sandbox ?? {};
-  const network = sandbox.allowNetwork === true ? "允许联网" : "已断网";
-  return {
-    registry: new ToolRegistry().register(createBashTool(createSandboxedShellRunner(sandbox))),
-    sandbox: {
+  } else {
+    const sandboxOptions = options.sandbox ?? {};
+    runner = createSandboxedShellRunner(sandboxOptions);
+    const network = sandboxOptions.allowNetwork === true ? "允许联网" : "已断网";
+    sandbox = {
       enabled: true,
       note: `bwrap 沙箱已启用（只读根 / 可写工作目录 / ${network}）`,
-    },
-  };
+    };
+  }
+
+  registry.register(createBashTool(runner));
+  return { registry, sandbox };
 }
