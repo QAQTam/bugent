@@ -8,7 +8,8 @@
  * 这里保持纯函数，方便单测；TuiApp 只负责取 window、路由按键和鼠标。
  */
 
-import { truncateAnsi } from "./ansi.ts";
+import { truncateAnsi, visibleWidth } from "./ansi.ts";
+import type { HitRegion } from "./hit.ts";
 import { DIM, RESET } from "./markdown.ts";
 
 export interface HistoryPaneHeights {
@@ -26,6 +27,28 @@ export function historyPaneHeights(height: number): HistoryPaneHeights {
   const top = Math.max(1, Math.floor(available / 2));
   const bottom = Math.max(0, available - top);
   return { top, divider, bottom };
+}
+
+export interface CenteredButton {
+  line: string;
+  hit: HitRegion;
+}
+
+/** 生成居中按钮行，并返回可点击的可见列区间。 */
+export function composeCenteredButton(label: string, width: number, row: number): CenteredButton {
+  const safeWidth = Math.max(0, Math.floor(width));
+  const labelWidth = visibleWidth(label);
+  const left = Math.max(0, Math.floor((safeWidth - labelWidth) / 2));
+  const available = Math.max(0, safeWidth - left);
+  const line = `${" ".repeat(left)}${truncateAnsi(label, available)}`;
+  return {
+    line,
+    hit: {
+      row,
+      start: left + 1,
+      end: left + Math.min(labelWidth, available),
+    },
+  };
 }
 
 export interface HistoryDrawerInput {
