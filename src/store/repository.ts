@@ -20,6 +20,17 @@ export interface SessionRecord {
   systemPrompt: string;
   title?: string;
   cwd?: string;
+  activeBranchId?: string;
+}
+
+export interface BranchRecord {
+  id: string;
+  sessionId: string;
+  parentBranchId?: string;
+  fromMsgid?: number;
+  headMsgid?: number;
+  createdAt: number;
+  title?: string;
 }
 
 export type AuditEventKind =
@@ -52,17 +63,29 @@ interface SessionRow {
   system_prompt: string;
   title: string | null;
   cwd: string | null;
+  active_branch_id: string | null;
 }
 
 interface MessageRow {
   session_id: string;
   msgid: number;
+  parent_msgid: number | null;
   role: string;
   origin: string;
   created_at: number;
   tool_call_id: string | null;
   parts: string;
   tool_calls: string | null;
+}
+
+interface BranchRow {
+  id: string;
+  session_id: string;
+  parent_branch_id: string | null;
+  from_msgid: number | null;
+  head_msgid: number | null;
+  created_at: number;
+  title: string | null;
 }
 
 interface EventRow {
@@ -85,12 +108,14 @@ function rowToSession(row: SessionRow): SessionRecord {
     ...(row.provider_id !== null ? { providerId: row.provider_id } : {}),
     ...(row.title !== null ? { title: row.title } : {}),
     ...(row.cwd !== null ? { cwd: row.cwd } : {}),
+    ...(row.active_branch_id !== null ? { activeBranchId: row.active_branch_id } : {}),
   };
 }
 
 function rowToMessage(row: MessageRow): StoredMessage {
   return makeMessage({
     msgid: row.msgid,
+    ...(row.parent_msgid !== null ? { parentMsgId: row.parent_msgid } : {}),
     role: row.role as Role,
     origin: row.origin as MessageOrigin,
     parts: JSON.parse(row.parts) as ContentPart[],
@@ -98,6 +123,18 @@ function rowToMessage(row: MessageRow): StoredMessage {
     ...(row.tool_call_id !== null ? { toolCallId: row.tool_call_id } : {}),
     ...(row.tool_calls !== null ? { toolCalls: JSON.parse(row.tool_calls) as ToolCall[] } : {}),
   });
+}
+
+function rowToBranch(row: BranchRow): BranchRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    createdAt: row.created_at,
+    ...(row.parent_branch_id !== null ? { parentBranchId: row.parent_branch_id } : {}),
+    ...(row.from_msgid !== null ? { fromMsgid: row.from_msgid } : {}),
+    ...(row.head_msgid !== null ? { headMsgid: row.head_msgid } : {}),
+    ...(row.title !== null ? { title: row.title } : {}),
+  };
 }
 
 function rowToEvent(row: EventRow): StoredAuditEvent {
@@ -116,6 +153,10 @@ export interface SessionStoreOptions {
   path: string;
 }
 
+export function mainBranchId(sessionId: string): string {
+  return `${sessionId}:main`;
+}
+
 export class SessionStore {
   #db: Database;
 
@@ -131,22 +172,35 @@ export class SessionStore {
   /* --------------------------- sessions --------------------------- */
 
   createSession(record: SessionRecord): void {
-    this.#db
-      .query(
-        `INSERT OR REPLACE INTO sessions
-         (id, created_at, updated_at, model, provider_id, system_prompt, title, cwd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        record.id,
-        record.createdAt,
-        record.updatedAt,
-        record.model,
-        record.providerId ?? null,
-        record.systemPrompt,
-        record.title ?? null,
-        record.cwd ?? null,
-      );
+    const branchId = record.activeBranchId ?? mainBranchId(record.id);
+    const tx = this.#db.transaction(() => {
+      this.#db
+        .query(
+          `INSERT OR REPLACE INTO sessions
+           (id, created_at, updated_at, model, provider_id, system_prompt, title, cwd, active_branch_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          record.id,
+          record.createdAt,
+          record.updatedAt,
+          record.model,
+          record.providerId ?? null,
+          record.systemPrompt,
+          record.title ?? null,
+          record.cwd ?? null,
+          branchId,
+        );
+
+      this.#db
+        .query(
+          `INSERT OR IGNORE INTO branches
+           (id, session_id, parent_branch_id, from_msgid, head_msgid, created_at, title)
+           VALUES (?, ?, NULL, NULL, NULL, ?, 'main')`,
+        )
+        .run(branchId, record.id, record.createdAt);
+    });
+    tx.immediate();
   }
 
   getSession(id: string): SessionRecord | undefined {
@@ -173,18 +227,82 @@ export class SessionStore {
     this.#db.query("UPDATE sessions SET title = ? WHERE id = ?").run(title, id);
   }
 
+  /* --------------------------- branches --------------------------- */
+
+  getActiveBranchId(sessionId: string): string | undefined {
+    const row = this.#db
+      .query("SELECT active_branch_id FROM sessions WHERE id = ?")
+      .get(sessionId) as { active_branch_id: string | null } | null;
+    return row?.active_branch_id ?? undefined;
+  }
+
+  getBranch(sessionId: string, branchId: string): BranchRecord | undefined {
+    const row = this.#db
+      .query("SELECT * FROM branches WHERE session_id = ? AND id = ?")
+      .get(sessionId, branchId) as BranchRow | null;
+    return row === null ? undefined : rowToBranch(row);
+  }
+
+  listBranches(sessionId: string): BranchRecord[] {
+    const rows = this.#db
+      .query("SELECT * FROM branches WHERE session_id = ? ORDER BY created_at ASC, id ASC")
+      .all(sessionId) as BranchRow[];
+    return rows.map(rowToBranch);
+  }
+
+  createBranch(
+    sessionId: string,
+    fromMsgid?: number,
+    options: { parentBranchId?: string; title?: string; id?: string } = {},
+  ): string {
+    const id = options.id ?? crypto.randomUUID();
+    const createdAt = Date.now();
+    this.#db
+      .query(
+        `INSERT INTO branches
+         (id, session_id, parent_branch_id, from_msgid, head_msgid, created_at, title)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        sessionId,
+        options.parentBranchId ?? null,
+        fromMsgid ?? null,
+        fromMsgid ?? null,
+        createdAt,
+        options.title ?? null,
+      );
+    return id;
+  }
+
+  setActiveBranch(sessionId: string, branchId: string): void {
+    const branch = this.getBranch(sessionId, branchId);
+    if (branch === undefined) throw new Error(`未知分支：${branchId}`);
+    this.#db
+      .query("UPDATE sessions SET active_branch_id = ? WHERE id = ?")
+      .run(branchId, sessionId);
+  }
+
+  nextMsgId(sessionId: string): number {
+    const row = this.#db
+      .query("SELECT COALESCE(MAX(msgid) + 1, 0) AS next FROM messages WHERE session_id = ?")
+      .get(sessionId) as { next: number } | null;
+    return row?.next ?? 0;
+  }
+
   /* --------------------------- messages --------------------------- */
 
-  appendMessage(sessionId: string, message: StoredMessage): void {
+  #insertMessage(sessionId: string, message: StoredMessage): void {
     this.#db
       .query(
         `INSERT OR REPLACE INTO messages
-         (session_id, msgid, role, origin, created_at, tool_call_id, parts, tool_calls)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionId,
         message.msgid,
+        message.parentMsgId ?? null,
         message.role,
         message.origin,
         message.createdAt,
@@ -194,15 +312,52 @@ export class SessionStore {
       );
   }
 
+  appendMessage(sessionId: string, message: StoredMessage): void {
+    this.#insertMessage(sessionId, message);
+  }
+
   /**
-   * 追加消息并更新会话时间戳。
+   * 向指定分支追加消息。
    *
-   * 两条写必须原子提交：否则进程在中间挂掉会留下“消息已落盘但会话仍显示旧时间”
+   * msgid 仍然是 session 全局递增；分支只通过 parent_msgid/head_msgid 表达路径。
+   */
+  appendMessageToBranch(
+    sessionId: string,
+    branchId: string,
+    message: StoredMessage,
+    at: number,
+  ): void {
+    const tx = this.#db.transaction(() => {
+      this.#insertMessage(sessionId, message);
+      this.touchSession(sessionId, at);
+      this.#db
+        .query(
+          `UPDATE branches
+              SET head_msgid = ?
+            WHERE id = ?
+              AND session_id = ?
+              AND (head_msgid IS NULL OR head_msgid < ?)`,
+        )
+        .run(message.msgid, branchId, sessionId, message.msgid);
+    });
+    tx.immediate();
+  }
+
+  /**
+   * 追加消息并更新当前 active branch 与会话时间戳。
+   *
+   * 三条写必须原子提交：否则进程在中间挂掉会留下“消息已落盘但分支仍显示旧 head”
    * 的不一致状态，也会让每条消息多付一次 WAL fsync。
    */
   appendMessageAndTouch(sessionId: string, message: StoredMessage, at: number): void {
+    const branchId = this.getActiveBranchId(sessionId);
+    if (branchId !== undefined) {
+      this.appendMessageToBranch(sessionId, branchId, message, at);
+      return;
+    }
+
     const tx = this.#db.transaction(() => {
-      this.appendMessage(sessionId, message);
+      this.#insertMessage(sessionId, message);
       this.touchSession(sessionId, at);
     });
     tx.immediate();
@@ -212,6 +367,40 @@ export class SessionStore {
     const rows = this.#db
       .query("SELECT * FROM messages WHERE session_id = ? ORDER BY msgid ASC")
       .all(sessionId) as MessageRow[];
+    return rows.map(rowToMessage);
+  }
+
+  /**
+   * 只加载某个分支的路径：从 head_msgid 沿 parent_msgid 回溯。
+   *
+   * 注意返回顺序仍是 msgid ASC；分支只改变“哪些消息属于当前路径”，
+   * 不改变 msgid 的全局单调性。
+   */
+  loadBranchPath(sessionId: string, branchId: string): StoredMessage[] {
+    const branch = this.getBranch(sessionId, branchId);
+    if (branch === undefined) throw new Error(`未知分支：${branchId}`);
+    if (branch.headMsgid === undefined) return [];
+
+    const rows = this.#db
+      .query(
+        `WITH RECURSIVE path(msgid) AS (
+           SELECT msgid
+             FROM messages
+            WHERE session_id = ? AND msgid = ?
+           UNION ALL
+           SELECT m.parent_msgid
+             FROM messages AS m
+             JOIN path AS p ON m.msgid = p.msgid
+            WHERE m.session_id = ?
+              AND m.parent_msgid IS NOT NULL
+         )
+         SELECT m.*
+           FROM messages AS m
+           JOIN path AS p ON m.msgid = p.msgid
+          WHERE m.session_id = ?
+          ORDER BY m.msgid ASC`,
+      )
+      .all(sessionId, branch.headMsgid, sessionId, sessionId) as MessageRow[];
     return rows.map(rowToMessage);
   }
 

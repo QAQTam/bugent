@@ -11,19 +11,24 @@ import { makeMessage, SYSTEM_MSGID, textPart, type MsgId, type StoredMessage } f
 
 export interface SessionInit {
   id: string;
+  /** 当前活动分支；用于 daemon / 多分支恢复。 */
+  branchId?: string;
   /** system prompt，写进 msgid 0，之后不可变。 */
   system: string;
   client: ModelClient;
   model: string;
+  /** 从全局最大 msgid + 1 继续；分支恢复时必须由 store 提供。 */
+  nextMsgId?: MsgId;
   now?: () => number;
   /** 每追加一条消息就回调一次（Phase 10 用它即时落盘）。 */
   onMessage?: (message: StoredMessage) => void;
-  /** 从历史恢复：传入已落盘的消息（含 msgid 0）。 */
+  /** 从历史恢复：传入当前分支路径（含 msgid 0）。 */
   restore?: readonly StoredMessage[];
 }
 
 export class AgentSession {
   readonly id: string;
+  readonly branchId: string | undefined;
   readonly client: ModelClient;
   readonly model: string;
 
@@ -36,6 +41,7 @@ export class AgentSession {
 
   constructor(init: SessionInit) {
     this.id = init.id;
+    this.branchId = init.branchId;
     this.client = init.client;
     this.model = init.model;
     this.#now = init.now ?? (() => Date.now());
@@ -44,9 +50,10 @@ export class AgentSession {
     if (init.restore !== undefined && init.restore.length > 0) {
       // 恢复路径：历史里已经包含 msgid 0 的 system prompt，不再新建
       this.#messages = [...init.restore];
-      this.#nextMsgId = lastMsgId(this.#messages) + 1;
+      this.#nextMsgId = init.nextMsgId ?? lastMsgId(this.#messages) + 1;
     } else {
       // msgid 0：system prompt。写一次，永不修改。
+      this.#nextMsgId = init.nextMsgId ?? SYSTEM_MSGID;
       this.#append({ role: "system", origin: "system", parts: [textPart(init.system)] });
     }
   }
@@ -137,9 +144,11 @@ export class AgentSession {
   }): StoredMessage {
     const msgid = this.#nextMsgId;
     this.#nextMsgId += 1;
+    const parent = lastMsgId(this.#messages);
 
     const msg = makeMessage({
       msgid,
+      ...(parent >= 0 ? { parentMsgId: parent } : {}),
       role: input.role,
       origin: input.origin,
       parts: input.parts,

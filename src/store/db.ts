@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -22,19 +22,21 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
-  id            TEXT PRIMARY KEY,
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL,
-  model         TEXT NOT NULL,
-  provider_id   TEXT,
-  system_prompt TEXT NOT NULL,
-  title         TEXT,
-  cwd           TEXT
+  id               TEXT PRIMARY KEY,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  model            TEXT NOT NULL,
+  provider_id      TEXT,
+  system_prompt    TEXT NOT NULL,
+  title            TEXT,
+  cwd              TEXT,
+  active_branch_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
   session_id   TEXT NOT NULL,
   msgid        INTEGER NOT NULL,
+  parent_msgid INTEGER,
   role         TEXT NOT NULL,
   origin       TEXT NOT NULL,
   created_at   INTEGER NOT NULL,
@@ -43,6 +45,18 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_calls   TEXT,
   PRIMARY KEY (session_id, msgid),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS branches (
+  id               TEXT PRIMARY KEY,
+  session_id       TEXT NOT NULL,
+  parent_branch_id TEXT,
+  from_msgid       INTEGER,
+  head_msgid       INTEGER,
+  created_at       INTEGER NOT NULL,
+  title            TEXT,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -57,6 +71,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, msgid);
+CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
 `;
 
@@ -70,6 +85,82 @@ export interface OpenDatabaseOptions {
 function isBusyError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /locked|busy/i.test(message);
+}
+
+function tableColumns(db: Database, table: string): Set<string> {
+  const rows = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return new Set(rows.map((row) => row.name));
+}
+
+function ensureColumn(db: Database, table: string, column: string, definition: string): void {
+  if (tableColumns(db, table).has(column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+/**
+ * v1 -> v2：
+ *   - messages.parent_msgid
+ *   - sessions.active_branch_id
+ *   - branches 表
+ *   - 旧线性历史回填成 main 分支
+ */
+function migrate(db: Database): void {
+  const version = schemaVersion(db);
+  if (version >= SCHEMA_VERSION) return;
+
+  ensureColumn(db, "sessions", "active_branch_id", "TEXT");
+  ensureColumn(db, "messages", "parent_msgid", "INTEGER");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS branches (
+      id               TEXT PRIMARY KEY,
+      session_id       TEXT NOT NULL,
+      parent_branch_id TEXT,
+      from_msgid       INTEGER,
+      head_msgid       INTEGER,
+      created_at       INTEGER NOT NULL,
+      title            TEXT,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
+  `);
+
+  const sessions = db.query("SELECT id, created_at FROM sessions").all() as {
+    id: string;
+    created_at: number;
+  }[];
+  const insertBranch = db.query(
+    `INSERT OR IGNORE INTO branches
+     (id, session_id, parent_branch_id, from_msgid, head_msgid, created_at, title)
+     VALUES (?, ?, NULL, NULL, ?, ?, 'main')`,
+  );
+  const headQuery = db.query(
+    "SELECT MAX(msgid) AS head FROM messages WHERE session_id = ?",
+  );
+  const setActive = db.query(
+    "UPDATE sessions SET active_branch_id = COALESCE(active_branch_id, ?) WHERE id = ?",
+  );
+
+  for (const session of sessions) {
+    const branchId = `${session.id}:main`;
+    const head = headQuery.get(session.id) as { head: number | null } | null;
+    insertBranch.run(branchId, session.id, head?.head ?? null, session.created_at);
+    setActive.run(branchId, session.id);
+  }
+
+  // 旧历史原本是线性的：按 msgid 顺序回填父指针。
+  db.exec(`
+    UPDATE messages
+       SET parent_msgid = (
+         SELECT MAX(prev.msgid)
+           FROM messages AS prev
+          WHERE prev.session_id = messages.session_id
+            AND prev.msgid < messages.msgid
+       )
+     WHERE parent_msgid IS NULL
+       AND msgid <> 0;
+  `);
 }
 
 /**
@@ -116,6 +207,7 @@ export function openDatabase(options: OpenDatabaseOptions): Database {
   withLockRetry(() => {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec(SCHEMA);
+    migrate(db);
     db.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(
       String(SCHEMA_VERSION),
     );

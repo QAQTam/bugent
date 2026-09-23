@@ -6,7 +6,7 @@
  */
 
 import type { ModelClient } from "../provider/types.ts";
-import type { SessionStore } from "../store/repository.ts";
+import { mainBranchId, type SessionStore } from "../store/repository.ts";
 import { AgentSession } from "./session.ts";
 
 export interface OpenSessionOptions {
@@ -33,14 +33,17 @@ export function openSession(options: OpenSessionOptions): AgentSession {
 
   const existing = store.getSession(sessionId);
   if (existing !== undefined) {
+    const branchId = existing.activeBranchId ?? mainBranchId(sessionId);
     return new AgentSession({
       id: sessionId,
+      branchId,
       system: existing.systemPrompt,
       client: options.client,
       model: options.model,
-      restore: store.loadMessages(sessionId),
+      restore: store.loadBranchPath(sessionId, branchId),
+      nextMsgId: store.nextMsgId(sessionId),
       onMessage: (message) => {
-        store.appendMessageAndTouch(sessionId, message, message.createdAt);
+        store.appendMessageToBranch(sessionId, branchId, message, message.createdAt);
       },
     });
   }
@@ -55,14 +58,16 @@ export function openSession(options: OpenSessionOptions): AgentSession {
     systemPrompt: options.systemPrompt,
     cwd: options.cwd,
   });
+  const branchId = mainBranchId(sessionId);
 
   return new AgentSession({
     id: sessionId,
+    branchId,
     system: options.systemPrompt,
     client: options.client,
     model: options.model,
     onMessage: (message) => {
-      store.appendMessageAndTouch(sessionId, message, message.createdAt);
+      store.appendMessageToBranch(sessionId, branchId, message, message.createdAt);
     },
   });
 }

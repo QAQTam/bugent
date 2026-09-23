@@ -22,6 +22,8 @@ export const SYSTEM_MSGID: MsgId = 0;
 
 export interface StoredMessage {
   readonly msgid: MsgId;
+  /** 分支树里的父消息；msgid 0 没有父节点。 */
+  readonly parentMsgId?: MsgId;
   readonly role: Role;
   readonly parts: readonly ContentPart[];
   readonly origin: MessageOrigin;
@@ -65,6 +67,7 @@ export function toChatMessage(msg: StoredMessage): ChatMessage {
 /** 从任意文本构造一条已冻结的存储消息。 */
 export function makeMessage(input: {
   msgid: MsgId;
+  parentMsgId?: MsgId;
   role: Role;
   origin: MessageOrigin;
   parts: readonly ContentPart[];
@@ -74,6 +77,7 @@ export function makeMessage(input: {
 }): StoredMessage {
   const msg: StoredMessage = {
     msgid: input.msgid,
+    ...(input.parentMsgId !== undefined ? { parentMsgId: input.parentMsgId } : {}),
     role: input.role,
     parts: input.parts,
     origin: input.origin,
