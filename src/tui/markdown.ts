@@ -46,6 +46,17 @@ export function fg(color: string, depth: "ansi-16" | "ansi-256" | "ansi-16m" = "
   }
 }
 
+/**
+ * 颜色 -> ANSI 背景色序列。
+ *
+ * Bun.color 只产出前景色，所以把 `38;` 换成 `48;` —— 这是 ANSI 的标准约定，
+ * 16 色 / 256 色 / truecolor 三种格式都适用。
+ */
+export function bg(color: string, depth: "ansi-16" | "ansi-256" | "ansi-16m" = "ansi-16m"): string {
+  const sequence = fg(color, depth);
+  return sequence.replace("\x1b[38;", "\x1b[48;");
+}
+
 export const RESET = "\x1b[0m";
 export const DIM = "\x1b[2m";
 export const BOLD = "\x1b[1m";

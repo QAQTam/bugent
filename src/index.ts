@@ -21,6 +21,8 @@ import type { BugentConfig } from "./config/schema.ts";
 import { TuiApp } from "./tui/app.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
+import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
+import type { CapabilityEscalation } from "./tools/types.ts";
 import {
   ALLOW_ALL_POLICY,
   composePolicy,
@@ -40,6 +42,8 @@ interface CliOptions {
   plain: boolean;
   /** 跳过所有权限确认。 */
   yes: boolean;
+  /** 沙箱档位。 */
+  mode?: SandboxMode;
   noSandbox: boolean;
   allowNetwork: boolean;
   /** 关闭落盘。 */
@@ -62,8 +66,10 @@ const HELP = `bugent — 终端里的 AI agent
       --mock                 使用内置 mock provider（无需网络与密钥）
       --plain                不使用 TUI，退回纯文本 REPL
       --yes                  跳过权限确认（危险）
-      --no-sandbox           禁用 bwrap 沙箱
-      --allow-network        沙箱内允许联网（默认断网）
+      --mode <mode>          沙箱档位：read-only | workspace-write | no-sandbox
+                             默认 workspace-write
+      --no-sandbox           等价于 --mode no-sandbox
+      --allow-network        一开始就允许联网（默认断网，失败时按次询问）
       --resume <id>          恢复指定会话
       --sessions             列出已保存的会话后退出
       --no-persist           不落盘（会话不写入 SQLite）
@@ -127,6 +133,15 @@ export function parseArgs(argv: string[]): CliOptions {
       case "--no-sandbox":
         options.noSandbox = true;
         break;
+      case "--mode": {
+        const value = argv[++i];
+        if (value === undefined) throw new Error(`${arg} 需要一个值`);
+        if (!isSandboxMode(value)) {
+          throw new Error(`未知档位 "${value}"，可选：read-only / workspace-write / no-sandbox`);
+        }
+        options.mode = value;
+        break;
+      }
       case "--allow-network":
         options.allowNetwork = true;
         break;
@@ -167,7 +182,9 @@ async function buildRegistry(
   return { registry, model };
 }
 
-function createHooks(): LoopHooks {
+function createHooks(
+  requestCapability?: (escalation: CapabilityEscalation) => Promise<boolean>,
+): LoopHooks {
   let wroteAnything = false;
   return {
     onText(delta) {
@@ -182,6 +199,7 @@ function createHooks(): LoopHooks {
       const preview = result.output.length > 500 ? `${result.output.slice(0, 500)}…` : result.output;
       process.stdout.write(`\x1b[${color}m${preview}\x1b[0m\n`);
     },
+    ...(requestCapability !== undefined ? { onRequestCapability: (_call, esc) => requestCapability(esc) } : {}),
     onUsage(usage) {
       if (!wroteAnything) return;
       process.stdout.write(
@@ -332,14 +350,16 @@ async function main(): Promise<void> {
     cwd: options.cwd,
   });
 
-  // 沙箱：默认能用就用，--no-sandbox 显式关闭
-  const sandboxOption = options.noSandbox
-    ? null
-    : {
-        ...(config.sandbox ?? {}),
-        allowNetwork: options.allowNetwork || config.sandbox?.allowNetwork === true,
-      };
-  const tools = createDefaultTools({ sandbox: sandboxOption });
+  // 档位：CLI > 配置 > 默认 workspace-write
+  const mode: SandboxMode =
+    options.mode ?? (options.noSandbox ? "no-sandbox" : undefined) ?? config.sandbox?.mode ?? "workspace-write";
+
+  const tools = createDefaultTools({
+    mode,
+    ...(config.sandbox?.writablePaths !== undefined
+      ? { writablePaths: config.sandbox.writablePaths }
+      : {}),
+  });
 
   // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底
   const policy = new PermissionPolicy(
@@ -358,7 +378,15 @@ async function main(): Promise<void> {
           turn: () => activeSession.turn,
         });
 
-  const hooks = combineHooks(createHooks(), audit?.hooks());
+  // 能力授权（联网）的交互入口在两条路径下不同：TUI 用弹窗，CLI 用 stdin。
+  // 用一个可变引用让 hooks 在分支确定后再拿到真正的实现。
+  let capabilityHandler: ((escalation: CapabilityEscalation) => Promise<boolean>) | undefined;
+  const hooks = combineHooks(
+    createHooks((escalation) =>
+      capabilityHandler === undefined ? Promise.resolve(false) : capabilityHandler(escalation),
+    ),
+    audit?.hooks(),
+  );
   const signal = new AbortController().signal;
   const baseOptions = {
     tools: tools.registry,
@@ -390,16 +418,16 @@ async function main(): Promise<void> {
         session,
         tools: tools.registry,
         cwd: options.cwd,
-        sandboxEnabled: tools.sandbox.enabled,
+        mode: tools.mode,
         banner: [
           `**bugent** 已就绪 · \`${client.id}\``,
           "",
           `会话：\`${sessionId}\`${store === undefined ? "（未持久化）" : ""}`,
-          `沙箱：${tools.sandbox.note}`,
+          `档位：**${tools.mode}** · ${tools.sandbox.note}`,
           `权限：${
             options.yes
               ? "**已跳过所有确认（--yes）**"
-              : `默认 ${policy.defaultDecision}${policy.ruleCount > 0 ? `，${policy.ruleCount} 条规则` : ""}`
+              : `${policy.ruleCount} 条规则${policy.ruleCount === 0 ? "（放行交给档位判断）" : ""}`
           }`,
           "",
           "输入消息开始对话；`/new` 开新对话；`/exit` 退出；运行中按 `ESC` 中断。",
@@ -425,17 +453,33 @@ async function main(): Promise<void> {
             }),
       });
 
-      // TUI 自己就是权限确认入口：闸门回调到 app 的弹窗
+      // TUI 自己就是交互入口：权限确认、能力授权、升档询问都走它的对话框
       tools.registry.setGate(
-        new PermissionGate(policy, { ask: (request) => app.askPermission(request) }, onDecision),
+        new PermissionGate({
+          policy,
+          mode: tools.mode,
+          prompter: { ask: (request) => app.askPermission(request) },
+          ...(onDecision !== undefined ? { onDecision } : {}),
+          onEscalate: async (request, needed) =>
+            (await app.confirmModeChange(request, needed)) ? needed : undefined,
+        }),
       );
+      capabilityHandler = (escalation) => app.requestCapability(escalation);
       await app.run();
       return;
     }
 
-    // 非 TUI 路径：权限确认走 stdin
+    // 非 TUI 路径：权限确认与能力授权都走 stdin
     const prompter = new StdinPrompter();
-    tools.registry.setGate(new PermissionGate(policy, prompter, onDecision));
+    capabilityHandler = (escalation) => prompter.confirmCapability(escalation);
+    tools.registry.setGate(
+      new PermissionGate({
+        policy,
+        mode: tools.mode,
+        prompter,
+        ...(onDecision !== undefined ? { onDecision } : {}),
+      }),
+    );
 
     try {
       if (options.prompt !== undefined) {

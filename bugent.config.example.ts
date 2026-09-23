@@ -56,12 +56,16 @@ export default defineConfig({
   },
 
   /**
-   * 沙箱（Linux / bubblewrap）。
-   * 默认：根只读、工作目录可写、私有 /tmp、断网。
+   * 沙箱档位（Linux / bubblewrap）。
+   *
+   *   read-only        根只读 + 工作区只读 + 断网
+   *   workspace-write  根只读 + 工作区可写 + 断网
+   *   no-sandbox       不隔离，可读写任意位置
+   *
+   * 联网不走档位 —— 默认断网，命令失败时按次询问授权（带真实报错）。
    */
   sandbox: {
-    enabled: true,
-    allowNetwork: false,
+    mode: "workspace-write",
     // 需要写 $HOME 下缓存时显式放行（默认 HOME 是只读的）
     writablePaths: [],
   },

@@ -37,6 +37,46 @@ export interface ShellRunOptions {
   signal: AbortSignal;
   /** 流式回调：边跑边把输出推给 UI（不参与最终结果）。 */
   onProgress?: (chunk: string) => void;
+  /**
+   * 这一次运行是否放开网络（覆盖沙箱配置）。
+   *
+   * 用于"先跑失败 → 用户批准 → 保持沙箱只放开网络重跑"这条路径：
+   * 沙箱本身不拆，只是这一次不加 --unshare-net。
+   */
+  allowNetwork?: boolean;
+}
+
+/**
+ * 网络被沙箱挡住时的典型报错。
+ *
+ * 只在**已经断网**的前提下才用它做判断，所以不必担心误判 ——
+ * 真联网时这些错误也会出现，但那时我们压根不会走升权路径。
+ */
+const NETWORK_FAILURE_PATTERNS: readonly RegExp[] = [
+  // 沙箱的 netns 里 loopback 是 down 的，所以连本机也会失败
+  /could not connect to server/i,
+  /couldn'?t connect/i,
+  /failed to connect/i,
+  /connection reset by peer/i,
+  /network is unreachable/i,
+  /could not resolve host/i,
+  /temporary failure in name resolution/i,
+  /name or service not known/i,
+  /no route to host/i,
+  /connection refused/i,
+  /connection timed out/i,
+  /operation timed out/i,
+  /\bETIMEDOUT\b/,
+  /\bECONNREFUSED\b/,
+  /\bECONNRESET\b/,
+  /\bENOTFOUND\b/,
+  /\bEAI_AGAIN\b/,
+  /\bEHOSTUNREACH\b/,
+  /\bENETUNREACH\b/,
+];
+
+export function looksLikeNetworkFailure(text: string): boolean {
+  return NETWORK_FAILURE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export interface ShellResult {
@@ -208,6 +248,17 @@ export const BASH_PARAMETERS: JSONSchema = {
 export interface BashToolOptions {
   maxOutputBytes?: number;
   defaultTimeoutMs?: number;
+  /**
+   * 当前执行层是否处于"断网沙箱"状态。
+   * 只有为 true 时才可能在失败后触发联网授权 —— 否则不该去打扰用户。
+   */
+  networkBlocked?: boolean;
+}
+
+function firstLines(text: string, count: number): string {
+  const lines = text.split("\n").filter((line) => line.trim().length > 0);
+  const head = lines.slice(0, count).join(" / ");
+  return head.length > 300 ? `${head.slice(0, 300)}…` : head;
 }
 
 function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: number): string {
@@ -301,14 +352,45 @@ export function createBashTool(
         timeoutMs = Math.min(input.timeoutMs, MAX_TIMEOUT_MS);
       }
 
-      const result = await runner.run({
-        command,
-        cwd: ctx.cwd,
-        timeoutMs,
-        maxOutputBytes,
-        signal: ctx.signal,
-        ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
-      });
+      const runOnce = (allowNetwork?: boolean): Promise<ShellResult> =>
+        runner.run({
+          command,
+          cwd: ctx.cwd,
+          timeoutMs,
+          maxOutputBytes,
+          signal: ctx.signal,
+          ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
+          ...(allowNetwork === true ? { allowNetwork: true } : {}),
+        });
+
+      let result = await runOnce();
+
+      // 先真跑一次；失败且像是被沙箱断网挡住时，**带着真实报错**去要授权。
+      //
+      // 刻意不做"先行拦截"：那样用户看到的是一句没有上下文的"是否允许联网"，
+      // 新手根本不知道自己在批准什么。现在的流程是
+      // 「跑 → 失败 → 这是哪条命令、为什么失败、要不要放开这一次」。
+      if (
+        result.exitCode !== 0 &&
+        options.networkBlocked === true &&
+        ctx.onRequestCapability !== undefined &&
+        looksLikeNetworkFailure(`${result.stdout}\n${result.stderr}`)
+      ) {
+        const errorText = result.stderr.trim().length > 0 ? result.stderr.trim() : result.stdout.trim();
+        const approved = await ctx.onRequestCapability({
+          capability: { network: true },
+          reason: "这条命令因为沙箱断网失败了。允许联网后重跑吗？",
+          details: [
+            `命令：${command}`,
+            ...(errorText.length > 0 ? [`报错：${firstLines(errorText, 3)}`] : []),
+          ],
+        });
+
+        if (approved) {
+          // 注意：只放开这一次的网络，沙箱本身不拆
+          result = await runOnce(true);
+        }
+      }
 
       return clampForModel(formatResult(result, timeoutMs, maxOutputBytes), ctx);
     },

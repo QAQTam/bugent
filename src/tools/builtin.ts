@@ -14,25 +14,22 @@ import {
 import { createTodoWriteTool } from "./todo.ts";
 import { ToolRegistry } from "./types.ts";
 import type { PermissionRule } from "../permission/policy.ts";
-import {
-  createSandboxedShellRunner,
-  isSandboxAvailable,
-  type SandboxOptions,
-} from "../sandbox/bwrap.ts";
+import { MODES, type SandboxMode } from "../permission/mode.ts";
+import { createSandboxedShellRunner, isSandboxAvailable } from "../sandbox/bwrap.ts";
 
 export interface DefaultToolsOptions {
-  /**
-   * 沙箱配置。
-   *   省略  -> 可用就启用（默认行为）
-   *   null  -> 显式禁用沙箱
-   */
-  sandbox?: SandboxOptions | null;
+  /** 沙箱档位。默认 workspace-write。 */
+  mode?: SandboxMode;
+  /** 额外可写路径（仅沙箱档位有效）。 */
+  writablePaths?: readonly string[];
   /** 直接覆盖执行层（测试用，优先级最高）。 */
   runner?: ShellRunner;
 }
 
 export interface ToolsSetup {
   registry: ToolRegistry;
+  /** 实际生效的档位。 */
+  mode: SandboxMode;
   sandbox: {
     enabled: boolean;
     /** 状态说明，用于在 TUI/CLI 上如实告知用户。 */
@@ -46,15 +43,15 @@ export interface ToolsSetup {
    * ```ts
    * new PermissionPolicy(composePolicy(config.permissions, setup.defaultPermissionRules))
    * ```
-   *
-   * 单独列出来是为了让它在使用处可见 —— 之前只挂在 registry 上，
-   * 调用方很容易忘，忘了之后 todo_write 会开始弹窗（安全但很烦）。
    */
   defaultPermissionRules: PermissionRule[];
 }
 
 export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetup {
-  // 进程内工具：文件工具靠路径约束，todo_write 无副作用，都不需要 bwrap
+  const mode = options.mode ?? "workspace-write";
+  const caps = MODES[mode];
+
+  // 进程内工具：文件工具靠路径约束 + 档位门控，todo_write 无副作用
   const registry = new ToolRegistry()
     .register(createReadFileTool())
     .register(createWriteFileTool())
@@ -64,28 +61,33 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
   let runner: ShellRunner;
   let enabled: boolean;
   let note: string;
+  /** 是否处于"断网沙箱"—— 决定 bash 失败后要不要走联网授权。 */
+  let networkBlocked = false;
 
   if (options.runner !== undefined) {
     runner = options.runner;
     enabled = false;
     note = "使用自定义执行层";
-  } else if (options.sandbox === null) {
+  } else if (!caps.sandboxed) {
     runner = createShellRunner();
     enabled = false;
-    note = "沙箱已被显式禁用（--no-sandbox）";
+    note = `无沙箱（${mode}）· 可读写任意位置 · 网络不受限`;
   } else if (!isSandboxAvailable()) {
     runner = createShellRunner();
     enabled = false;
-    note = "未找到 bwrap，已降级为无沙箱执行（权限确认仍然生效）";
+    note = "未找到 bwrap，已降级为无沙箱执行（档位门控仍然生效）";
   } else {
-    const sandboxOptions = options.sandbox ?? {};
-    runner = createSandboxedShellRunner(sandboxOptions);
+    runner = createSandboxedShellRunner({
+      workspaceWrite: caps.workspaceWrite,
+      ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
+      allowNetwork: false,
+    });
     enabled = true;
-    const network = sandboxOptions.allowNetwork === true ? "允许联网" : "已断网";
-    note = `bwrap 沙箱已启用（只读根 / 可写工作目录 / ${network}）`;
+    networkBlocked = true;
+    note = `bwrap 沙箱 · ${caps.label}`;
   }
 
-  registry.register(createBashTool(runner));
+  registry.register(createBashTool(runner, { networkBlocked }));
 
   // 让 needsSandbox 真正生效：明确说出是哪些工具拿不到沙箱，
   // 而不是笼统地降级了事。
@@ -98,6 +100,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
 
   return {
     registry,
+    mode,
     sandbox: { enabled, note },
     defaultPermissionRules: registry.defaultPermissionRules(),
   };

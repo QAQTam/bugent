@@ -42,7 +42,7 @@ describe("P6 · glob 匹配", () => {
 describe("P6 · 权限策略", () => {
   test("默认决策在没有规则命中时生效", () => {
     const policy = new PermissionPolicy({ default: "ask" });
-    expect(policy.evaluate(req("bash", "rm -rf /"))).toBe("ask");
+    expect(policy.evaluate(req("bash", "rm -rf /")).decision).toBe("ask");
   });
 
   test("规则按顺序匹配，第一条命中即生效", () => {
@@ -53,9 +53,9 @@ describe("P6 · 权限策略", () => {
         { tool: "bash", resource: "*", decision: "allow" },
       ],
     });
-    expect(policy.evaluate(req("bash", "rm -rf /"))).toBe("deny");
-    expect(policy.evaluate(req("bash", "ls"))).toBe("allow");
-    expect(policy.evaluate(req("read_file", "x"))).toBe("deny");
+    expect(policy.evaluate(req("bash", "rm -rf /")).decision).toBe("deny");
+    expect(policy.evaluate(req("bash", "ls")).decision).toBe("allow");
+    expect(policy.evaluate(req("read_file", "x")).decision).toBe("deny");
   });
 
   test("省略 resource 时匹配该工具的所有调用", () => {
@@ -63,8 +63,8 @@ describe("P6 · 权限策略", () => {
       default: "ask",
       rules: [{ tool: "read_file", decision: "allow" }],
     });
-    expect(policy.evaluate(req("read_file", "/any/path"))).toBe("allow");
-    expect(policy.evaluate(req("write_file", "/any/path"))).toBe("ask");
+    expect(policy.evaluate(req("read_file", "/any/path")).decision).toBe("allow");
+    expect(policy.evaluate(req("write_file", "/any/path")).decision).toBe("ask");
   });
 
   test("tool 支持通配", () => {
@@ -72,20 +72,20 @@ describe("P6 · 权限策略", () => {
       default: "deny",
       rules: [{ tool: "*", decision: "allow" }],
     });
-    expect(policy.evaluate(req("anything", "x"))).toBe("allow");
+    expect(policy.evaluate(req("anything", "x")).decision).toBe("allow");
   });
 });
 
 describe("P6 · 权限闸门", () => {
   test("allow 直接放行，不打扰用户", async () => {
     const prompter = new ScriptedPrompter([]);
-    const gate = new PermissionGate(new PermissionPolicy({ default: "allow" }), prompter);
+    const gate = new PermissionGate({ policy: new PermissionPolicy({ default: "allow" }), mode: "workspace-write", prompter: prompter });
     expect(await gate.check(req("bash", "ls"))).toEqual({ allowed: true });
     expect(prompter.seen).toHaveLength(0);
   });
 
   test("deny 直接拒绝并给出原因", async () => {
-    const gate = new PermissionGate(new PermissionPolicy({ default: "deny" }));
+    const gate = new PermissionGate({ policy: new PermissionPolicy({ default: "deny" }), mode: "workspace-write" });
     const verdict = await gate.check(req("bash", "ls"));
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toContain("策略禁止");
@@ -93,21 +93,21 @@ describe("P6 · 权限闸门", () => {
 
   test("ask + 用户同意 -> 放行", async () => {
     const prompter = new ScriptedPrompter([true]);
-    const gate = new PermissionGate(new PermissionPolicy({ default: "ask" }), prompter);
+    const gate = new PermissionGate({ policy: new PermissionPolicy({ default: "ask" }), mode: "workspace-write", prompter: prompter });
     expect(await gate.check(req("bash", "ls"))).toEqual({ allowed: true });
     expect(prompter.seen[0]?.resource).toBe("ls");
   });
 
   test("ask + 用户拒绝 -> 拒绝并给出原因", async () => {
     const prompter = new ScriptedPrompter([false]);
-    const gate = new PermissionGate(new PermissionPolicy({ default: "ask" }), prompter);
+    const gate = new PermissionGate({ policy: new PermissionPolicy({ default: "ask" }), mode: "workspace-write", prompter: prompter });
     const verdict = await gate.check(req("bash", "ls"));
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toContain("用户拒绝");
   });
 
   test("ask 但没有交互入口时，安全侧失败（拒绝）", async () => {
-    const gate = new PermissionGate(new PermissionPolicy({ default: "ask" }));
+    const gate = new PermissionGate({ policy: new PermissionPolicy({ default: "ask" }), mode: "workspace-write" });
     const verdict = await gate.check(req("bash", "ls"));
     expect(verdict.allowed).toBe(false);
     expect(verdict.reason).toContain("没有可交互的确认入口");
@@ -142,7 +142,7 @@ describe("P6 · 闸门接入 ToolRegistry", () => {
   test("被拒绝的工具根本不会执行，且拒绝理由回流给模型", async () => {
     const ran: string[] = [];
     const registry = new ToolRegistry().register(spyTool(ran));
-    registry.setGate(new PermissionGate(new PermissionPolicy({ default: "deny" })));
+    registry.setGate(new PermissionGate({ policy: new PermissionPolicy({ default: "deny" }), mode: "workspace-write" }));
 
     const result = await registry.execute(call, ctx);
 
@@ -156,7 +156,11 @@ describe("P6 · 闸门接入 ToolRegistry", () => {
     const ran: string[] = [];
     const registry = new ToolRegistry().register(spyTool(ran));
     registry.setGate(
-      new PermissionGate(new PermissionPolicy({ default: "ask" }), new ScriptedPrompter([true])),
+      new PermissionGate({
+        policy: new PermissionPolicy({ default: "ask" }),
+        mode: "workspace-write",
+        prompter: new ScriptedPrompter([true]),
+      }),
     );
 
     const result = await registry.execute(call, ctx);

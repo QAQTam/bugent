@@ -20,7 +20,7 @@ import type { ToolRegistry } from "../tools/types.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
-import { BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
+import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { Transcript, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
@@ -30,6 +30,25 @@ import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
 import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
+import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
+import type { CapabilityEscalation } from "../tools/types.ts";
+
+/** 输入面板的行数（带底色的"阴影"区块）。 */
+export const INPUT_ROWS = 4;
+
+/**
+ * 通用对话框。
+ *
+ * 权限确认、能力授权都用它；将来 `ask_user` 也接这里 ——
+ * 区别只是 body 的行数与是否需要文本输入。
+ */
+interface PendingDialog {
+  title: string;
+  body: string[];
+  /** 按键提示。 */
+  hint: string;
+  resolve: (value: boolean) => void;
+}
 
 export interface TuiOptions {
   session: AgentSession;
@@ -37,8 +56,8 @@ export interface TuiOptions {
   cwd: string;
   /** 启动时的欢迎语。 */
   banner?: string;
-  /** 是否启用了沙箱，用于状态栏提示。 */
-  sandboxEnabled?: boolean;
+  /** 沙箱档位，用于状态栏与升档提示。 */
+  mode?: SandboxMode;
   /**
    * 新建对话时调用（`/new`）。
    * 省略则 `/new` 不可用 —— 调用方需要能创建并落盘一个新会话。
@@ -67,10 +86,10 @@ export class TuiApp {
   #abort: AbortController | undefined;
   #renderScheduled = false;
   #resolveExit: (() => void) | undefined;
-  #sandboxEnabled = false;
+  #mode: SandboxMode = "workspace-write";
 
-  /** 待用户确认的权限请求；存在时按键全部路由给它。 */
-  #pendingPrompt: { request: PermissionRequest; resolve: (value: boolean) => void } | undefined;
+  /** 待处理的对话框；存在时按键全部路由给它。 */
+  #pendingDialog: PendingDialog | undefined;
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; todos: Todo[] } | undefined;
@@ -89,7 +108,7 @@ export class TuiApp {
     this.#tools = options.tools;
     this.#cwd = options.cwd;
     this.#createSession = options.createSession;
-    this.#sandboxEnabled = options.sandboxEnabled === true;
+    this.#mode = options.mode ?? "workspace-write";
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
     if (options.banner !== undefined) {
@@ -102,9 +121,47 @@ export class TuiApp {
    * 会挂起当前 turn，直到用户按下 y / n。
    */
   askPermission(request: PermissionRequest): Promise<boolean> {
+    return this.#openDialog({
+      title: `权限确认 · ${request.tool}`,
+      body: [request.summary],
+      hint: `[y] 允许    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+    });
+  }
+
+  /**
+   * 能力授权入口（目前是联网）。
+   *
+   * 弹窗里一定带**真实原因与细节**（哪条命令、什么报错）——
+   * 否则用户看到的是一句没有上下文的"是否允许联网"，根本不知道在批准什么。
+   */
+  requestCapability(escalation: CapabilityEscalation): Promise<boolean> {
+    return this.#openDialog({
+      title: `需要授权 · ${describeCapability(escalation.capability)}`,
+      body: [escalation.reason, ...(escalation.details ?? [])],
+      hint: `[y] 允许这一次    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+    });
+  }
+
+  /**
+   * 档位不足时询问是否临时升档。
+   *
+   * 和权限确认共用同一个对话框 —— 将来 `ask_user` 也接这里。
+   */
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean> {
+    return this.#openDialog({
+      title: `需要更高档位 · ${needed}`,
+      body: [
+        `${request.tool} 想${request.summary}`,
+        `当前档位（${this.#mode}）不允许，需要升到 ${needed}`,
+      ],
+      hint: `[y] 升到 ${needed}（本次会话）    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
+    });
+  }
+
+  #openDialog(dialog: Omit<PendingDialog, "resolve">): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
-      this.#pendingPrompt = { request, resolve };
-      this.#render();
+      this.#pendingDialog = { ...dialog, resolve };
+      this.#render(true);
     });
   }
 
@@ -141,9 +198,9 @@ export class TuiApp {
   }
 
   #handleKey(key: Key): void {
-    // 有权限弹窗时，所有按键都归它 —— 不能漏到下面的输入逻辑
-    if (this.#pendingPrompt !== undefined) {
-      this.#resolvePrompt(key);
+    // 有对话框时，所有按键都归它 —— 不能漏到下面的输入逻辑
+    if (this.#pendingDialog !== undefined) {
+      this.#resolveDialog(key);
       return;
     }
 
@@ -324,10 +381,10 @@ export class TuiApp {
     this.#resolveExit?.();
   }
 
-  /** 处理权限弹窗里的按键。默认拒绝（Enter / Esc / 其它键都视为拒绝）。 */
-  #resolvePrompt(key: Key): void {
-    const pending = this.#pendingPrompt;
-    if (pending === undefined) return;
+  /** 处理对话框按键。默认拒绝（Enter / Esc / 其它键都视为拒绝）。 */
+  #resolveDialog(key: Key): void {
+    const dialog = this.#pendingDialog;
+    if (dialog === undefined) return;
 
     let answer: boolean | undefined;
 
@@ -341,9 +398,9 @@ export class TuiApp {
 
     if (answer === undefined) return;
 
-    this.#pendingPrompt = undefined;
-    pending.resolve(answer);
-    this.#render();
+    this.#pendingDialog = undefined;
+    dialog.resolve(answer);
+    this.#render(true);
   }
 
   /* --------------------------- 对话推进 --------------------------- */
@@ -377,6 +434,8 @@ export class TuiApp {
         this.#transcript.appendToolProgress(call.id, chunk);
         this.#scheduleRender();
       },
+      // 工具跑失败后请求一次性能力授权（如联网）—— 弹窗里带真实原因与报错
+      onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
       onToolResult: (call, result) => {
         this.#transcript.finishTool(call.id, result.output, result.ok);
         this.#scheduleRender();
@@ -441,12 +500,16 @@ export class TuiApp {
     const todoPanel =
       panelBudget >= 2 ? composeTodoPanel(this.#todos(), width, { maxLines: panelBudget }) : [];
 
-    const bodyHeight = Math.max(1, height - 2 - todoPanel.length - thinkingBlock.length);
+    // 2 = 状态栏 + 输入面板第一行；INPUT_ROWS - 1 = 面板其余留白行
+    const bodyHeight = Math.max(
+      1,
+      height - 2 - (INPUT_ROWS - 1) - todoPanel.length - thinkingBlock.length,
+    );
     const body = this.#composeBody(width, bodyHeight);
 
-    // 权限弹窗以覆盖层形式压在消息区底部
-    if (this.#pendingPrompt !== undefined) {
-      const overlay = this.#renderPrompt(width);
+    // 对话框以覆盖层形式压在消息区底部
+    if (this.#pendingDialog !== undefined) {
+      const overlay = this.#renderDialog(width);
       const start = Math.max(0, bodyHeight - overlay.length);
       for (let i = 0; i < overlay.length && start + i < bodyHeight; i += 1) {
         body[start + i] = overlay[i]!;
@@ -458,7 +521,7 @@ export class TuiApp {
       ...body,
       ...todoPanel,
       ...thinkingBlock,
-      this.#composeInput(width),
+      ...this.#composeInput(width),
     ];
   }
 
@@ -477,9 +540,9 @@ export class TuiApp {
     return this.#todoCache.todos;
   }
 
-  #renderPrompt(width: number): string[] {
-    const pending = this.#pendingPrompt;
-    if (pending === undefined) return [];
+  #renderDialog(width: number): string[] {
+    const dialog = this.#pendingDialog;
+    if (dialog === undefined) return [];
 
     const inner = Math.max(16, Math.min(width - 2, 74));
     const color = fg(COLOR.warn);
@@ -487,23 +550,23 @@ export class TuiApp {
     const row = (text: string): string =>
       `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
 
-    return [
+    const lines = [
       `${color}┌${"─".repeat(inner)}┐${RESET}`,
-      row(` ${BOLD}权限确认${RESET} ${DIM}${pending.request.tool}${RESET}`),
-      row(` ${truncateAnsi(pending.request.summary, inner - 2)}`),
-      row(""),
-      row(
-        ` ${fg(COLOR.ok)}[y]${RESET} 允许    ${fg(COLOR.error)}[n]${RESET} 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
-      ),
-      `${color}└${"─".repeat(inner)}┘${RESET}`,
+      row(` ${BOLD}${truncateAnsi(dialog.title, inner - 2)}${RESET}`),
     ];
+    for (const entry of dialog.body) {
+      lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
+    }
+    lines.push(row(""));
+    lines.push(row(` ${dialog.hint}`));
+    lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
+    return lines;
   }
 
   #composeStatus(width: number): string {
-    const sandbox = this.#sandboxEnabled
-      ? `${fg(COLOR.ok)}沙箱${RESET}`
-      : `${fg(COLOR.warn)}无沙箱${RESET}`;
-    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${sandbox}`;
+    const modeColor = this.#mode === "no-sandbox" ? COLOR.warn : COLOR.ok;
+    const badge = `${fg(modeColor)}${this.#mode}${RESET}`;
+    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}`;
     const right = this.#busy
       ? `${fg(COLOR.busy)}● 运行中${RESET}`
       : `${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${
@@ -513,9 +576,31 @@ export class TuiApp {
     return truncateAnsi(left + " ".repeat(gap) + right, width);
   }
 
-  #composeInput(width: number): string {
-    const prompt = `${fg(COLOR.prompt)}›${RESET} `;
-    const available = Math.max(1, width - 2);
+  /**
+   * 输入面板：4 行"阴影"区块。
+   *
+   * 之前只有一行 `› ___`，太单薄；现在做成带底色的面板 ——
+   * 第一行放输入内容，其余三行留白（同时也给光标和长文本留了呼吸空间）。
+   */
+  #composeInput(width: number): string[] {
+    // 末尾留一格：写满整行会让终端自动折行，把布局顶乱
+    const fill = Math.max(0, width - 1);
+    const background = bg(COLOR.inputBg);
+
+    const rows: string[] = [];
+    for (let index = 0; index < INPUT_ROWS; index += 1) {
+      const content = index === 0 ? this.#composeInputText() : "";
+      const padding = " ".repeat(Math.max(0, fill - visibleWidth(content)));
+      rows.push(`${background}${content}${padding}${RESET}`);
+    }
+    return rows;
+  }
+
+  /** 第一行的内容：提示符 + 输入文本 + 光标。 */
+  #composeInputText(): string {
+    const edge = `${fg(COLOR.inputEdge)}▌${RESET} `;
+    const textColor = fg(COLOR.inputText);
+    const available = Math.max(1, this.#terminal.size.width - 4);
     const chars = Array.from(this.#input);
 
     // 水平滚动，保证光标可见
@@ -535,7 +620,7 @@ export class TuiApp {
     }
     if (this.#cursor >= chars.length) rendered += "\x1b[7m \x1b[27m";
 
-    return prompt + rendered;
+    return `${edge}${textColor}${rendered}${RESET}`;
   }
 
   #composeBody(width: number, height: number): string[] {

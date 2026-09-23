@@ -229,6 +229,7 @@ describe("P10 · 审计流水", () => {
       request: { tool: "bash", resource: "ls", summary: "执行命令：ls" },
       decision: "ask",
       allowed: true,
+      mode: "workspace-write",
       at: 42,
     });
     audit.turnEnd({ steps: 2, reason: "stop" });
@@ -266,9 +267,12 @@ describe("P10 · 审计流水", () => {
     const registry = new ToolRegistry().register(createBashTool(createShellRunner()));
     const prompter = new ScriptedPrompter([true]);
     registry.setGate(
-      new PermissionGate(new PermissionPolicy({ default: "ask" }), prompter, (d) =>
-        audit.permission(d),
-      ),
+      new PermissionGate({
+        policy: new PermissionPolicy({ default: "ask" }),
+        mode: "workspace-write",
+        prompter,
+        onDecision: (d) => audit.permission(d),
+      }),
     );
 
     await runUserTurn(session, "跑一下", {

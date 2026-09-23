@@ -182,10 +182,11 @@ describe("todo_write · 工具行为", () => {
   test("工具自报 defaultPermission，组装后自动放行不打扰用户", async () => {
     const prompter = new ScriptedPrompter([]);
     const tools = new ToolRegistry().register(createTodoWriteTool());
-    const gate = new PermissionGate(
-      new PermissionPolicy(composePolicy(undefined, tools.defaultPermissionRules())),
+    const gate = new PermissionGate({
+      policy: new PermissionPolicy(composePolicy(undefined, tools.defaultPermissionRules())),
+      mode: "workspace-write",
       prompter,
-    );
+    });
 
     const verdict = await gate.check({
       tool: TODO_TOOL_NAME,
@@ -199,11 +200,12 @@ describe("todo_write · 工具行为", () => {
 
   test("用户的显式规则优先于工具自报的默认权限", async () => {
     const tools = new ToolRegistry().register(createTodoWriteTool());
-    const gate = new PermissionGate(
-      new PermissionPolicy(
+    const gate = new PermissionGate({
+      policy: new PermissionPolicy(
         composePolicy({ rules: [{ tool: TODO_TOOL_NAME, decision: "deny" }] }, tools.defaultPermissionRules()),
       ),
-    );
+      mode: "workspace-write",
+    });
 
     const verdict = await gate.check({ tool: TODO_TOOL_NAME, resource: "3 项", summary: "更新待办清单" });
 
@@ -211,11 +213,13 @@ describe("todo_write · 工具行为", () => {
     expect(verdict.reason).toContain("策略禁止");
   });
 
-  test("bash 不会因为工具默认权限被放行，仍然要问", async () => {
-    const gate = new PermissionGate(new PermissionPolicy(composePolicy(undefined, [])));
+  test("没有规则时放行交给档位判断（不再默认弹窗）", async () => {
+    const gate = new PermissionGate({
+      policy: new PermissionPolicy(composePolicy(undefined, [])),
+      mode: "workspace-write",
+    });
     const verdict = await gate.check({ tool: "bash", resource: "ls", summary: "执行命令：ls" });
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.reason).toContain("没有可交互的确认入口");
+    expect(verdict.allowed).toBe(true);
   });
 });
 

@@ -7,12 +7,28 @@
  */
 
 import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
+import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
 import {
   denialMessage,
   type PermissionDecision,
   type PermissionRequest,
   type PermissionRule,
 } from "../permission/policy.ts";
+
+/**
+ * 一次性能力授权申请。
+ *
+ * 关键是 `reason` —— 必须带**真实失败原因**。先拦后问（"是否允许联网？"）
+ * 会让用户（尤其是新手）不知道自己在批准什么；先跑一次、失败了再带着
+ * 具体命令与报错来问，用户才有判断依据。
+ */
+export interface CapabilityEscalation {
+  capability: CapabilityGrant;
+  /** 一句话说明为什么需要（如"这条命令因为沙箱断网失败了"）。 */
+  reason: string;
+  /** 展示细节：命令、错误片段等。 */
+  details?: readonly string[];
+}
 
 export interface ToolCtx {
   cwd: string;
@@ -25,6 +41,11 @@ export interface ToolCtx {
    * 这只是展示用，**不参与**最终回传给模型的结果。
    */
   onProgress?: (chunk: string) => void;
+  /**
+   * 请求一次性能力授权（目前只有联网）。返回 true 表示用户批准。
+   * 未提供时视为不可申请。
+   */
+  onRequestCapability?: (escalation: CapabilityEscalation) => Promise<boolean>;
 }
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */
@@ -46,6 +67,14 @@ export interface Tool<I = unknown, O = unknown> {
    * 声明只是建议：用户的显式规则优先级更高（见 src/index.ts 的策略组装）。
    */
   defaultPermission?: PermissionDecision;
+  /**
+   * 这个工具需要档位提供什么能力（写工作区 / 联网）。
+   *
+   * **只有进程内工具需要声明**：它们没有内核兜底，档位必须由闸门来执行。
+   * 走沙箱的工具（bash）不用声明 —— read-only 档下它想写也写不动，
+   * 内核会把 `sed -i`、`python -c "open(...,'w')"`、`>` 重定向一起挡住。
+   */
+  requires?: ModeRequirement;
   run(input: I, ctx: ToolCtx): Promise<O>;
   /**
    * 告诉权限系统"这次调用动的是什么资源"。

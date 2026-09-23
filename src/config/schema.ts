@@ -7,7 +7,7 @@
 
 import type { ProviderConfig } from "../provider/registry.ts";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
-import type { SandboxOptions } from "../sandbox/bwrap.ts";
+import type { SandboxMode } from "../permission/mode.ts";
 
 export interface AgentConfig {
   systemPrompt?: string;
@@ -21,9 +21,11 @@ export interface PermissionsConfig {
   rules?: PermissionRule[];
 }
 
-export interface SandboxConfig extends SandboxOptions {
-  /** 设为 false 等价于不启用沙箱。 */
-  enabled?: boolean;
+export interface SandboxConfig {
+  /** 沙箱档位：read-only / workspace-write / no-sandbox。 */
+  mode?: SandboxMode;
+  /** 额外可写路径（仅沙箱档位有效）。 */
+  writablePaths?: string[];
 }
 
 export interface BugentConfig {

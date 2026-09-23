@@ -31,9 +31,10 @@ bun run src/index.ts
 bun run src/index.ts --plain
 
 # 权限与沙箱
-bun run src/index.ts --yes            # 跳过所有权限确认（危险）
-bun run src/index.ts --no-sandbox     # 关闭 bwrap 沙箱
-bun run src/index.ts --allow-network  # 沙箱内允许联网（默认断网）
+bun run src/index.ts --mode read-only         # 根只读 + 工作区只读 + 断网
+bun run src/index.ts --mode workspace-write   # 根只读 + 工作区可写 + 断网（默认）
+bun run src/index.ts --mode no-sandbox        # 不隔离
+bun run src/index.ts --yes                    # 跳过所有规则检查（危险）
 
 # 会话
 bun run src/index.ts --sessions       # 列出已保存的会话
@@ -89,6 +90,80 @@ extra_body = { reasoning_effort = "high" }
 
 已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter。
 待实现：`openai-responses`、`anthropic-messages`。
+
+## 权限模型：档位即授权
+
+三档递进，**档位本身就是预先授权范围**：
+
+| 档位 | 根 | 工作区 | 网络 | 进程隔离 |
+| --- | --- | --- | --- | --- |
+| `read-only` | 只读 | **只读** | 断 | bwrap |
+| `workspace-write` | 只读 | 可写 | 断 | bwrap |
+| `no-sandbox` | — | 可写 | 通 | 无 |
+
+### 为什么 read-only 能挡住 `sed -i` 和 `python` 写文件
+
+**因为不去解析命令 —— 让内核挡。** 把工作区挂成只读之后，`sed -i`、
+`python -c "open(...,'w')"`、`>` 重定向、`tee` 全部撞上
+`Read-only file system`。你没法枚举所有能写文件的程序，但内核只需要一条规则。
+
+实测（`tests/mode.test.ts` 里是断言，不是说明）：
+
+```
+read-only 档：重定向写 / sed -i / python 写 / tee  → 文件内容一个字节没变
+workspace-write 档：同样四种写法全部成功，但写工作区外仍被挡
+```
+
+### 弹窗只在"越档"时出现
+
+**沙箱越严，越不需要问。** read-only 档下内核保证 bash 改不了任何东西，
+所以 bash **自动放行**，不打断你；workspace-write 档下工作区就是声明的边界。
+反过来 `no-sandbox` 是你主动选的，也就等于主动授权了。
+
+`permissions.rules` 退居为**覆盖层**，用来加硬性禁令或强制询问：
+
+```toml
+[permissions]
+[[permissions.rules]]
+tool = "bash"
+resource = "rm -rf /*"
+decision = "deny"
+
+[[permissions.rules]]
+tool = "bash"
+resource = "git push*"
+decision = "ask"
+```
+
+### 联网：先跑、失败、带着原因要授权
+
+网络**不绑在档位上**（否则会为了联网不得不丢掉文件系统隔离）。默认断网，
+流程是：
+
+```
+模型调用 bash("npm install")
+  ↓ 先在断网沙箱里真跑一次
+失败：Could not connect to server
+  ↓ 检测到是网络受限
+弹窗：「这条命令因为沙箱断网失败了。允许联网后重跑吗？
+       命令：npm install
+       报错：curl: (7) Could not connect to server」
+  ↓ 批准 → 保持沙箱，只放开这一次的网络，重跑同一条命令
+  ↓ 拒绝 → 原始失败结果原样返回给模型
+```
+
+刻意**不做先行拦截**：那样用户看到的是一句没有上下文的"是否允许联网"，
+根本不知道自己在批准什么。
+
+### 输入面板
+
+输入区是 4 行的带底色面板（第一行放内容，其余留白），不再是单薄的 `› ___`。
+
+### 对话框
+
+权限确认、能力授权、升档询问共用同一个对话框组件
+（`src/tui/app.ts` 的 `#openDialog`）—— 将来加 `ask_user` 工具时，
+只需要把自由文本输入接进同一个渲染路径，不用再动布局。
 
 ## 工具集
 

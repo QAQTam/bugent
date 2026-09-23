@@ -12,6 +12,11 @@ export const COLOR = {
   warn: "#fbbf24",
   ok: "#4ade80",
 
+  /** 输入面板的"阴影"底色。 */
+  inputBg: "#1e2430",
+  inputEdge: "#22d3ee",
+  inputText: "#e2e8f0",
+
   // 待办三态
   todoPending: "#64748b",
   todoActive: "#fbbf24",

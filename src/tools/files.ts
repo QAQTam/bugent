@@ -176,6 +176,9 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       "修改已有文件请优先用 edit_file，避免覆盖掉你没看过的内容。",
     ].join(" "),
     parameters: WRITE_FILE_PARAMETERS,
+    // 进程内工具没有内核兜底，必须显式声明需要写权限 ——
+    // read-only 档位下闸门会据此拦下（或弹窗请求升档）
+    requires: { write: true },
 
     describe(input: unknown) {
       const path = typeof (input as WriteFileInput | null)?.path === "string" ? (input as WriteFileInput).path : "";
@@ -262,6 +265,7 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       "默认要求唯一匹配；有多处匹配时要么提供更多上下文，要么设 replace_all=true。",
     ].join(" "),
     parameters: EDIT_FILE_PARAMETERS,
+    requires: { write: true },
 
     describe(input: unknown) {
       const path = typeof (input as EditFileInput | null)?.path === "string" ? (input as EditFileInput).path : "";

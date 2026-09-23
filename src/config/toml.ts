@@ -13,6 +13,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
+import { isSandboxMode } from "../permission/mode.ts";
 import type { EndpointKind, ProviderConfig } from "../provider/registry.ts";
 import type { BugentConfig, SandboxConfig } from "./schema.ts";
 
@@ -151,17 +152,19 @@ export function parseConfigToml(text: string): BugentConfig {
   }
 
   const sandbox: SandboxConfig = {};
-  const sandboxEnabled = asBool(sandboxTable.enabled, "sandbox.enabled");
-  const allowNetwork = asBool(
-    pick(sandboxTable, "allow_network", "allowNetwork"),
-    "sandbox.allow_network",
-  );
+  const sandboxMode = asString(pick(sandboxTable, "mode"), "sandbox.mode");
+  if (sandboxMode !== undefined) {
+    if (!isSandboxMode(sandboxMode)) {
+      throw new Error(
+        `config.toml: sandbox.mode 必须是 read-only / workspace-write / no-sandbox，收到 ${JSON.stringify(sandboxMode)}`,
+      );
+    }
+    sandbox.mode = sandboxMode;
+  }
   const writablePaths = asStringArray(
     pick(sandboxTable, "writable_paths", "writablePaths"),
     "sandbox.writable_paths",
   );
-  if (sandboxEnabled !== undefined) sandbox.enabled = sandboxEnabled;
-  if (allowNetwork !== undefined) sandbox.allowNetwork = allowNetwork;
   if (writablePaths !== undefined) sandbox.writablePaths = writablePaths;
 
   const systemPrompt = asString(
@@ -215,9 +218,12 @@ resource = "rm -rf /*"
 decision = "deny"
 
 [sandbox]
-# 默认：根只读、工作目录可写、私有 /tmp、断网
-enabled = true
-allow_network = false
+# 档位：read-only | workspace-write | no-sandbox
+#   read-only        根只读 + 工作区只读 + 断网（bash 可自动放行，内核保证改不动）
+#   workspace-write  根只读 + 工作区可写 + 断网
+#   no-sandbox       不隔离，可读写任意位置
+# 联网不走档位：默认断网，命令失败时按次询问授权。
+mode = "workspace-write"
 writable_paths = []
 
 # ---- provider ----

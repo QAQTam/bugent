@@ -13,7 +13,7 @@ import type {
 } from "../provider/types.ts";
 import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
-import type { ToolExecution, ToolRegistry } from "../tools/types.ts";
+import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
 
 export interface LoopHooks {
   onText?(delta: string): void;
@@ -29,6 +29,13 @@ export interface LoopHooks {
   /** 工具运行中的流式输出（仅用于 UI 展示，不影响回传给模型的结果）。 */
   onToolProgress?(call: ToolCall, chunk: string): void;
   onToolResult?(call: ToolCall, result: ToolExecution): void;
+  /**
+   * 工具请求一次性能力授权（目前是联网）。
+   *
+   * 调用时机是**工具已经真跑过并失败了** —— 所以 escalation 里带着真实命令
+   * 与报错，用户知道自己在批准什么。返回 true 表示批准。
+   */
+  onRequestCapability?(call: ToolCall, escalation: CapabilityEscalation): Promise<boolean>;
   onUsage?(usage: Usage): void;
 }
 
@@ -98,6 +105,15 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     },
     onToolResult: (call, result) => {
       for (const group of active) group.onToolResult?.(call, result);
+    },
+    // 能力授权只走第一个提供了它的 hook —— 这是"用户交互"，不该被广播多次
+    onRequestCapability: async (call, escalation) => {
+      for (const group of active) {
+        if (group.onRequestCapability !== undefined) {
+          return group.onRequestCapability(call, escalation);
+        }
+      }
+      return false;
     },
     onUsage: (usage) => {
       for (const group of active) group.onUsage?.(usage);
@@ -212,13 +228,15 @@ export async function runTurn(
     for (const call of calls) {
       hooks.onToolCall?.(call);
       const progress = hooks.onToolProgress;
+      const requestCapability = hooks.onRequestCapability;
       const result = await tools.execute(call, {
         cwd,
         signal,
         callId: call.id,
         sessionId: session.id,
-        ...(progress !== undefined
-          ? { onProgress: (chunk: string) => progress(call, chunk) }
+        ...(progress !== undefined ? { onProgress: (chunk: string) => progress(call, chunk) } : {}),
+        ...(requestCapability !== undefined
+          ? { onRequestCapability: (escalation: CapabilityEscalation) => requestCapability(call, escalation) }
           : {}),
       });
       hooks.onToolResult?.(call, result);

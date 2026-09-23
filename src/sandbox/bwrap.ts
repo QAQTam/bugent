@@ -21,7 +21,15 @@ import {
 export const SANDBOX_BINARY = "bwrap";
 
 export interface SandboxOptions {
-  /** 额外可写路径。工作目录总是可写，不用列。 */
+  /**
+   * 工作区是否可写。
+   *
+   * 这是 `read-only` 与 `workspace-write` 两档的**唯一区别**：
+   * 关掉之后 `sed -i` / `python -c "open(...,'w')"` / `>` 重定向
+   * 全都会撞上内核的 Read-only file system，不需要我们去枚举命令。
+   */
+  workspaceWrite?: boolean;
+  /** 额外可写路径。工作目录可写时不用列。 */
   writablePaths?: readonly string[];
   /** 允许联网。默认 false。 */
   allowNetwork?: boolean;
@@ -59,13 +67,21 @@ export function buildSandboxArgv(
     "--new-session",
   ];
 
-  if (sandbox.allowNetwork !== true) argv.push("--unshare-net");
+  // 网络：沙箱配置默认断网，但**单次运行**可以覆盖（用户批准后只放开这一次）
+  const networkAllowed = options.allowNetwork === true || sandbox.allowNetwork === true;
+  if (!networkAllowed) argv.push("--unshare-net");
 
   // 顺序要紧：先 tmpfs /tmp，再叠加可写绑定，后挂载的覆盖先挂载的。
   for (const path of sandbox.writablePaths ?? []) {
     argv.push("--bind", path, path);
   }
-  argv.push("--bind", options.cwd, options.cwd);
+
+  // 关键分档点：workspaceWrite 为 false 时**不**绑可写工作区，
+  // 于是整个文件系统（含工作区）都是只读的。
+  if (sandbox.workspaceWrite !== false) {
+    argv.push("--bind", options.cwd, options.cwd);
+  }
+
   argv.push("--chdir", options.cwd);
   argv.push("--");
   argv.push(shell, "-lc", options.command);

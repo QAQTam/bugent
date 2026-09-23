@@ -7,7 +7,9 @@
 
 import { createInterface, type Interface } from "node:readline/promises";
 import type { PermissionPrompter } from "./gate.ts";
+import { describeCapability } from "./mode.ts";
 import type { PermissionRequest } from "./policy.ts";
+import type { CapabilityEscalation } from "../tools/types.ts";
 
 /** 在 stdin 上问一句 y/N。 */
 export class StdinPrompter implements PermissionPrompter {
@@ -22,6 +24,24 @@ export class StdinPrompter implements PermissionPrompter {
     const answer = await this.#readline().question(
       `\n\x1b[33m[权限请求]\x1b[0m ${request.summary}\n允许执行？[y/N] `,
     );
+    const normalized = answer.trim().toLowerCase();
+    return normalized === "y" || normalized === "yes";
+  }
+
+  /**
+   * 能力授权询问。
+   *
+   * 一定把**真实原因与细节**打出来 —— 用户需要看到是哪条命令、
+   * 因为什么失败，才能判断要不要批准。
+   */
+  async confirmCapability(escalation: CapabilityEscalation): Promise<boolean> {
+    const lines = [
+      "",
+      `\x1b[33m[需要授权]\x1b[0m ${describeCapability(escalation.capability)}`,
+      `  ${escalation.reason}`,
+      ...(escalation.details ?? []).map((detail) => `  \x1b[2m${detail}\x1b[0m`),
+    ];
+    const answer = await this.#readline().question(`${lines.join("\n")}\n允许这一次？[y/N] `);
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
   }
