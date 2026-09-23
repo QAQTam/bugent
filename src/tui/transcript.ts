@@ -9,6 +9,7 @@
 
 import type { ToolCall, Usage } from "../provider/types.ts";
 import { storedText, type MsgId, type StoredMessage } from "../core/message.ts";
+import type { ToolPresentation } from "../core/presentation.ts";
 
 export type DisplayItem =
   | { kind: "user"; text: string; msgid?: MsgId }
@@ -25,11 +26,14 @@ export type DisplayItem =
       assistantMsgid?: MsgId;
       /** 工具结果消息；完成后优先用它作为操作目标。 */
       msgid?: MsgId;
-      /**
-       * 运行中的流式输出。**只保留最后几行** ——
+      /** 运行中的流式输出。**只保留最后几行** ——
        * 一个跑十分钟的命令可能产出几十万行，全留着会拖垮渲染。
        */
       progress: string;
+      /** 当前进度缓冲最后收到的输出流，用于实时语义着色。 */
+      progressStream?: "stdout" | "stderr";
+      /** 结构化展示信息；不进入模型上下文。 */
+      presentation?: ToolPresentation;
       /** 用户点击折叠行后展开全文（鼠标交互）。 */
       expanded: boolean;
     }
@@ -165,19 +169,30 @@ export class Transcript {
   }
 
   /** 工具运行中的流式输出。只保留末尾若干行，内存有界。 */
-  appendToolProgress(callId: string, chunk: string): void {
+  appendToolProgress(
+    callId: string,
+    chunk: string,
+    stream: "stdout" | "stderr" = "stdout",
+  ): void {
     if (chunk.length === 0) return;
     for (let i = this.#items.length - 1; i >= 0; i -= 1) {
       const item = this.#items[i];
       if (item !== undefined && item.kind === "tool" && item.callId === callId && !item.done) {
         item.progress = keepLastLines(item.progress + chunk, TOOL_PROGRESS_LINES);
+        item.progressStream = stream;
         this.#bump(i);
         return;
       }
     }
   }
 
-  finishTool(callId: string, output: string, ok: boolean, msgid?: MsgId): boolean {
+  finishTool(
+    callId: string,
+    output: string,
+    ok: boolean,
+    msgid?: MsgId,
+    presentation?: ToolPresentation,
+  ): boolean {
     for (let i = this.#items.length - 1; i >= 0; i -= 1) {
       const item = this.#items[i];
       if (item !== undefined && item.kind === "tool" && item.callId === callId && !item.done) {
@@ -185,6 +200,7 @@ export class Transcript {
         item.ok = ok;
         item.done = true;
         if (msgid !== undefined) item.msgid = msgid;
+        if (presentation !== undefined) item.presentation = presentation;
         this.#bump(i);
         return true;
       }

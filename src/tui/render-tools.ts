@@ -15,6 +15,7 @@ import { BOLD, DIM, RESET, fg, renderPlain } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
+import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import { parseDiffStat, type DiffStat } from "../tools/diff.ts";
 import { highlightCode } from "./highlight.ts";
 
@@ -75,6 +76,138 @@ function header(item: ToolItem, width: number, marker: string, color: string, ba
   return `${left}${" ".repeat(gap)}${badge}`;
 }
 
+/** bash 头部单独走语法高亮：命令参数不是普通字符串，而是 shell 代码。 */
+function bashHeader(item: ToolItem, width: number): string {
+  const command = argsSummary(item).replace(/\s+/g, " ").trim();
+  const left = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}bash${RESET}`;
+  if (command.length === 0) return left;
+
+  const budget = Math.max(1, width - visibleWidth(left) - 1);
+  return `${left} ${truncateAnsi(highlightCode(command, "bash"), budget)}`;
+}
+
+export type BashLineTone = "normal" | "error" | "warn" | "success" | "path" | "url" | "meta";
+
+const ERROR_PATTERN =
+  /\b(error|failed|failure|fatal|panic|exception|traceback|assertionerror)\b|失败|错误|异常|致命/i;
+const WARN_PATTERN = /\b(warn(?:ing)?|deprecated|deprecation)\b|警告|弃用/i;
+const SUCCESS_PATTERN = /\b(pass(?:ed)?|success(?:ful)?|ok|done|completed)\b|成功|通过|完成/i;
+const URL_PATTERN = /https?:\/\/[^\s]+/i;
+const PATH_PATTERN =
+  /(?:^|\s)(?:\.{0,2}\/|\/|[A-Za-z]:\\|[A-Za-z0-9_.-]+\/)[^\s:]+(?::\d+)?(?::\d+)?/;
+
+/**
+ * 输出行的语义分类。
+ *
+ * 这是轻量、确定性的启发式，不是 AST：bash 输出本身没有语法保证，
+ * 但 error / warning / success / path 这类信息足够稳定，能显著改善可读性。
+ */
+export function classifyBashLine(line: string, stream: "stdout" | "stderr" = "stdout"): BashLineTone {
+  if (line.length === 0) return "normal";
+  if (WARN_PATTERN.test(line)) return "warn";
+  if (ERROR_PATTERN.test(line)) return "error";
+  if (SUCCESS_PATTERN.test(line)) return "success";
+  if (URL_PATTERN.test(line)) return "url";
+  if (PATH_PATTERN.test(line)) return "path";
+  return stream === "stderr" ? "error" : "normal";
+}
+
+function toneColor(tone: BashLineTone): string {
+  switch (tone) {
+    case "error":
+      return COLOR.bashStderr;
+    case "warn":
+      return COLOR.bashWarn;
+    case "success":
+      return COLOR.bashSuccess;
+    case "path":
+      return COLOR.bashPath;
+    case "url":
+      return COLOR.bashUrl;
+    case "meta":
+      return COLOR.bashMeta;
+    case "normal":
+    default:
+      return COLOR.bashStdout;
+  }
+}
+
+function renderBashLine(line: string, stream: "stdout" | "stderr"): string {
+  const tone = classifyBashLine(line, stream);
+  return `${fg(toneColor(tone))}  ${line}${RESET}`;
+}
+
+/**
+ * 从旧格式输出恢复展示信息。
+ *
+ * 当前运行会带 ToolPresentation；恢复历史 session 时没有这份元数据，
+ * 但 bash 的 `--- stderr ---` 与 `[exit code: ...]` 是稳定格式，可以降级恢复。
+ */
+export function parseBashPresentation(output: string): BashPresentation {
+  const segments: ToolOutputSegment[] = [];
+  let stream: "stdout" | "stderr" = "stdout";
+  let buffer: string[] = [];
+  let exitCode: number | null = null;
+  let timedOut = false;
+  let aborted = false;
+  let truncated = false;
+
+  const flush = (): void => {
+    if (buffer.length === 0) return;
+    segments.push({ kind: stream, text: buffer.join("\n") });
+    buffer = [];
+  };
+
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "--- stderr ---") {
+      flush();
+      stream = "stderr";
+      continue;
+    }
+
+    const exit = /^\[exit code:\s*(.+?)\]$/.exec(trimmed);
+    if (exit !== null) {
+      flush();
+      const raw = exit[1] ?? "";
+      exitCode = /^-?\d+$/.test(raw) ? Number.parseInt(raw, 10) : null;
+      continue;
+    }
+
+    if (trimmed.startsWith("[超时]")) {
+      flush();
+      timedOut = true;
+      segments.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (trimmed.startsWith("[中断]")) {
+      flush();
+      aborted = true;
+      segments.push({ kind: "meta", text: line });
+      continue;
+    }
+    if (trimmed.startsWith("[输出超过")) {
+      flush();
+      truncated = true;
+      segments.push({ kind: "meta", text: line });
+      continue;
+    }
+
+    buffer.push(line);
+  }
+  flush();
+
+  return {
+    kind: "bash",
+    command: "",
+    segments,
+    exitCode,
+    timedOut,
+    aborted,
+    truncated,
+  };
+}
+
 /**
  * 从**开头**截断，而不是头尾都留。
  *
@@ -125,18 +258,47 @@ function bodyLines(text: string, width: number, color: string): string[] {
 /* ------------------------------------------------------------------ */
 
 export function renderBashTool(item: ToolItem, width: number): string[] {
-  const head = header(item, width, "⏺", COLOR.tool);
+  const head = bashHeader(item, width);
 
-  // 运行中：显示最新几行进度（Transcript 已经保证只留最后 N 行）
+  // 运行中：显示最新几行进度，按当前 stream 做基础语义着色。
   if (!item.done) {
     const progress = item.progress.length > 0 ? item.progress : "…";
+    const stream = item.progressStream ?? "stdout";
     const lines = renderPlain(progress, Math.max(1, width - 2));
-    return [head, ...lines.map((line) => `${DIM}${line}${RESET}`)];
+    return [head, ...lines.map((line) => renderBashLine(line, stream))];
   }
 
-  const color = item.ok ? COLOR.toolOk : COLOR.error;
-  const body = bodyLines(item.output, width, color);
-  return [head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, color, item.expanded)];
+  const presentation =
+    item.presentation?.kind === "bash" ? item.presentation : parseBashPresentation(item.output);
+
+  // 非 bash 工具异常（权限拒绝、参数错误）没有结构化段，保持原来的错误外观。
+  if (!item.ok && item.presentation === undefined) {
+    const body = bodyLines(item.output, width, COLOR.error);
+    return [head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, COLOR.error, item.expanded)];
+  }
+
+  const lines: string[] = [];
+  for (const segment of presentation.segments) {
+    const segmentLines = renderPlain(segment.text, Math.max(1, width - 2));
+    for (const line of segmentLines) {
+      if (segment.kind === "meta") {
+        lines.push(`${DIM}${fg(COLOR.bashMeta)}  ${line}${RESET}`);
+      } else {
+        lines.push(renderBashLine(line, segment.kind));
+      }
+    }
+  }
+
+  const exitCode = presentation.exitCode;
+  const exitTone: BashLineTone =
+    exitCode === 0 ? "success" : exitCode === null ? "warn" : "error";
+  const exitLabel = exitCode === null ? "unknown" : String(exitCode);
+  lines.push(`${fg(toneColor(exitTone))}  [exit code: ${exitLabel}]${RESET}`);
+
+  return [
+    head,
+    ...foldLines(lines, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, COLOR.tool, item.expanded),
+  ];
 }
 
 /* ------------------------------------------------------------------ */

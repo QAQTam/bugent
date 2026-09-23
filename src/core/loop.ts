@@ -30,7 +30,7 @@ export interface LoopHooks {
   onAssistant?(message: StoredMessage): void;
   onToolCall?(call: ToolCall): void;
   /** 工具运行中的流式输出（仅用于 UI 展示，不影响回传给模型的结果）。 */
-  onToolProgress?(call: ToolCall, chunk: string): void;
+  onToolProgress?(call: ToolCall, chunk: string, stream: "stdout" | "stderr"): void;
   onToolResult?(call: ToolCall, result: ToolExecution, message?: StoredMessage): void;
   /**
    * 工具请求一次性能力授权（目前是联网）。
@@ -111,8 +111,8 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     onToolCall: (call) => {
       for (const group of active) group.onToolCall?.(call);
     },
-    onToolProgress: (call, chunk) => {
-      for (const group of active) group.onToolProgress?.(call, chunk);
+    onToolProgress: (call, chunk, stream) => {
+      for (const group of active) group.onToolProgress?.(call, chunk, stream);
     },
     onToolResult: (call, result, message) => {
       for (const group of active) group.onToolResult?.(call, result, message);
@@ -253,7 +253,9 @@ export async function runTurn(
         signal,
         callId: call.id,
         sessionId: session.id,
-        ...(progress !== undefined ? { onProgress: (chunk: string) => progress(call, chunk) } : {}),
+        ...(progress !== undefined
+          ? { onProgress: (chunk: string, stream: "stdout" | "stderr") => progress(call, chunk, stream) }
+          : {}),
         ...(requestCapability !== undefined
           ? { onRequestCapability: (escalation: CapabilityEscalation) => requestCapability(call, escalation) }
           : {}),

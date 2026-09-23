@@ -29,4 +29,13 @@ export const COLOR = {
   // diff
   diffAdd: "#4ade80",
   diffRemove: "#f87171",
+
+  // bash 输出语义层
+  bashStdout: "#cbd5e1",
+  bashStderr: "#fca5a5",
+  bashMeta: "#94a3b8",
+  bashWarn: "#fcd34d",
+  bashSuccess: "#86efac",
+  bashPath: "#93c5fd",
+  bashUrl: "#67e8f9",
 } as const;

@@ -9,6 +9,7 @@
 import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
 import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
+import type { ToolPresentation } from "../core/presentation.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 import {
   denialMessage,
@@ -41,8 +42,10 @@ export interface ToolCtx {
   /**
    * 流式进度回调：长时间运行的工具（如 bash）可以边跑边把输出推给 UI。
    * 这只是展示用，**不参与**最终回传给模型的结果。
+   *
+   * 第二个参数区分 stdout / stderr，供 TUI 做语义着色。
    */
-  onProgress?: (chunk: string) => void;
+  onProgress?: (chunk: string, stream: "stdout" | "stderr") => void;
   /**
    * 请求一次性能力授权（目前只有联网）。返回 true 表示用户批准。
    * 未提供时视为不可申请。
@@ -61,6 +64,12 @@ export interface ToolCtx {
    * 工具本身不负责落盘，loop 会把结果挂到对应的 tool result 消息上。
    */
   onWorkspaceChange?: (edit: WorkspaceFileEdit) => void;
+  /**
+   * 工具成功执行后报告结构化展示信息（例如 bash 的 stdout/stderr/exit code）。
+   *
+   * 这不是模型上下文；loop 只把它交给 UI。
+   */
+  onPresentation?: (presentation: ToolPresentation) => void;
 }
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */
@@ -106,6 +115,8 @@ export interface ToolExecution {
   output: string;
   /** 本次调用成功修改的工作区文件；只用于 undo，不喂给模型。 */
   workspace?: readonly WorkspaceFileEdit[];
+  /** 本次调用的结构化展示信息；只用于 UI，不喂给模型。 */
+  presentation?: ToolPresentation;
 }
 
 export function toToolSchema(tool: Tool): ToolSchema {
@@ -206,12 +217,18 @@ export class ToolRegistry {
 
     try {
       const workspace: WorkspaceFileEdit[] = [];
+      let presentation: ToolPresentation | undefined;
       const previousWorkspaceChange = ctx.onWorkspaceChange;
+      const previousPresentation = ctx.onPresentation;
       const executionCtx: ToolCtx = {
         ...ctx,
         onWorkspaceChange: (edit) => {
           workspace.push(edit);
           previousWorkspaceChange?.(edit);
+        },
+        onPresentation: (value) => {
+          presentation = value;
+          previousPresentation?.(value);
         },
       };
       const value = await tool.run(call.args, executionCtx);
@@ -219,6 +236,7 @@ export class ToolRegistry {
         ok: true,
         output: serializeToolOutput(value),
         ...(workspace.length > 0 ? { workspace } : {}),
+        ...(presentation !== undefined ? { presentation } : {}),
       };
     } catch (error) {
       return { ok: false, output: errorMessage(error) };

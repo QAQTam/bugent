@@ -1034,8 +1034,8 @@ export class TuiApp implements TuiInteraction {
         this.#scheduleRender();
       },
       // 运行中的流式输出：只保留末尾若干行，内存有界
-      onToolProgress: (call, chunk) => {
-        this.#transcript.appendToolProgress(call.id, chunk);
+      onToolProgress: (call, chunk, stream) => {
+        this.#transcript.appendToolProgress(call.id, chunk, stream);
         this.#scheduleRender();
       },
       // 工具跑失败后请求一次性能力授权（如联网）—— 弹窗里带真实原因与报错
@@ -1043,7 +1043,13 @@ export class TuiApp implements TuiInteraction {
       // ask_user：多页问答表单
       onAskUser: (_call, questions) => this.askUser(questions),
       onToolResult: (call, result, message) => {
-        this.#transcript.finishTool(call.id, result.output, result.ok, message?.msgid);
+        this.#transcript.finishTool(
+          call.id,
+          result.output,
+          result.ok,
+          message?.msgid,
+          result.presentation,
+        );
         this.#syncTodoShimmer();
         this.#scheduleRender();
       },

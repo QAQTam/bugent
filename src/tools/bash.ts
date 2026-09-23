@@ -12,6 +12,7 @@
  */
 
 import type { JSONSchema } from "../provider/types.ts";
+import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { createOutputSpool, type OutputSpool, type OutputStreamName } from "./spill.ts";
 import { sanitizeEnv } from "../sandbox/env.ts";
@@ -37,7 +38,7 @@ export interface ShellRunOptions {
   maxOutputBytes: number;
   signal: AbortSignal;
   /** 流式回调：边跑边把输出推给 UI（不参与最终结果）。 */
-  onProgress?: (chunk: string) => void;
+  onProgress?: (chunk: string, stream: "stdout" | "stderr") => void;
   /**
    * 原始字节流回调：给完整输出落盘用。
    *
@@ -122,7 +123,7 @@ async function readCapped(
   stream: ReadableStream<Uint8Array>,
   cap: number,
   streamName: OutputStreamName,
-  onChunk?: (text: string) => void,
+  onChunk?: (text: string, stream: "stdout" | "stderr") => void,
   onRawOutput?: (stream: OutputStreamName, chunk: Uint8Array) => void,
 ): Promise<CappedText> {
   const reader = stream.getReader();
@@ -144,7 +145,7 @@ async function readCapped(
       // UI 进度也继续消费完整流；只有给模型的 text 受 cap 限制。
       if (onChunk !== undefined) {
         const progress = progressDecoder.decode(value, { stream: true });
-        if (progress.length > 0) onChunk(progress);
+        if (progress.length > 0) onChunk(progress, streamName);
       }
 
       if (truncated) continue;
@@ -166,7 +167,7 @@ async function readCapped(
 
     if (onChunk !== undefined) {
       const progressTail = progressDecoder.decode();
-      if (progressTail.length > 0) onChunk(progressTail);
+      if (progressTail.length > 0) onChunk(progressTail, streamName);
     }
   } finally {
     reader.releaseLock();
@@ -380,6 +381,41 @@ function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: nu
   return parts.join("\n");
 }
 
+/** 生成 TUI 专用的结构化展示信息；模型仍只看到 formatResult 的文本。 */
+function buildBashPresentation(
+  command: string,
+  result: ShellResult,
+  timeoutMs: number,
+  maxOutputBytes: number,
+): BashPresentation {
+  const segments: ToolOutputSegment[] = [];
+
+  if (result.timedOut) {
+    segments.push({ kind: "meta", text: `[超时] 命令在 ${timeoutMs}ms 内未结束，已强制终止` });
+  } else if (result.aborted) {
+    segments.push({ kind: "meta", text: "[中断] 命令被取消" });
+  }
+
+  const stdout = result.stdout.replace(/\s+$/, "");
+  const stderr = result.stderr.replace(/\s+$/, "");
+  if (stdout.length > 0) segments.push({ kind: "stdout", text: stdout });
+  if (stderr.length > 0) segments.push({ kind: "stderr", text: stderr });
+  if (result.truncated) {
+    segments.push({ kind: "meta", text: `[输出超过 ${maxOutputBytes} 字节，已截断]` });
+  }
+  if (segments.length === 0) segments.push({ kind: "meta", text: "(无输出)" });
+
+  return {
+    kind: "bash",
+    command,
+    segments,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    aborted: result.aborted,
+    truncated: result.truncated,
+  };
+}
+
 /**
  * 超长输出：截断给模型 + 完整版落盘。
  *
@@ -516,6 +552,10 @@ export function createBashTool(
           result = attempt.result;
         }
       }
+
+      ctx.onPresentation?.(
+        buildBashPresentation(command, result, timeoutMs, maxOutputBytes),
+      );
 
       return clampForModel(
         formatResult(result, timeoutMs, maxOutputBytes),
