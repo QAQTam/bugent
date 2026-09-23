@@ -43,6 +43,9 @@ import type { CapabilityEscalation } from "../tools/types.ts";
 /** 输入面板的行数（带底色的"阴影"区块）。 */
 export const INPUT_ROWS = 4;
 
+/** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
+export const BODY_INDENT = 3;
+
 /**
  * 通用对话框。
  *
@@ -672,8 +675,14 @@ export class TuiApp {
 
     const rows: string[] = [];
     for (let index = 0; index < INPUT_ROWS; index += 1) {
-      const content = index === 0 ? this.#composeInputText() : "";
-      const padding = " ".repeat(Math.max(0, fill - visibleWidth(content)));
+      const raw = index === 0 ? this.#composeInputText() : "";
+
+      // 关键：RESET([0m) 会把**背景色一起清掉**，于是 `▌` 之后的
+      // 整行都失去底色，看起来就是"输入框和灰蓝色分离"。
+      // 在每个 RESET 之后重新贴上背景色即可。
+      const content = raw.replaceAll(RESET, `${RESET}${background}`);
+      const padding = " ".repeat(Math.max(0, fill - visibleWidth(raw)));
+
       rows.push(`${background}${content}${padding}${RESET}`);
     }
     return rows;
@@ -721,9 +730,15 @@ export class TuiApp {
     const all: string[] = [];
     const spans: { callId?: string; start: number; end: number; header: string }[] = [];
 
+    // 左侧留白：内容按窄 width 渲染，再统一缩进，避免文字贴着终端边缘
+    const indent = " ".repeat(BODY_INDENT);
+    const innerWidth = Math.max(1, width - BODY_INDENT);
+
     for (const item of this.#transcript.items) {
       const start = all.length;
-      const rendered = this.#renderItem(item, width);
+      const rendered = this.#renderItem(item, innerWidth).map((line) =>
+        line.length > 0 ? indent + line : line,
+      );
       all.push(...rendered);
 
       spans.push({

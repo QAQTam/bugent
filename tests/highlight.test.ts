@@ -133,6 +133,31 @@ describe("高亮：懒加载与缓存", () => {
   });
 });
 
+describe("markdown 折行宽度", () => {
+  test("回归：Bun.markdown.ansi 默认按 80 列折行，必须显式传 columns", () => {
+    const long = "这是一段很长的中文文本用来测试折行行为到底受什么控制".repeat(3);
+
+    const narrow = renderMarkdown(long, 80);
+    const wide = renderMarkdown(long, 200);
+
+    // 宽终端下应该更少行 —— 如果 columns 没生效，两者行数会一样
+    expect(wide.length).toBeLessThan(narrow.length);
+
+    for (const line of wide) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(200);
+  });
+
+  test("超宽终端的段落不会被硬编码在 80 列", () => {
+    const text = "中文".repeat(100); // 400 列
+    const lines = renderMarkdown(text, 300);
+    expect(lines[0]!.length).toBeGreaterThan(80);
+  });
+
+  test("窄终端仍然正确折行", () => {
+    const lines = renderMarkdown("这是一段需要在窄终端里折行的文本".repeat(3), 40);
+    for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(40);
+  });
+});
+
 describe("renderMarkdown：代码块渲染", () => {
   test("代码块带边框与语言标签", async () => {
     renderMarkdown("```python\nx = 1\n```", 60);

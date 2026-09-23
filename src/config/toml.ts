@@ -205,16 +205,14 @@ default_model = "openai/deepseek-v4.1-flash"
 # system_prompt = "You are bugent..."
 max_steps = 16
 
+# ---- 权限 ----
+# 放行交给**沙箱档位**判断，这里只写硬性禁令。
+# 刻意不设 default = "ask" —— 那会让每次工具调用都弹窗，
+# 而档位本身已经声明了边界（read-only 档下 bash 改不动任何东西）。
 [permissions]
-# 未命中任何规则时的决策：allow / ask / deny
-default = "ask"
 
 # 规则按顺序匹配，第一条命中即生效。
-# 注意 resource 里的 * 匹配任意字符（含 /），给 bash 配白名单要非常小心。
-[[permissions.rules]]
-tool = "read_file"
-decision = "allow"
-
+# 注意 resource 里的 * 匹配任意字符（含 /）。
 [[permissions.rules]]
 tool = "bash"
 resource = "rm -rf /*"
@@ -222,14 +220,15 @@ decision = "deny"
 
 [sandbox]
 # 档位：read-only | workspace-write | no-sandbox
-#   read-only        根只读 + 工作区只读 + 断网（bash 可自动放行，内核保证改不动）
+#   read-only        根只读 + 工作区只读 + 断网（bash 自动放行，内核保证改不动）
 #   workspace-write  根只读 + 工作区可写 + 断网
 #   no-sandbox       不隔离，可读写任意位置
-# 联网不走档位：默认断网，命令失败时按次询问授权。
 mode = "workspace-write"
+
+# 额外可写路径（工作目录总是可写）
 writable_paths = []
 
-# 环境变量是白名单制：只保留 PATH/HOME/TERM/LANG 等少数几个，
+# 环境变量是**白名单制**：只保留 PATH/HOME/TERM/LANG 等少数几个，
 # 其余（含各种 API key）一律不传给子进程。需要什么在这里显式加。
 pass_env = []
 

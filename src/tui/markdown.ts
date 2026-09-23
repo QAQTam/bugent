@@ -43,7 +43,10 @@ export function renderMarkdown(text: string, width: number): string[] {
 
   for (const segment of splitMarkdown(text)) {
     if (segment.kind === "prose") {
-      out.push(...wrapToLines(Bun.markdown.ansi(segment.text), width));
+      // **必须传 columns** —— Bun.markdown.ansi 默认按 80 列折行，
+      // 终端再宽也没用，表现就是"回答提前换行"。
+      // 注意参数名是 columns 而不是 width（width 会被静默忽略）。
+      out.push(...wrapToLines(Bun.markdown.ansi(segment.text, { columns: width }), width));
     } else {
       out.push(...renderCodeSegment(segment, width));
     }

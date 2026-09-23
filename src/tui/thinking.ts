@@ -2,8 +2,8 @@
  * 思考链路的滚动显示。
  *
  * 按需求实现的形态：
- *   - 输入框上方固定预留 5 行
- *   - 思考内容只占**中间那一行**（第 3 行）
+ *   - 消息区与输入框之间预留 3 行
+ *   - 思考内容只占**中间那一行**，上下各留 1 行呼吸空间
  *   - 没遇到 `\n` 时横向滚动，右侧永远是最新字符
  *   - 遇到 `\n` 就销毁上一行，从空开始
  *
@@ -16,11 +16,16 @@
 import { DIM, RESET, fg } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 
-/** 输入框上方预留的行数。 */
-export const THINKING_BLOCK_ROWS = 5;
+/**
+ * 思考区预留的行数。
+ *
+ * 3 行 = 消息区底部空 1 行 + 思考 1 行 + 输入框上方空 1 行。
+ * 之前用 5 行太占地方了 —— 思考是"瞟一眼"的信息，不需要那么大的留白。
+ */
+export const THINKING_BLOCK_ROWS = 3;
 
-/** 思考渲染在预留区的第几行（0-based）。2 = 中间。 */
-export const THINKING_LINE_INDEX = 2;
+/** 思考渲染在预留区的第几行（0-based）。1 = 中间。 */
+export const THINKING_LINE_INDEX = 1;
 
 export class ThinkingBuffer {
   #current = "";
