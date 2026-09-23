@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, readdir } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -91,7 +92,9 @@ describe("P6 · 真实沙箱行为", () => {
     const result = await runner.run(runOptions(cwd, "touch /bugent-should-not-exist"));
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toLowerCase()).toContain("read-only");
+    // 断言"没写成功"本身，而不是报错文案 —— 后者随 locale 变化
+    // （英文 "read-only file system" / 中文 "只读文件系统"）。
+    expect(() => statSync("/bugent-should-not-exist")).toThrow();
   });
 
   test.skipIf(!sandboxAvailable)("默认断网", async () => {

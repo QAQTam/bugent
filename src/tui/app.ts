@@ -23,6 +23,11 @@ import { KeyDecoder, type Key } from "./keys.ts";
 import { BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { Transcript, type DisplayItem } from "./transcript.ts";
+import { COLOR } from "./theme.ts";
+import { renderToolItem } from "./renderers.ts";
+import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
+import { composeTodoPanel } from "./render-todo.ts";
+import { currentTodos, type Todo } from "../tools/todo.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 
 export interface TuiOptions {
@@ -39,17 +44,6 @@ export interface TuiOptions {
    */
   createSession?: () => AgentSession;
 }
-
-const COLOR = {
-  prompt: "#22d3ee",
-  user: "#7dd3fc",
-  tool: "#fbbf24",
-  toolOk: "#94a3b8",
-  error: "#f87171",
-  busy: "#fbbf24",
-  warn: "#fbbf24",
-  ok: "#4ade80",
-};
 
 export class TuiApp {
   #terminal = new Terminal();
@@ -75,7 +69,14 @@ export class TuiApp {
   /** 待用户确认的权限请求；存在时按键全部路由给它。 */
   #pendingPrompt: { request: PermissionRequest; resolve: (value: boolean) => void } | undefined;
 
+  /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
+  #todoCache: { key: string; todos: Todo[] } | undefined;
+
   constructor(options: TuiOptions) {
+    // 注册内置工具的自定义外观（幂等）。放在构造函数里，
+    // 保证任何入口构造 TuiApp 都能拿到，而不只是 CLI。
+    registerBuiltinToolRenderers();
+
     this.#session = options.session;
     this.#tools = options.tools;
     this.#cwd = options.cwd;
@@ -376,7 +377,12 @@ export class TuiApp {
   }
 
   #compose(width: number, height: number): string[] {
-    const bodyHeight = Math.max(1, height - 2);
+    // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置
+    const panelBudget = Math.max(0, Math.min(Math.floor(height * 0.4), height - 3));
+    const todoPanel =
+      panelBudget >= 2 ? composeTodoPanel(this.#todos(), width, { maxLines: panelBudget }) : [];
+
+    const bodyHeight = Math.max(1, height - 2 - todoPanel.length);
     const body = this.#composeBody(width, bodyHeight);
 
     // 权限弹窗以覆盖层形式压在消息区底部
@@ -388,7 +394,22 @@ export class TuiApp {
       }
     }
 
-    return [this.#composeStatus(width), ...body, this.#composeInput(width)];
+    return [this.#composeStatus(width), ...body, ...todoPanel, this.#composeInput(width)];
+  }
+
+  /**
+   * 当前待办（从消息历史派生）。
+   *
+   * 带缓存：渲染是 60fps 级别的，而派生要倒扫历史 ——
+   * 没有 todo 的会话会每次都扫全量，白烧 CPU。
+   */
+  #todos(): Todo[] {
+    const messages = this.#session.messages;
+    const key = `${this.#session.id}:${messages.length}`;
+    if (this.#todoCache === undefined || this.#todoCache.key !== key) {
+      this.#todoCache = { key, todos: currentTodos(messages) };
+    }
+    return this.#todoCache.todos;
   }
 
   #renderPrompt(width: number): string[] {
@@ -484,33 +505,13 @@ export class TuiApp {
         return renderMarkdown(item.text, width);
       }
 
-      case "tool": {
-        const argsText = safeJson(item.args);
-        const budget = Math.max(0, width - visibleWidth(item.name) - 4);
-        const head = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}${item.name}${RESET} ${DIM}${truncateAnsi(
-          argsText,
-          budget,
-        )}${RESET}`;
-        const lines = [head];
-        if (item.done) {
-          const color = item.ok ? COLOR.toolOk : COLOR.error;
-          for (const line of renderPlain(item.output, Math.max(1, width - 2))) {
-            lines.push(`${DIM}${fg(color)}  ${line}${RESET}`);
-          }
-        }
-        return lines;
-      }
+      case "tool":
+        // 交给渲染扩展点：通用工具走默认外观，注册过的（如 todo_write）走自定义。
+        // TUI 核心因此不需要认识任何具体工具名。
+        return renderToolItem(item, width);
 
       case "error":
         return renderPlain(item.text, width).map((line) => `${fg(COLOR.error)}${line}${RESET}`);
     }
-  }
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return String(value);
   }
 }

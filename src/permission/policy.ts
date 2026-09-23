@@ -100,7 +100,13 @@ export class PermissionPolicy {
   }
 }
 
-/** 什么都不放行，全部询问。 */
+/**
+ * 默认策略：一律询问。
+ *
+ * 刻意**不预置任何工具白名单** —— 这里不认识具体工具名。
+ * 工具如果自报 `defaultPermission`，由组装处（src/index.ts）拼进来，
+ * 且用户显式配置的规则优先级更高。
+ */
 export const DEFAULT_POLICY: PermissionPolicyOptions = { default: "ask" };
 
 /** 全部放行（对应 `--yes`）。 */
@@ -108,6 +114,22 @@ export const ALLOW_ALL_POLICY: PermissionPolicyOptions = { default: "allow" };
 
 /** 全部拒绝。 */
 export const DENY_ALL_POLICY: PermissionPolicyOptions = { default: "deny" };
+
+/**
+ * 组装最终策略：**用户显式规则优先，工具自报的默认规则兜底**。
+ *
+ * 顺序即优先级 —— 策略按顺序匹配，第一条命中生效。
+ * 所以用户配了 `{tool:"todo_write", decision:"deny"}` 就能推翻工具自报的 allow。
+ */
+export function composePolicy(
+  user: PermissionPolicyOptions | undefined,
+  toolDefaults: readonly PermissionRule[] = [],
+): PermissionPolicyOptions {
+  return {
+    default: user?.default ?? DEFAULT_POLICY.default ?? "ask",
+    rules: [...(user?.rules ?? []), ...toolDefaults],
+  };
+}
 
 /** 用户拒绝时回给模型的文本。 */
 export function denialMessage(request: PermissionRequest, reason?: string): string {

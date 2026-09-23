@@ -16,6 +16,10 @@ function echoTool(sink: string[]): Tool<{ text: string }> {
       properties: { text: { type: "string", description: "要回显的文本" } },
       required: ["text"],
     },
+    describe(input: unknown) {
+      const text = (input as { text?: string } | null)?.text ?? "";
+      return { resource: text, summary: `回显 ${text}` };
+    },
     async run(input) {
       sink.push(input.text);
       return `echo:${input.text}`;
@@ -84,6 +88,7 @@ describe("P4 · agent loop", () => {
       name: "boom",
       description: "总是抛错",
       parameters: { type: "object", properties: {} },
+      describe: () => ({ resource: "boom", summary: "触发异常" }),
       async run() {
         throw new Error("炸了");
       },

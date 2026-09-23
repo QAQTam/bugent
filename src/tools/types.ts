@@ -7,7 +7,12 @@
  */
 
 import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
-import { denialMessage, type PermissionRequest } from "../permission/policy.ts";
+import {
+  denialMessage,
+  type PermissionDecision,
+  type PermissionRequest,
+  type PermissionRule,
+} from "../permission/policy.ts";
 
 export interface ToolCtx {
   cwd: string;
@@ -26,12 +31,23 @@ export interface Tool<I = unknown, O = unknown> {
   parameters: JSONSchema;
   /** 标记为 true 时，P6 的沙箱层会强制包裹执行。 */
   needsSandbox?: boolean;
+  /**
+   * 工具自报的默认权限。省略则用策略的 default（通常是 ask）。
+   *
+   * 让工具自己声明而不是在 permission/policy.ts 里硬编码工具名 ——
+   * 否则每加一个"无副作用、不该打扰用户"的工具，都要去改权限模块。
+   * 声明只是建议：用户的显式规则优先级更高（见 src/index.ts 的策略组装）。
+   */
+  defaultPermission?: PermissionDecision;
   run(input: I, ctx: ToolCtx): Promise<O>;
   /**
    * 告诉权限系统"这次调用动的是什么资源"。
-   * bash 返回整条命令，文件工具返回路径。省略时退化为 JSON 化的参数。
+   *
+   * **必填**（不是可选的）：漏了它，用户配的 `{tool, resource}` 规则就永远匹配不上，
+   * 权限判断会静默退化。加工具的人必须回答"这次动的是什么"。
+   * bash 返回整条命令，文件工具返回路径，todo_write 返回条目数。
    */
-  describe?(input: unknown): { resource: string; summary: string };
+  describe(input: unknown): { resource: string; summary: string };
 }
 
 export interface ToolExecution {
@@ -59,22 +75,10 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return String(value);
-  }
-}
-
 /** 把一次调用翻译成权限系统能理解的形式。 */
 export function describeCall(tool: Tool, call: ToolCall): PermissionRequest {
-  const described = tool.describe?.(call.args);
-  if (described !== undefined) {
-    return { tool: tool.name, resource: described.resource, summary: described.summary };
-  }
-  const json = safeJson(call.args);
-  return { tool: tool.name, resource: json, summary: `${tool.name} ${json}` };
+  const described = tool.describe(call.args);
+  return { tool: tool.name, resource: described.resource, summary: described.summary };
 }
 
 export class ToolRegistry {
@@ -105,6 +109,27 @@ export class ToolRegistry {
 
   schemas(): ToolSchema[] {
     return this.list().map(toToolSchema);
+  }
+
+  /**
+   * 声明需要沙箱的工具名。
+   *
+   * 存在的意义：让 `needsSandbox` 不再是一句空话 —— 组装时如果发现
+   * 这些工具拿不到沙箱，就能明确告诉用户"是哪些工具在裸奔"。
+   */
+  requiresSandbox(): string[] {
+    return this.list()
+      .filter((tool) => tool.needsSandbox === true)
+      .map((tool) => tool.name);
+  }
+
+  /** 收集工具自报的默认权限规则。 */
+  defaultPermissionRules(): PermissionRule[] {
+    return this.list().flatMap((tool) =>
+      tool.defaultPermission === undefined
+        ? []
+        : [{ tool: tool.name, decision: tool.defaultPermission }],
+    );
   }
 
   /**

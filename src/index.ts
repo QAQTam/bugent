@@ -20,7 +20,11 @@ import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
 import { TuiApp } from "./tui/app.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
-import { ALLOW_ALL_POLICY, PermissionPolicy } from "./permission/policy.ts";
+import {
+  ALLOW_ALL_POLICY,
+  composePolicy,
+  PermissionPolicy,
+} from "./permission/policy.ts";
 import { AuditTrail } from "./store/audit.ts";
 import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
 import { newSessionId } from "./util/id.ts";
@@ -330,9 +334,9 @@ async function main(): Promise<void> {
       };
   const tools = createDefaultTools({ sandbox: sandboxOption });
 
-  // 权限：--yes 全放行，否则用配置里的策略（默认 ask）
+  // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底
   const policy = new PermissionPolicy(
-    options.yes ? ALLOW_ALL_POLICY : (config.permissions ?? { default: "ask" }),
+    options.yes ? ALLOW_ALL_POLICY : composePolicy(config.permissions, tools.defaultPermissionRules),
   );
 
   // 审计流水：工具调用、权限决策、每轮起止，全部落盘可回放

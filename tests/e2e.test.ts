@@ -166,6 +166,10 @@ describe("P1+P4 · 端到端（HTTP + SSE）", () => {
         properties: { key: { type: "string" } },
         required: ["key"],
       },
+      describe(input: unknown) {
+        const key = (input as { key?: string } | null)?.key ?? "";
+        return { resource: key, summary: `读取笔记 ${key}` };
+      },
       async run(input) {
         return notes[input.key] ?? "not found";
       },

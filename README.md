@@ -70,4 +70,55 @@ bun run typecheck
 已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter。
 待实现：`openai-responses`、`anthropic-messages`。
 
+## 工具集
+
+| 工具 | 说明 | 沙箱 |
+| --- | --- | --- |
+| `bash` | 执行 shell 命令，支持超时/中断/输出截断 | bwrap（只读根 / 可写 cwd / 默认断网） |
+| `read_file` | 读文件，带行号，支持 `offset`/`limit` | 路径约束 |
+| `write_file` | 原子写（临时文件 + rename），自动建父目录 | 路径约束 |
+| `edit_file` | 精确字符串替换，不唯一时报错而非猜测 | 路径约束 |
+| `todo_write` | 待办清单，前端以 sticky checkbox 面板实时显示 | 无副作用，默认放行 |
+
+`todo_write` 的三态用**纯 ASCII 等宽标记**渲染，避免花体字符在不同终端里宽度不一致：
+
+```
+待办 2/4 · 进行中 1
+  [x] 读 src/core/loop.ts
+  [x] 重构 Transcript
+  [>] 正在补单测
+  [ ] 跑 typecheck
+```
+
+## 加一个新工具要改什么
+
+普通工具（无状态、无需自定义外观）：**1 个新文件 + `builtin.ts` 加 1 行**。
+
+core / provider / TUI / 权限 / 存储 / 沙箱全都不用动 —— 可以用
+`grep -rn '"bash"' src/` 验证：工具名在 `src/` 里零硬编码。
+
+工具可以自报两件事，避免去改公共模块：
+
+| 声明 | 作用 |
+| --- | --- |
+| `describe(input)` | **必填**。告诉权限系统这次动的是什么资源（bash 报命令、文件工具报路径），否则用户的 `{tool, resource}` 规则永远匹配不上 |
+| `needsSandbox` | 标记需要沙箱；组装时会检查并明确告知"哪些工具在裸奔" |
+| `defaultPermission` | 自报默认权限（如 `todo_write` 无副作用 → `allow`）；**用户显式规则优先级更高** |
+
+需要自定义外观的工具（像 `todo_write`）额外在 `src/tui/renderers-builtin.ts`
+注册一个 renderer；TUI 核心依然不认识任何工具名。
+
+> ⚠️ 组装权限策略时记得带上工具自报的规则，否则"无副作用工具自动放行"会失效：
+> ```ts
+> new PermissionPolicy(composePolicy(config.permissions, setup.defaultPermissionRules))
+> ```
+
+## 开发辅助
+
+```bash
+# 把 TUI 输出流还原成"最终整屏"，调试差分渲染用
+# （差分渲染只重写变化的行，直接看输出是一堆碎片，看不出屏幕最终长什么样）
+bun run scripts/replay-ansi.ts <捕获文件> [行数] [列数]
+```
+
 完整方案见 [PLAN.md](./PLAN.md)。
