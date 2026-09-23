@@ -194,6 +194,20 @@ export class SessionStore {
       );
   }
 
+  /**
+   * 追加消息并更新会话时间戳。
+   *
+   * 两条写必须原子提交：否则进程在中间挂掉会留下“消息已落盘但会话仍显示旧时间”
+   * 的不一致状态，也会让每条消息多付一次 WAL fsync。
+   */
+  appendMessageAndTouch(sessionId: string, message: StoredMessage, at: number): void {
+    const tx = this.#db.transaction(() => {
+      this.appendMessage(sessionId, message);
+      this.touchSession(sessionId, at);
+    });
+    tx.immediate();
+  }
+
   loadMessages(sessionId: string): StoredMessage[] {
     const rows = this.#db
       .query("SELECT * FROM messages WHERE session_id = ? ORDER BY msgid ASC")

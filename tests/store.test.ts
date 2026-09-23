@@ -169,6 +169,27 @@ describe("P10 · 会话与消息持久化", () => {
     expect(Object.isFrozen(message!.parts)).toBe(true);
   });
 
+  test("appendMessageAndTouch 原子更新消息与会话时间", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1"));
+
+    store.appendMessageAndTouch(
+      "s1",
+      {
+        msgid: 1,
+        role: "user",
+        origin: "user",
+        parts: [{ type: "text", text: "hello" }],
+        createdAt: 2222,
+      },
+      2222,
+    );
+
+    expect(store.countMessages("s1")).toBe(1);
+    expect(store.loadMessages("s1")[0]?.parts).toEqual([{ type: "text", text: "hello" }]);
+    expect(store.getSession("s1")?.updatedAt).toBe(2222);
+  });
+
   test("删除会话会级联删除消息与事件", async () => {
     const store = await makeStore();
     store.createSession(makeSessionRecord("s1"));

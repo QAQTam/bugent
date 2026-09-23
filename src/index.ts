@@ -259,10 +259,6 @@ function openSession(options: OpenSessionOptions): AgentSession {
     });
   }
 
-  const persist = (message: { createdAt: number }): void => {
-    store.touchSession(sessionId, message.createdAt);
-  };
-
   const existing = store.getSession(sessionId);
   if (existing !== undefined) {
     return new AgentSession({
@@ -272,8 +268,7 @@ function openSession(options: OpenSessionOptions): AgentSession {
       model: options.model,
       restore: store.loadMessages(sessionId),
       onMessage: (message) => {
-        store.appendMessage(sessionId, message);
-        persist(message);
+        store.appendMessageAndTouch(sessionId, message, message.createdAt);
       },
     });
   }
@@ -295,8 +290,7 @@ function openSession(options: OpenSessionOptions): AgentSession {
     client: options.client,
     model: options.model,
     onMessage: (message) => {
-      store.appendMessage(sessionId, message);
-      persist(message);
+      store.appendMessageAndTouch(sessionId, message, message.createdAt);
     },
   });
 }
