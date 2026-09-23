@@ -13,7 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { AgentSession } from "./core/session.ts";
 import { runUserTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
 import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
-import { ToolRegistry } from "./tools/types.ts";
+import { createDefaultTools } from "./tools/builtin.ts";
 import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
 import { TuiApp } from "./tui/app.ts";
 
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
     model: ref.model,
   });
 
-  const tools = new ToolRegistry();
+  const tools = createDefaultTools();
   const hooks = createHooks();
   const signal = new AbortController().signal;
   const baseOptions = {

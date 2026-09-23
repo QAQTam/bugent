@@ -14,13 +14,13 @@ export interface ToolCtx {
   callId: string;
 }
 
-export interface Tool<I = unknown> {
+export interface Tool<I = unknown, O = unknown> {
   name: string;
   description: string;
   parameters: JSONSchema;
   /** 标记为 true 时，P6 的沙箱层会强制包裹执行。 */
   needsSandbox?: boolean;
-  run(input: I, ctx: ToolCtx): Promise<unknown>;
+  run(input: I, ctx: ToolCtx): Promise<O>;
 }
 
 export interface ToolExecution {

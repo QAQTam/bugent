@@ -1,0 +1,92 @@
+import { describe, expect, test } from "bun:test";
+import { Transcript, type DisplayItem } from "../src/tui/transcript.ts";
+
+type AssistantItem = Extract<DisplayItem, { kind: "assistant" }>;
+type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
+
+const assistantsOf = (t: Transcript): AssistantItem[] =>
+  t.items.filter((i): i is AssistantItem => i.kind === "assistant");
+const toolsOf = (t: Transcript): ToolItem[] =>
+  t.items.filter((i): i is ToolItem => i.kind === "tool");
+
+describe("P5 · Transcript 显示块归并", () => {
+  test("同一段回复的流式增量合并成一个块", () => {
+    const t = new Transcript();
+    t.appendAssistantText("你");
+    t.appendAssistantText("好");
+    expect(assistantsOf(t)).toEqual([{ kind: "assistant", text: "你好" }]);
+  });
+
+  test("回归：工具调用前后的两段 assistant 文本必须分开成块", () => {
+    const t = new Transcript();
+
+    // 第一轮：说明文本 + 工具调用
+    t.appendAssistantText("我来看看目录。");
+    t.endAssistant(); // 对应 loop 的 onAssistant
+    t.startTool({ id: "c1", name: "bash", args: { command: "ls" } });
+    t.finishTool("c1", "a.txt", true);
+
+    // 第二轮：收尾文本
+    t.appendAssistantText("命令执行完毕。");
+    t.endAssistant();
+
+    const assistants = assistantsOf(t);
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]?.text).toBe("我来看看目录。");
+    expect(assistants[1]?.text).toBe("命令执行完毕。");
+  });
+
+  test("条目顺序为 user -> assistant -> tool -> assistant", () => {
+    const t = new Transcript();
+    t.pushUser("跑一下");
+    t.appendAssistantText("好的");
+    t.endAssistant();
+    t.startTool({ id: "c1", name: "bash", args: {} });
+    t.finishTool("c1", "ok", true);
+    t.appendAssistantText("完成");
+    t.endAssistant();
+
+    expect(t.items.map((i) => i.kind)).toEqual(["user", "assistant", "tool", "assistant"]);
+  });
+
+  test("纯工具调用（无文本）不会产生空的 assistant 块", () => {
+    const t = new Transcript();
+    t.endAssistant();
+    t.startTool({ id: "c1", name: "bash", args: {} });
+    expect(assistantsOf(t)).toHaveLength(0);
+  });
+
+  test("空增量被忽略", () => {
+    const t = new Transcript();
+    t.appendAssistantText("");
+    expect(t.items).toHaveLength(0);
+  });
+
+  test("工具结果按 callId 精确匹配，不会串台", () => {
+    const t = new Transcript();
+    t.startTool({ id: "a", name: "bash", args: {} });
+    t.startTool({ id: "b", name: "bash", args: {} });
+
+    t.finishTool("b", "第二个的输出", true);
+
+    const tools = toolsOf(t);
+    expect(tools[0]?.done).toBe(false);
+    expect(tools[1]?.done).toBe(true);
+    expect(tools[1]?.output).toBe("第二个的输出");
+  });
+
+  test("工具失败会被标记 ok:false", () => {
+    const t = new Transcript();
+    t.startTool({ id: "c1", name: "bash", args: {} });
+    t.finishTool("c1", "炸了", false);
+    expect(toolsOf(t)[0]?.ok).toBe(false);
+  });
+
+  test("mergeUsage 累加 token，cached 只在有值时出现", () => {
+    const a = Transcript.mergeUsage({ input: 10, output: 2 }, { input: 5, output: 1 });
+    expect(a).toEqual({ input: 15, output: 3 });
+
+    const b = Transcript.mergeUsage(a, { input: 3, output: 1, cached: 7 });
+    expect(b).toEqual({ input: 18, output: 4, cached: 7 });
+  });
+});

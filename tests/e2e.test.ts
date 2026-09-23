@@ -6,8 +6,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createOpenAIChatClient } from "../src/provider/adapters/openai-chat.ts";
 import { AgentSession } from "../src/core/session.ts";
-import { runTurn } from "../src/core/loop.ts";
+import { runTurn, runUserTurn } from "../src/core/loop.ts";
+import { storedText } from "../src/core/message.ts";
 import { ToolRegistry, type Tool } from "../src/tools/types.ts";
+import { createDefaultTools } from "../src/tools/builtin.ts";
 import type { ChatChunk } from "../src/provider/types.ts";
 
 function sseResponse(lines: string[]): Response {
@@ -188,5 +190,54 @@ describe("P1+P4 · 端到端（HTTP + SSE）", () => {
       "tool",
       "assistant",
     ]);
+  });
+
+  test("完整一轮：模型调用 bash 工具 -> 真执行 -> 输出回流给模型", async () => {
+    let call = 0;
+    const port = serve(() => {
+      call += 1;
+      if (call === 1) {
+        return sseResponse([
+          event({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call_bash",
+                      function: { name: "bash", arguments: '{"command":"echo from-bash-tool"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          event({ choices: [{ delta: {}, finish_reason: "tool_calls" }] }),
+          "data: [DONE]",
+        ]);
+      }
+      return sseResponse([
+        event({ choices: [{ delta: { content: "命令跑完了" } }] }),
+        event({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+        "data: [DONE]",
+      ]);
+    });
+
+    const client = createOpenAIChatClient("test-model", { baseUrl: `http://127.0.0.1:${port}/v1` });
+    const session = new AgentSession({ id: "bash-e2e", system: "SYS", client, model: "test-model" });
+
+    const result = await runUserTurn(session, "跑个命令", {
+      tools: createDefaultTools(),
+      cwd: process.cwd(),
+    });
+
+    expect(result.text).toBe("命令跑完了");
+    expect(result.steps).toBe(2);
+
+    const toolMessage = session.messages.find((m) => m.role === "tool");
+    expect(toolMessage).toBeDefined();
+    expect(storedText(toolMessage!)).toContain("from-bash-tool");
+    expect(storedText(toolMessage!)).toContain("[exit code: 0]");
   });
 });

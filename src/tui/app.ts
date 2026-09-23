@@ -22,12 +22,7 @@ import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
-
-type DisplayItem =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
-  | { kind: "tool"; callId: string; name: string; args: unknown; output: string; ok: boolean; done: boolean }
-  | { kind: "error"; text: string };
+import { Transcript, type DisplayItem } from "./transcript.ts";
 
 export interface TuiOptions {
   session: AgentSession;
@@ -55,7 +50,7 @@ export class TuiApp {
   #tools: ToolRegistry;
   #cwd: string;
 
-  #items: DisplayItem[] = [];
+  #transcript = new Transcript();
   #input = "";
   #cursor = 0;
   #scrollOffset = 0;
@@ -72,7 +67,7 @@ export class TuiApp {
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
     if (options.banner !== undefined) {
-      this.#items.push({ kind: "assistant", text: options.banner });
+      this.#transcript.pushNotice(options.banner);
     }
   }
 
@@ -216,7 +211,7 @@ export class TuiApp {
     this.#input = "";
     this.#cursor = 0;
     this.#scrollOffset = 0;
-    this.#items.push({ kind: "user", text });
+    this.#transcript.pushUser(text);
     this.#render();
     void this.#runTurn(text);
   }
@@ -230,50 +225,28 @@ export class TuiApp {
   async #runTurn(input: string): Promise<void> {
     this.#busy = true;
     this.#abort = new AbortController();
-    this.#items.push({ kind: "assistant", text: "" });
-    const assistantIndex = this.#items.length - 1;
     this.#render();
 
     const hooks: LoopHooks = {
       onText: (delta) => {
-        const item = this.#items[assistantIndex];
-        if (item !== undefined && item.kind === "assistant") item.text += delta;
+        this.#transcript.appendAssistantText(delta);
         this.#scheduleRender();
       },
+      // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
+      // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
+      onAssistant: () => {
+        this.#transcript.endAssistant();
+      },
       onToolCall: (call) => {
-        this.#items.push({
-          kind: "tool",
-          callId: call.id,
-          name: call.name,
-          args: call.args,
-          output: "",
-          ok: true,
-          done: false,
-        });
+        this.#transcript.startTool(call);
         this.#scheduleRender();
       },
       onToolResult: (call, result) => {
-        for (let i = this.#items.length - 1; i >= 0; i -= 1) {
-          const item = this.#items[i];
-          if (item !== undefined && item.kind === "tool" && item.callId === call.id && !item.done) {
-            item.output = result.output;
-            item.ok = result.ok;
-            item.done = true;
-            break;
-          }
-        }
+        this.#transcript.finishTool(call.id, result.output, result.ok);
         this.#scheduleRender();
       },
       onUsage: (usage) => {
-        this.#usage = {
-          input: this.#usage.input + usage.input,
-          output: this.#usage.output + usage.output,
-          ...(usage.cached !== undefined
-            ? { cached: (this.#usage.cached ?? 0) + usage.cached }
-            : this.#usage.cached !== undefined
-              ? { cached: this.#usage.cached }
-              : {}),
-        };
+        this.#usage = Transcript.mergeUsage(this.#usage, usage);
         this.#scheduleRender();
       },
     };
@@ -287,16 +260,9 @@ export class TuiApp {
         signal: this.#abort.signal,
       });
     } catch (error) {
-      this.#items.push({
-        kind: "error",
-        text: error instanceof Error ? error.message : String(error),
-      });
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     } finally {
-      // 清掉空的 assistant 占位（比如被中断且没有任何输出）
-      const placeholder = this.#items[assistantIndex];
-      if (placeholder !== undefined && placeholder.kind === "assistant" && placeholder.text.length === 0) {
-        this.#items.splice(assistantIndex, 1);
-      }
+      this.#transcript.endAssistant();
       this.#busy = false;
       this.#abort = undefined;
       this.#render();
@@ -371,7 +337,7 @@ export class TuiApp {
 
   #composeBody(width: number, height: number): string[] {
     const all: string[] = [];
-    for (const item of this.#items) {
+    for (const item of this.#transcript.items) {
       all.push(...this.#renderItem(item, width));
       all.push("");
     }
