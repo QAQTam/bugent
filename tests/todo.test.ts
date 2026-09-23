@@ -285,6 +285,7 @@ describe("todo_write · 渲染", () => {
       ok: true,
       done: true,
       progress: "",
+      expanded: false,
     };
     const lines = renderTodoTool(item, 80);
 
@@ -306,6 +307,7 @@ describe("渲染扩展点", () => {
     ok: true,
     done: true,
     progress: "",
+    expanded: false,
   };
 
   test("未注册的工具走通用外观", () => {

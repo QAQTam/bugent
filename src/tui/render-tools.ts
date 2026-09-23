@@ -45,17 +45,19 @@ function header(item: ToolItem, width: number, marker: string, color: string): s
   )}${RESET}`;
 }
 
-/** 折叠成「头 N 行 + 已忽略 M 行 + 尾 K 行」。 */
+/** 折叠成「头 N 行 + 已忽略 M 行 + 尾 K 行」。展开状态下原样返回。 */
 export function foldLines(
   lines: readonly string[],
   head: number,
   tail: number,
   color: string,
+  expanded = false,
 ): string[] {
+  if (expanded) return [...lines];
   if (lines.length <= head + tail + 1) return [...lines];
 
   const omitted = lines.length - head - tail;
-  const note = `${DIM}${fg(color)}  … 已忽略 ${omitted} 行 …${RESET}`;
+  const note = `${DIM}${fg(color)}  … 已忽略 ${omitted} 行 …（点击展开）${RESET}`;
   return [...lines.slice(0, head), note, ...lines.slice(lines.length - tail)];
 }
 
@@ -81,7 +83,7 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
 
   const color = item.ok ? COLOR.toolOk : COLOR.error;
   const body = bodyLines(item.output, width, color);
-  return [head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, color)];
+  return [head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, color, item.expanded)];
 }
 
 /* ------------------------------------------------------------------ */
@@ -94,7 +96,7 @@ export function renderReadFileTool(item: ToolItem, width: number): string[] {
 
   const color = item.ok ? COLOR.toolOk : COLOR.error;
   const body = bodyLines(item.output, width, color);
-  return [head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, color)];
+  return [head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, color, item.expanded)];
 }
 
 /** write_file / edit_file：按 diff 语义着色。 */
@@ -113,5 +115,9 @@ export function renderDiffTool(item: ToolItem, width: number): string[] {
     return `${DIM}  ${line}${RESET}`;
   });
 
-  return [head, ...lines, ...foldLines(colored, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, COLOR.tool)];
+  return [
+    head,
+    ...lines,
+    ...foldLines(colored, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, COLOR.tool, item.expanded),
+  ];
 }

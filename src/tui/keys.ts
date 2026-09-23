@@ -6,6 +6,8 @@
  * 遇到不完整的序列就等下一批数据。
  */
 
+export type MouseButton = "left" | "middle" | "right" | "wheelUp" | "wheelDown" | "other";
+
 export type Key =
   | { type: "text"; value: string }
   | { type: "enter" }
@@ -21,9 +23,49 @@ export type Key =
   | { type: "end" }
   | { type: "pageUp" }
   | { type: "pageDown" }
-  | { type: "ctrl"; key: string };
+  | { type: "ctrl"; key: string }
+  /** 鼠标事件（SGR 扩展模式，坐标是 1-based）。 */
+  | { type: "mouse"; button: MouseButton; x: number; y: number; pressed: boolean };
+
+function mouseButton(code: number): MouseButton {
+  // 低两位是按键；64 以上是滚轮
+  if ((code & 64) !== 0) {
+    return (code & 1) === 0 ? "wheelUp" : "wheelDown";
+  }
+  switch (code & 3) {
+    case 0:
+      return "left";
+    case 1:
+      return "middle";
+    case 2:
+      return "right";
+    default:
+      return "other";
+  }
+}
+
+/** 解析 SGR 鼠标序列的参数，如 `"<0;10;5"`。 */
+function parseMouse(params: string, final: string): Key | undefined {
+  if (!params.startsWith("<")) return undefined;
+  const parts = params.slice(1).split(";");
+  if (parts.length !== 3) return undefined;
+
+  const [codeRaw, xRaw, yRaw] = parts;
+  const code = Number.parseInt(codeRaw ?? "", 10);
+  const x = Number.parseInt(xRaw ?? "", 10);
+  const y = Number.parseInt(yRaw ?? "", 10);
+  if (!Number.isFinite(code) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+
+  return { type: "mouse", button: mouseButton(code), x, y, pressed: final === "M" };
+}
 
 function csiToKey(final: string, params: string): Key | undefined {
+  // 鼠标（SGR 扩展）优先：参数以 "<" 开头，终止符是 M（按下）或 m（抬起）
+  if (final === "M" || final === "m") {
+    const mouse = parseMouse(params, final);
+    if (mouse !== undefined) return mouse;
+  }
+
   switch (final) {
     case "A":
       return { type: "up" };

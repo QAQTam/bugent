@@ -25,6 +25,8 @@ export type DisplayItem =
        * 一个跑十分钟的命令可能产出几十万行，全留着会拖垮渲染。
        */
       progress: string;
+      /** 用户点击折叠行后展开全文（鼠标交互）。 */
+      expanded: boolean;
     }
   | { kind: "error"; text: string };
 
@@ -84,7 +86,19 @@ export class Transcript {
       ok: true,
       done: false,
       progress: "",
+      expanded: false,
     });
+  }
+
+  /** 切换展开状态；返回是否命中了某个工具条目。 */
+  toggleToolExpanded(callId: string): boolean {
+    for (const item of this.#items) {
+      if (item.kind === "tool" && item.callId === callId) {
+        item.expanded = !item.expanded;
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 工具运行中的流式输出。只保留末尾若干行，内存有界。 */

@@ -75,6 +75,11 @@ export class TuiApp {
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { key: string; todos: Todo[] } | undefined;
 
+  /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
+  #toolHits: { callId: string; start: number; end: number }[] = [];
+  /** body 视窗在完整内容里的起始下标。 */
+  #bodyWindowStart = 0;
+
   constructor(options: TuiOptions) {
     // 注册内置工具的自定义外观（幂等）。放在构造函数里，
     // 保证任何入口构造 TuiApp 都能拿到，而不只是 CLI。
@@ -143,6 +148,10 @@ export class TuiApp {
     }
 
     switch (key.type) {
+      case "mouse":
+        this.#handleMouse(key);
+        return;
+
       case "ctrl":
         if (key.key === "c") this.#requestExit();
         else if (key.key === "d" && this.#input.length === 0) this.#requestExit();
@@ -220,6 +229,34 @@ export class TuiApp {
 
       case "text": {
         this.#insert(key.value);
+        return;
+      }
+    }
+  }
+
+  /** 处理鼠标事件：左键点击折叠行展开/收起，滚轮滚动历史。 */
+  #handleMouse(key: Extract<Key, { type: "mouse" }>): void {
+    if (key.button === "wheelUp") {
+      this.#scrollBy(3);
+      return;
+    }
+    if (key.button === "wheelDown") {
+      this.#scrollBy(-3);
+      return;
+    }
+    if (!key.pressed || key.button !== "left") return;
+
+    // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
+    const bodyRow = key.y - 2;
+    if (bodyRow < 0) return;
+
+    const bodyIndex = this.#bodyWindowStart + bodyRow;
+    for (const hit of this.#toolHits) {
+      if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
+        if (this.#transcript.toggleToolExpanded(hit.callId)) {
+          // 展开会改变布局，必须整屏重绘而不是走差分
+          this.#render(true);
+        }
         return;
       }
     }
@@ -503,13 +540,23 @@ export class TuiApp {
 
   #composeBody(width: number, height: number): string[] {
     const all: string[] = [];
+    const hits: { callId: string; start: number; end: number }[] = [];
+
     for (const item of this.#transcript.items) {
+      const start = all.length;
       all.push(...this.#renderItem(item, width));
+      // 记录工具条目占用的行区间，供鼠标点击命中
+      if (item.kind === "tool") {
+        hits.push({ callId: item.callId, start, end: all.length - 1 });
+      }
       all.push("");
     }
 
+    this.#toolHits = hits;
+
     const total = all.length;
     if (total <= height) {
+      this.#bodyWindowStart = 0;
       const padded = all.slice();
       while (padded.length < height) padded.push("");
       return padded;
@@ -517,6 +564,7 @@ export class TuiApp {
 
     const end = this.#scrollOffset === 0 ? total : Math.max(height, total - this.#scrollOffset);
     const start = Math.max(0, end - height);
+    this.#bodyWindowStart = start;
     return all.slice(start, end);
   }
 
