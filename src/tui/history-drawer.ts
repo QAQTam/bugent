@@ -9,7 +9,7 @@
  */
 
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
-import type { HitRegion } from "./hit.ts";
+import type { HitRect } from "./hit.ts";
 import { DIM, RESET } from "./markdown.ts";
 
 export interface HistoryPaneHeights {
@@ -31,7 +31,7 @@ export function historyPaneHeights(height: number): HistoryPaneHeights {
 
 export interface CenteredButton {
   line: string;
-  hit: HitRegion;
+  hit: HitRect;
 }
 
 /** 生成居中按钮行，并返回可点击的可见列区间。 */
@@ -44,9 +44,10 @@ export function composeCenteredButton(label: string, width: number, row: number)
   return {
     line,
     hit: {
-      row,
-      start: left + 1,
-      end: left + Math.min(labelWidth, available),
+      top: row,
+      bottom: row,
+      left: left + 1,
+      right: left + Math.min(labelWidth, available),
     },
   };
 }

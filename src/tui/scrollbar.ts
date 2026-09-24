@@ -7,6 +7,7 @@
  */
 
 import { padAnsi, truncateAnsi } from "./ansi.ts";
+import { hitRect, type HitRect } from "./hit.ts";
 import { DIM, fg, RESET } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 import { maxScrollOffset } from "./transcript-layout.ts";
@@ -77,13 +78,18 @@ export function scrollbarThumbAt(metrics: ScrollbarMetrics, y: number): boolean 
   return y >= metrics.thumbTop && y < metrics.thumbTop + metrics.thumbHeight;
 }
 
+/** 轨道占用的屏幕矩形（单列、闭区间）。 */
+export function scrollbarRect(metrics: ScrollbarMetrics): HitRect {
+  return {
+    top: metrics.trackTop,
+    bottom: metrics.trackTop + metrics.trackHeight - 1,
+    left: metrics.trackColumn,
+    right: metrics.trackColumn,
+  };
+}
+
 export function hitScrollbar(metrics: ScrollbarMetrics | undefined, x: number, y: number): boolean {
-  return (
-    metrics !== undefined &&
-    x === metrics.trackColumn &&
-    y >= metrics.trackTop &&
-    y < metrics.trackTop + metrics.trackHeight
-  );
+  return metrics !== undefined && hitRect(scrollbarRect(metrics), x, y);
 }
 
 /** Map a pointer row to scrollOffset while preserving the grabbed thumb offset. */

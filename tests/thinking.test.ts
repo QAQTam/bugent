@@ -11,6 +11,8 @@ import {
 } from "../src/tui/thinking.ts";
 import { mapStreamEvent } from "../src/provider/adapters/openai-chat.ts";
 import type { ChatChunk } from "../src/provider/types.ts";
+import { BOLD, fg } from "../src/tui/markdown.ts";
+import { COLOR } from "../src/tui/theme.ts";
 
 describe("思考链路 · 缓冲", () => {
   test("累积增量", () => {
@@ -18,7 +20,6 @@ describe("思考链路 · 缓冲", () => {
     buffer.push("我在");
     buffer.push("思考");
     expect(buffer.current).toBe("我在思考");
-    expect(buffer.active).toBe(true);
   });
 
   test("遇到 \\n 直接销毁上一行，从空开始", () => {
@@ -37,18 +38,18 @@ describe("思考链路 · 缓冲", () => {
     expect(buffer.current).toBe("正在写的");
   });
 
-  test("reset 清空并退出思考态", () => {
+  test("reset 清空缓冲", () => {
     const buffer = new ThinkingBuffer();
     buffer.push("思考中");
     buffer.reset();
     expect(buffer.current).toBe("");
-    expect(buffer.active).toBe(false);
   });
 
-  test("空增量不激活思考态", () => {
+  test("空增量被忽略", () => {
     const buffer = new ThinkingBuffer();
+    buffer.push("已有");
     buffer.push("");
-    expect(buffer.active).toBe(false);
+    expect(buffer.current).toBe("已有");
   });
 });
 
@@ -75,20 +76,27 @@ describe("思考链路 · 横向滚动", () => {
 });
 
 describe("思考链路 · 区块渲染", () => {
-  test("不思考时返回全空行（保持输入框上方的留白）", () => {
-    const lines = composeThinkingBlock(new ThinkingBuffer(), 60);
+  test("空闲且没有思考内容时，中间那行只剩一个灰色菊花", () => {
+    const lines = composeThinkingBlock(new ThinkingBuffer(), 60, {
+      activity: { state: "idle" },
+    });
     expect(lines).toHaveLength(THINKING_BLOCK_ROWS);
-    expect(lines.every((line) => line === "")).toBe(true);
+    expect(Bun.stripANSI(lines[THINKING_LINE_INDEX]!)).toBe(THINKING_FRAMES[0]);
+
+    // 其余行必须是空的（留白）
+    lines.forEach((line, index) => {
+      if (index !== THINKING_LINE_INDEX) expect(line).toBe("");
+    });
   });
 
-  test("思考内容渲染在中间那一行", () => {
+  test("思考内容渲染在中间那一行，且不带状态文字", () => {
     const buffer = new ThinkingBuffer();
     buffer.push("正在推理");
 
-    const lines = composeThinkingBlock(buffer, 60);
+    const lines = composeThinkingBlock(buffer, 60, { activity: { state: "working" } });
     expect(lines).toHaveLength(THINKING_BLOCK_ROWS);
     expect(lines[THINKING_LINE_INDEX]).toContain("正在推理");
-    expect(lines[THINKING_LINE_INDEX]).toContain("思考");
+    expect(Bun.stripANSI(lines[THINKING_LINE_INDEX]!)).toBe(`${THINKING_FRAMES[0]} 正在推理`);
 
     // 其余行必须是空的
     lines.forEach((line, index) => {
@@ -100,8 +108,14 @@ describe("思考链路 · 区块渲染", () => {
     const buffer = new ThinkingBuffer();
     buffer.push("正在推理");
 
-    const first = composeThinkingBlock(buffer, 60, { frame: 0 })[THINKING_LINE_INDEX]!;
-    const second = composeThinkingBlock(buffer, 60, { frame: 1 })[THINKING_LINE_INDEX]!;
+    const first = composeThinkingBlock(buffer, 60, {
+      activity: { state: "working" },
+      frame: 0,
+    })[THINKING_LINE_INDEX]!;
+    const second = composeThinkingBlock(buffer, 60, {
+      activity: { state: "working" },
+      frame: 1,
+    })[THINKING_LINE_INDEX]!;
 
     expect(first).toContain(THINKING_FRAMES[0]);
     expect(second).toContain(THINKING_FRAMES[1]);
@@ -114,7 +128,7 @@ describe("思考链路 · 区块渲染", () => {
     const buffer = new ThinkingBuffer();
     buffer.push("0123456789".repeat(20));
 
-    const lines = composeThinkingBlock(buffer, 30);
+    const lines = composeThinkingBlock(buffer, 30, { activity: { state: "working" } });
     const line = lines[THINKING_LINE_INDEX]!;
 
     expect(line).toContain("…");
@@ -126,48 +140,58 @@ describe("思考链路 · 区块渲染", () => {
   test("可自定义行数与渲染位置", () => {
     const buffer = new ThinkingBuffer();
     buffer.push("x");
-    const lines = composeThinkingBlock(buffer, 40, { rows: 3, lineIndex: 0 });
+    const lines = composeThinkingBlock(buffer, 40, {
+      activity: { state: "working" },
+      rows: 3,
+      lineIndex: 0,
+    });
     expect(lines).toHaveLength(3);
     expect(lines[0]).toContain("x");
   });
 
-  test("thinking 状态优先显示 reasoning 内容而不是状态 detail", () => {
-    const buffer = new ThinkingBuffer();
-    buffer.push("真实思考内容");
-    const line = composeThinkingBlock(buffer, 80, {
-      activity: { state: "thinking", detail: "推理中" },
+  test("工作状态只闪菊花，不带任何状态文字", () => {
+    const line = composeThinkingBlock(new ThinkingBuffer(), 80, {
+      activity: { state: "working" },
+      frame: 0,
+    })[THINKING_LINE_INDEX]!;
+    // 只剩菊花本身：去掉 ANSI 后就是那一个字符
+    expect(Bun.stripANSI(line)).toBe(THINKING_FRAMES[0]);
+
+    // 只有 working 会转；其余三个都是静态终态
+    expect(isSpinningActivity({ state: "working" })).toBe(true);
+    expect(isSpinningActivity({ state: "idle" })).toBe(false);
+    expect(isSpinningActivity({ state: "disconnected", detail: "x" })).toBe(false);
+    expect(isSpinningActivity({ state: "aborted" })).toBe(false);
+  });
+
+  test("空闲显示灰色静止菊花，和工作的青色区分开", () => {
+    const idle = composeThinkingBlock(new ThinkingBuffer(), 80, {
+      activity: { state: "idle" },
+      frame: 0,
+    })[THINKING_LINE_INDEX]!;
+    const working = composeThinkingBlock(new ThinkingBuffer(), 80, {
+      activity: { state: "working" },
       frame: 0,
     })[THINKING_LINE_INDEX]!;
 
-    expect(line).toContain("真实思考内容");
-    expect(line).not.toContain("推理中");
+    expect(Bun.stripANSI(idle)).toBe(THINKING_FRAMES[0]);
+    expect(idle).toContain(fg(COLOR.spinnerIdle));
+    expect(working).not.toContain(fg(COLOR.spinnerIdle));
+    // 空闲不加粗，保持安静
+    expect(idle).not.toContain(BOLD);
+    expect(working).toContain(BOLD);
   });
 
-  test("agent activity 在没有 reasoning 时也显示工作状态", () => {
-    const cases: Array<[AgentActivity, string]> = [
-      [{ state: "waiting", detail: "连接模型" }, "等待模型"],
-      [{ state: "responding", detail: "生成回复" }, "生成回复"],
-      [{ state: "tool", detail: "bash" }, "执行工具"],
-      [{ state: "goal_init", detail: "create_goal" }, "初始化 Goal"],
-      [{ state: "goal_plan", detail: "update_plan" }, "规划 Goal"],
-      [{ state: "goal_checkpoint", detail: "todo_write" }, "执行 Checkpoint"],
-      [{ state: "goal_review", detail: "submit_checkpoint" }, "审查 Checkpoint"],
-      [{ state: "goal_handoff", detail: "handoff_update" }, "更新 Handoff"],
-      [{ state: "goal_audit", detail: "final_audit" }, "最终审计"],
-      [{ state: "waiting_user", detail: "等待回答" }, "等待用户"],
-      [{ state: "retrying", detail: "重新请求" }, "重试"],
-    ];
+  test("空闲时若有思考残留，仍然显示思考尾部", () => {
+    const buffer = new ThinkingBuffer();
+    buffer.push("上一轮的思考");
+    const line = composeThinkingBlock(buffer, 80, {
+      activity: { state: "idle" },
+      frame: 0,
+    })[THINKING_LINE_INDEX]!;
 
-    for (const [activity, label] of cases) {
-      const line = composeThinkingBlock(new ThinkingBuffer(), 80, {
-        activity,
-        frame: 0,
-      })[THINKING_LINE_INDEX]!;
-      expect(line).toContain(label);
-      expect(line).toContain(THINKING_FRAMES[0]);
-    }
-    expect(isSpinningActivity({ state: "tool", detail: "bash" })).toBe(true);
-    expect(isSpinningActivity({ state: "idle" })).toBe(false);
+    expect(line).toContain("上一轮的思考");
+    expect(line).toContain(fg(COLOR.spinnerIdle));
   });
 
   test("disconnect / abort 保留静态终态，不继续动画", () => {
@@ -175,14 +199,14 @@ describe("思考链路 · 区块渲染", () => {
       activity: { state: "disconnected", detail: "ECONNRESET" },
     })[THINKING_LINE_INDEX]!;
     const aborted = composeThinkingBlock(new ThinkingBuffer(), 80, {
-      activity: { state: "aborted", detail: "用户中断" },
+      activity: { state: "aborted" },
     })[THINKING_LINE_INDEX]!;
 
-    expect(disconnected).toContain("已断开");
+    // 断线是唯一保留文字的状态：那是真实报错，不是状态描述
     expect(disconnected).toContain("ECONNRESET");
+    expect(disconnected).toContain("✖");
     expect(disconnected).not.toContain(THINKING_FRAMES[0]);
-    expect(aborted).toContain("已中止");
-    expect(isSpinningActivity({ state: "disconnected", detail: "x" })).toBe(false);
+    expect(Bun.stripANSI(aborted)).toBe("■");
   });
 });
 

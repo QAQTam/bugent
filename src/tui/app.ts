@@ -8,8 +8,8 @@
  * 布局：
  *   ┌──────────────────────────────┐
  *   │ 状态栏            （1 行）    │
- *   │ 消息区            （h-2 行）  │
- *   │ 输入行            （1 行）    │
+ *   │ 消息区                        │
+ *   │ 输入框      （3 行起，随输入增长）│
  *   └──────────────────────────────┘
  */
 
@@ -37,17 +37,27 @@ import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
-import { inputIndexAt, layoutInput } from "./input-view.ts";
+import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
+import {
+  composeInputBox,
+  inputBoxGeometry,
+  inputBoxRows,
+  inputCursorFromClick,
+  INPUT_PLACEHOLDER,
+  type InputBoxRect,
+} from "./input-box.ts";
 import {
   composeScrollbar,
   createScrollbarMetrics,
+  scrollbarRect,
   hitScrollbar,
   scrollbarThumbAt,
   scrollOffsetFromDrag,
   type ScrollbarMetrics,
 } from "./scrollbar.ts";
 import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
-import { COLOR } from "./theme.ts";
+import { applyTheme, COLOR } from "./theme.ts";
+import { detectTerminalBackground } from "./background.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
@@ -60,7 +70,23 @@ import {
 } from "./thinking.ts";
 import { TranscriptLayout, maxScrollOffset } from "./transcript-layout.ts";
 import { composeCenteredButton, composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
-import { hitTest, type HitRegion } from "./hit.ts";
+import { hitRect, rectCenter, rectOfRow, type HitRect } from "./hit.ts";
+import {
+  hitTargetName,
+  type HitRegionEntry,
+  type HitTarget,
+  type ProbeButton,
+} from "./hit-target.ts";
+import {
+  checkHitProbes,
+  checkVisualAnchors,
+  contentLineToScreenRow,
+  formatAnchorFailures,
+  formatHitProbeFailures,
+  visibleRangeOf,
+  type HitProbe,
+  type VisualAnchor,
+} from "./hit-probe.ts";
 import {
   closeHistoryView,
   initialHistoryView,
@@ -87,6 +113,9 @@ import type { CapabilityEscalation } from "../tools/types.ts";
 import type { AuditTrail } from "../store/audit.ts";
 import {
   composeDialogActions,
+  dialogInnerWidth,
+  dialogLeftPadding,
+  dialogPointAt,
   hitDialogActionAtLine,
   type DialogAction,
   type DialogButtonRowHit,
@@ -98,11 +127,29 @@ import {
   type MessageAction,
 } from "./message-actions.ts";
 
-/** 输入面板的行数（带底色的"阴影"区块）。 */
-export const INPUT_ROWS = 4;
+/** 弹窗渲染结果：行 + 按钮（弹窗局部坐标）。 */
+interface RenderedDialog {
+  lines: string[];
+  buttons: { target: HitTarget; line: number; left: number; right: number }[];
+}
 
 /** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
 export const BODY_INDENT = 3;
+
+/**
+ * 命中区间自检开关（`BUGENT_HIT_PROBE`）。
+ *
+ *   off（默认）  不跑
+ *   1            每帧自检，发现点不到的区域就写 stderr（前缀 `[hit-probe]`）
+ *   strict       额外直接抛错，fail fast
+ *
+ * 默认关闭：它是开发期工具，价值在测试与排查，不在线上。
+ */
+const hitProbeMode = ((): "off" | "on" | "strict" => {
+  const raw = process.env.BUGENT_HIT_PROBE;
+  if (raw === "strict") return "strict";
+  return raw === undefined || raw === "" || raw === "0" ? "off" : "on";
+})();
 
 /**
  * 通用对话框。
@@ -159,15 +206,9 @@ function oneLine(text: string, max = 64): string {
   return `${normalized.slice(0, Math.max(1, max - 1))}…`;
 }
 
-/** 把带 ANSI 的弹窗行水平居中；右侧留白由 Screen 清行时补齐。 */
-function centerLine(line: string, width: number): string {
-  const clipped = truncateAnsi(line, width);
-  const padding = Math.max(0, Math.floor((width - visibleWidth(clipped)) / 2));
-  return " ".repeat(padding) + clipped;
-}
-
-function dialogInnerWidth(width: number): number {
-  return Math.max(16, Math.min(width - 2, 74));
+/** 把带 ANSI 的弹窗行贴到整屏宽度上；超宽时截断。 */
+function placeDialogLine(line: string, width: number, padding: number): string {
+  return " ".repeat(padding) + truncateAnsi(line, Math.max(0, width - padding));
 }
 
 function todoImpact(before: TodoList, after: TodoList): string {
@@ -294,7 +335,7 @@ export class TuiApp implements TuiInteraction {
   #thinking = new ThinkingBuffer();
   /** Agent 的运行状态；spinner 代表 alive/working，而不是只看 reasoning。 */
   #activity: AgentActivity = { state: "idle" };
-  /** 菊花帧；只在 thinking.active 时驱动。 */
+  /** 菊花帧；只在 activity 处于 working 时驱动。 */
   #thinkingFrame = 0;
   #thinkingTimer: ReturnType<typeof setInterval> | undefined;
   #input = "";
@@ -302,8 +343,10 @@ export class TuiApp implements TuiInteraction {
   /** Real terminal cursor position for IME/accessibility anchoring. */
   #inputCursorRow: number | undefined;
   #inputCursorColumn = 3;
-  /** Cursor row within the visible input panel. */
-  #inputCursorOffset = 0;
+  /** 输入框在屏幕上的位置；弹窗取代输入框时为 undefined。 */
+  #inputBoxRect: InputBoxRect | undefined;
+  /** 渲染输入框时用的布局，供鼠标点击换算字符索引。 */
+  #inputBoxLayout: InputLayout | undefined;
   /** 主区滚动、钉底和历史抽屉的统一状态。 */
   #viewState: HistoryViewState = initialHistoryView();
   /** 上一次布局总行数，用于回看时抵消新增内容造成的位移。 */
@@ -316,10 +359,10 @@ export class TuiApp implements TuiInteraction {
   #scrollbarDrag: { metrics: ScrollbarMetrics; grabOffset: number } | undefined;
   /** body 顶部是否有非内容行（“查看更多消息”按钮）；鼠标命中要扣掉。 */
   #bodyContentOffset = 0;
-  /** 消息区顶部“查看更多消息”的鼠标命中区间（row 相对 body，0-based）。 */
-  #moreHistoryHit: HitRegion | undefined;
-  /** 输入框上方“回到最新消息”的鼠标命中区间（row 为屏幕 1-based）。 */
-  #returnToLatestHit: HitRegion | undefined;
+  /** 消息区顶部“查看更多消息”按钮的屏幕矩形。 */
+  #moreHistoryHit: HitRect | undefined;
+  /** 输入框上方“回到最新消息”按钮的屏幕矩形。 */
+  #returnToLatestHit: HitRect | undefined;
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
   #abort: AbortController | undefined;
@@ -345,10 +388,25 @@ export class TuiApp implements TuiInteraction {
   #dialogTopRow = -1;
   /** 对话框占用的行数；用于把鼠标事件限制在弹窗区域。 */
   #dialogHeight = 0;
-  /** 当前权限弹窗按钮的鼠标命中区间（行号相对覆盖层顶部）。 */
-  #dialogButtonHits: DialogButtonRowHit[] = [];
-  /** 当前消息操作菜单按钮的鼠标命中区间。 */
-  #messageButtonHits: DialogButtonRowHit<MessageAction>[] = [];
+  /** 弹窗水平居中后的左内边距；渲染与命中都读它。 */
+  #dialogLeftPadding = 0;
+  /** 本帧是否有覆盖层（弹窗 / 消息菜单 / ask_user）。它盖住的区域不可点。 */
+  #overlayOpen = false;
+  /** 当前权限弹窗按钮的屏幕矩形。 */
+  #dialogButtonHits: { value: boolean; rect: HitRect }[] = [];
+  /** 当前消息操作菜单按钮的屏幕矩形。 */
+  #messageButtonHits: { value: MessageAction; rect: HitRect }[] = [];
+  /** ask_user 表单每一行的屏幕矩形。 */
+  #askLineHits: { value: number; rect: HitRect }[] = [];
+  /** 弹窗整体矩形：范围内、按钮之外的点击被吞掉，不穿透到下面的消息列表。 */
+  #dialogRect: HitRect | undefined;
+  /**
+   * 本帧全部可点区域，**顺序即优先级**。
+   *
+   * 鼠标处理与命中自检都只遍历它，优先级只有一处定义。输入框不在其中：
+   * 它还需要按列算出字符索引，在 #hitTargetAt 里单独处理。
+   */
+  #regions: HitRegionEntry[] = [];
   /** 当前鼠标悬停/按下的按钮。 */
   #hoveredButton: ButtonTarget | undefined;
   #pressedButton: ButtonTarget | undefined;
@@ -361,9 +419,9 @@ export class TuiApp implements TuiInteraction {
   #todoShimmerTimer: ReturnType<typeof setInterval> | undefined;
 
   /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
-  #toolHits: { callId: string; start: number; end: number }[] = [];
+  #toolHits: { callId: string; rect: HitRect }[] = [];
   /** 上一次渲染时每条可操作消息占用的 body 行区间。 */
-  #messageHits: { msgid: MsgId; undoMsgid: MsgId; start: number; end: number }[] = [];
+  #messageHits: { msgid: MsgId; undoMsgid: MsgId; rect: HitRect }[] = [];
   /** body 视窗在完整内容里的起始下标。 */
   #bodyWindowStart = 0;
 
@@ -540,6 +598,14 @@ export class TuiApp implements TuiInteraction {
       const keys = this.#decoder.flush();
       if (keys.length > 0) this.#handleKeys(keys);
     }, 50);
+
+    // 终端底色必须在第一帧之前定下来，否则行内代码的底色会先画错再改。
+    // 探测上限 60ms，且只在没有 COLORFGBG 线索时才真的发查询。
+    const detected = await detectTerminalBackground({
+      write: (text) => this.#terminal.write(text),
+      subscribe: (handler) => this.#terminal.onData(handler),
+    });
+    applyTheme(detected.background);
 
     const exited = new Promise<void>((resolve) => {
       this.#resolveExit = resolve;
@@ -768,9 +834,6 @@ export class TuiApp implements TuiInteraction {
       return;
     }
 
-    // 屏幕坐标是 1-based；body 从第 2 行开始（第 1 行是状态栏）
-    const bodyRow = key.y - 2;
-
     // 弹窗 / 消息操作菜单使用标准按下-抬起语义。
     if (this.#pendingMessageMenu !== undefined || this.#pendingDialog !== undefined) {
       if (key.button !== "left") return;
@@ -794,59 +857,45 @@ export class TuiApp implements TuiInteraction {
     }
 
     if (!key.pressed) return;
-
-    // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
-    // #dialogTopRow 现在是 0-based 屏幕行号；覆盖层第 0 行是上边框。
-    if (key.button === "left" && this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
-      const dialogRow = key.y - 1 - this.#dialogTopRow;
-      const flowLine = dialogRow - 1;
-      if (
-        dialogRow >= 0 &&
-        dialogRow < this.#dialogHeight &&
-        flowLine >= 0 &&
-        this.#askFlow.clickLine(flowLine)
-      ) {
-        this.#render(true);
-        return;
-      }
-      // 点击弹窗其它区域时吞掉事件，不能穿透到下面的消息列表。
-      if (dialogRow >= 0 && dialogRow < this.#dialogHeight) return;
-    }
-
-    if (key.button === "left" && hitTest(this.#returnToLatestHit, key.x, key.y)) {
-      this.#returnToLatest();
-      return;
-    }
-
-    if (
-      key.button === "left" &&
-      !this.#viewState.historyOpen &&
-      hitTest(this.#moreHistoryHit, key.x, bodyRow)
-    ) {
-      this.#openHistoryDrawer();
-      return;
-    }
-
-    if (this.#viewState.historyOpen || bodyRow < 0) return;
     if (key.button !== "left" && key.button !== "right") return;
 
-    const bodyIndex = this.#bodyWindowStart + (bodyRow - this.#bodyContentOffset);
+    // 命中判定只有这一条路径：区域表按顺序扫，第一个包含该点的区域胜出。
+    const target = this.#hitTargetAt(
+      key.x,
+      key.y,
+      key.button === "right" ? "right" : "left",
+    );
+    if (target === undefined) return;
 
-    // 工具卡片左键仍用于展开；右键留给消息操作。
-    if (key.button === "left") {
-      for (const hit of this.#toolHits) {
-        if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
-          if (this.#transcript.toggleToolExpanded(hit.callId)) {
-            // 展开会改变布局，必须整屏重绘而不是走差分
-            this.#render(true);
-          }
-          return;
-        }
-      }
+    switch (target.kind) {
+      case "input":
+        // 只移动光标，不引入"激活/未激活"状态：输入框永远是按键汇聚点，
+        // 点框外不会让后续输入被丢弃。
+        this.#cursor = target.index;
+        this.#render();
+        return;
+      case "askLine":
+        // 点到选项就选中/勾选；点到弹窗其它区域时吞掉事件，不穿透到消息列表
+        if (this.#askFlow?.clickLine(target.line) === true) this.#render(true);
+        return;
+      case "dialogBody":
+        return;
+      case "returnToLatest":
+        this.#returnToLatest();
+        return;
+      case "moreHistory":
+        this.#openHistoryDrawer();
+        return;
+      case "tool":
+        // 展开会改变布局，必须整屏重绘而不是走差分
+        if (this.#transcript.toggleToolExpanded(target.callId)) this.#render(true);
+        return;
+      case "message":
+        this.#openMessageMenu(target.msgid, target.undoMsgid);
+        return;
+      default:
+        return;
     }
-
-    const hit = this.#messageAt(bodyIndex);
-    if (hit !== undefined) this.#openMessageMenu(hit.msgid, hit.undoMsgid);
   }
 
   #clearButtonInteraction(): void {
@@ -860,44 +909,219 @@ export class TuiApp implements TuiInteraction {
     return a.value === b.value;
   }
 
-  #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
-    if (this.#dialogTopRow < 0) return undefined;
-    const dialogRow = y - 1 - this.#dialogTopRow;
-    if (dialogRow < 0 || dialogRow >= this.#dialogHeight) return undefined;
+  /** 组装本帧的可点区域。**顺序即优先级**，与鼠标处理共用。 */
+  #buildRegions(): HitRegionEntry[] {
+    const regions: HitRegionEntry[] = [];
 
-    if (this.#pendingMessageMenu !== undefined) {
-      const action = hitDialogActionAtLine(
-        this.#messageButtonHits,
-        dialogRow,
-        x - 1,
-      );
-      return action === undefined ? undefined : { kind: "message", value: action };
+    if (this.#scrollbar !== undefined) {
+      regions.push({
+        target: { kind: "scrollbar" },
+        rect: scrollbarRect(this.#scrollbar),
+        button: "left",
+      });
+    }
+    for (const entry of this.#messageButtonHits) {
+      regions.push({
+        target: { kind: "messageButton", value: entry.value },
+        rect: entry.rect,
+        button: "left",
+      });
+    }
+    for (const entry of this.#dialogButtonHits) {
+      regions.push({
+        target: { kind: "dialogButton", value: entry.value },
+        rect: entry.rect,
+        button: "left",
+      });
+    }
+    for (const entry of this.#askLineHits) {
+      regions.push({
+        target: { kind: "askLine", line: entry.value },
+        rect: entry.rect,
+        button: "left",
+      });
+    }
+    if (this.#dialogRect !== undefined) {
+      regions.push({ target: { kind: "dialogBody" }, rect: this.#dialogRect, button: "left" });
     }
 
-    if (this.#pendingDialog !== undefined) {
-      const answer = hitDialogActionAtLine(
-        this.#dialogButtonHits,
-        dialogRow,
-        x - 1,
-      );
-      return answer === undefined ? undefined : { kind: "dialog", value: answer };
+    // 弹窗打开时它盖住的区域都不可点（鼠标处理在弹窗分支直接 return）
+    if (this.#overlayOpen) return regions;
+
+    if (this.#returnToLatestHit !== undefined) {
+      regions.push({
+        target: { kind: "returnToLatest" },
+        rect: this.#returnToLatestHit,
+        button: "left",
+      });
+    }
+    if (this.#moreHistoryHit !== undefined && !this.#viewState.historyOpen) {
+      regions.push({
+        target: { kind: "moreHistory" },
+        rect: this.#moreHistoryHit,
+        button: "left",
+      });
+    }
+    for (const hit of this.#toolHits) {
+      regions.push({
+        target: { kind: "tool", callId: hit.callId },
+        rect: hit.rect,
+        button: "left",
+      });
+    }
+    for (const hit of this.#messageHits) {
+      // 左键：普通消息也能点开菜单；工具卡片那一块由上面的 tool 区域先接住。
+      // 右键：工具卡片与普通消息都走消息菜单。
+      const target: HitTarget = { kind: "message", msgid: hit.msgid, undoMsgid: hit.undoMsgid };
+      regions.push({ target, rect: hit.rect, button: "left" });
+      regions.push({ target, rect: hit.rect, button: "right" });
     }
 
+    return regions;
+  }
+
+  /**
+   * 屏幕坐标下面是什么 —— 纯查询，不改任何状态。
+   *
+   * 鼠标处理和命中自检（`#collectHitProbes` + `checkHitProbes`）共用这一条
+   * 路径：自检若另写一份判定，就只是在测试另一份实现。
+   *
+   * 除了输入框，全部判定都是"点在不在这个屏幕矩形里"，优先级由 `#regions`
+   * 的顺序表达 —— 没有第二种坐标换算，也就没有"两个空间对不上"这一类 bug。
+   */
+  #hitTargetAt(x: number, y: number, button: ProbeButton = "left"): HitTarget | undefined {
+    // 输入框要按列算出字符索引，是唯一需要额外换算的区域，单独处理。
+    // 它和别的区域不重叠（弹窗打开时 #inputBoxRect 已清空），所以顺序无关。
+    if (button === "left") {
+      const layout = this.#inputBoxLayout;
+      if (layout !== undefined) {
+        const index = inputCursorFromClick(this.#inputBoxRect, layout, x, y);
+        if (index !== undefined) return { kind: "input", index };
+      }
+    }
+
+    for (const region of this.#regions) {
+      if (region.button !== button) continue;
+      if (hitRect(region.rect, x, y)) return region.target;
+    }
     return undefined;
+  }
+
+  /** 弹窗按钮的 hover / press 目标；其它区域不参与悬停高亮。 */
+  #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
+    const target = this.#hitTargetAt(x, y, "left");
+    if (target?.kind === "dialogButton") return { kind: "dialog", value: target.value };
+    if (target?.kind === "messageButton") return { kind: "message", value: target.value };
+    return undefined;
+  }
+
+  /**
+   * 生成命中探针：每个可点区域取**自己矩形的中心**。
+   *
+   * 登记已经统一到屏幕坐标，所以这里不需要任何换算。被更靠前区域盖住的
+   * 同键目标不可达，跳过。
+   */
+  #collectHitProbes(): HitProbe[] {
+    const probes: HitProbe[] = [];
+    for (const [index, region] of this.#regions.entries()) {
+      const center = rectCenter(region.rect);
+      // 中心落在更靠前的区域里 = 被盖住（弹窗正文被 ask 行盖住就是这种情况），
+      // 它本来就不该被要求可点。
+      const shadowed = this.#regions
+        .slice(0, index)
+        .some(
+          (earlier) =>
+            earlier.button === region.button && hitRect(earlier.rect, center.x, center.y),
+        );
+      if (shadowed) continue;
+      probes.push({
+        name: hitTargetName(region.target),
+        x: center.x,
+        y: center.y,
+        button: region.button,
+      });
+    }
+
+    // 输入框不在区域表里（要按列算字符索引），单独补一条：点文本区首列应落在
+    // 首行起点上。
+    const box = this.#inputBoxRect;
+    const layout = this.#inputBoxLayout;
+    if (box !== undefined && layout !== undefined) {
+      probes.push({
+        name: `input:${layout.starts[box.startRow] ?? 0}`,
+        x: box.textLeft,
+        y: box.contentTop,
+        button: "left",
+      });
+    }
+
+    return probes;
+  }
+
+  /**
+   * 视觉锚点：登记矩形的左上角应当正好是控件画出来的那个字形。
+   *
+   * 登记改用屏幕坐标之后，中心探针只能验证"命中路径与登记表一致"；登记表
+   * 自己算错（比如居中留白算错）时两边会一起错、互相抵消。锚点直接比对渲染
+   * 出来的字符，是唯一不受换算影响的参照物。
+   */
+  #collectVisualAnchors(): VisualAnchor[] {
+    const anchors: VisualAnchor[] = [];
+    for (const entry of [...this.#messageButtonHits, ...this.#dialogButtonHits]) {
+      anchors.push({ name: "button", x: entry.rect.left, y: entry.rect.top, glyph: "▐" });
+    }
+    if (this.#dialogRect !== undefined) {
+      anchors.push({
+        name: "dialog",
+        x: this.#dialogRect.left,
+        y: this.#dialogRect.top,
+        glyph: "┌",
+      });
+    }
+    if (this.#inputBoxRect !== undefined) {
+      // 输入框框体从第 1 列开始，首行是 ┌───┐
+      anchors.push({
+        name: "input",
+        x: 1,
+        y: this.#inputBoxRect.top,
+        glyph: "┌",
+      });
+    }
+    return anchors;
+  }
+
+  /**
+   * 自检：每个可点区域的中心，喂回命中入口必须命中它自己；登记的位置必须
+   * 和画出来的位置重合。
+   *
+   * 由 `BUGENT_HIT_PROBE=1` 打开（`=strict` 时直接抛错）。
+   */
+  #verifyHitProbes(lines: readonly string[], width: number, height: number): void {
+    // sliceAnsi 会把当前生效的样式一起带出来，比较字形前要先剥掉
+    const cellAt = (x: number, y: number): string => {
+      const line = lines[y - 1];
+      return line === undefined ? "" : Bun.stripANSI(Bun.sliceAnsi(line, x - 1, x));
+    };
+    const reach = checkHitProbes(this.#collectHitProbes(), (x, y, button) => {
+      const target = this.#hitTargetAt(x, y, button);
+      return target === undefined ? undefined : hitTargetName(target);
+    });
+    const anchors = checkVisualAnchors(this.#collectVisualAnchors(), cellAt);
+    if (reach.length === 0 && anchors.length === 0) return;
+
+    const message = [
+      reach.length > 0 ? formatHitProbeFailures(reach, { width, height }) : "",
+      anchors.length > 0 ? formatAnchorFailures(anchors, { width, height }) : "",
+    ]
+      .filter((part) => part.length > 0)
+      .join("\n");
+    process.stderr.write(`[hit-probe] ${message}\n`);
+    if (hitProbeMode === "strict") throw new Error(message);
   }
 
   #invokeButton(target: ButtonTarget): void {
     if (target.kind === "dialog") this.#finishDialog(target.value);
     else this.#resolveMessageAction(target.value);
-  }
-
-  #messageAt(bodyIndex: number): { msgid: MsgId; undoMsgid: MsgId } | undefined {
-    for (const hit of this.#messageHits) {
-      if (bodyIndex >= hit.start && bodyIndex <= hit.end) {
-        return { msgid: hit.msgid, undoMsgid: hit.undoMsgid };
-      }
-    }
-    return undefined;
   }
 
   #insert(text: string): void {
@@ -908,8 +1132,8 @@ export class TuiApp implements TuiInteraction {
     this.#render();
   }
 
-  #inputLayout() {
-    const available = Math.max(1, this.#terminal.size.width - 4);
+  #inputLayout(): InputLayout {
+    const available = inputBoxGeometry(this.#terminal.size.width).textWidth;
     return layoutInput(this.#input, this.#cursor, available);
   }
 
@@ -1238,7 +1462,7 @@ export class TuiApp implements TuiInteraction {
         return;
       }
       this.#busy = true;
-      this.#activity = { state: "tool", detail: "Goal final audit" };
+      this.#activity = { state: "working" };
       this.#render(true);
       try {
         const result = await controller.finalAudit();
@@ -2219,7 +2443,7 @@ export class TuiApp implements TuiInteraction {
         case "retry": {
           const plan = this.#branchService.retryFrom(this.#session.id, menu.msgid);
           if (this.#switchRuntime(plan.branchId, `正在从 #${plan.userMsgid} 重试`)) {
-            void this.#runTurn(plan.input, true);
+            void this.#runTurn(plan.input);
           }
           return;
         }
@@ -2404,10 +2628,8 @@ export class TuiApp implements TuiInteraction {
 
   async #runTurn(
     input: string | undefined,
-    retry = false,
     options: {
       appendUser?: boolean;
-      goalContinuation?: boolean;
       fingerprintBefore?: string;
       turnId?: string;
     } = {},
@@ -2421,11 +2643,7 @@ export class TuiApp implements TuiInteraction {
     this.#thinking.reset();
     this.#patchStreams.clear();
     this.#transcript.clearStreamingTools();
-    this.#activity = retry
-      ? { state: "retrying", detail: "重新请求" }
-      : options.goalContinuation
-        ? { state: "waiting", detail: "Goal continuation" }
-        : { state: "waiting", detail: "连接模型" };
+    this.#activity = { state: "working" };
     this.#stopThinkingAnimation();
     this.#syncThinkingAnimation();
     this.#render();
@@ -2438,12 +2656,10 @@ export class TuiApp implements TuiInteraction {
       },
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
-        this.#setActivity({ state: "responding", detail: "生成回复" });
       },
       // 思考链路：只进滚动缓冲，不进消息区、不落库
       onReasoning: (delta) => {
         this.#thinking.push(delta);
-        this.#setActivity({ state: "thinking" });
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
@@ -2452,11 +2668,7 @@ export class TuiApp implements TuiInteraction {
         this.#thinking.reset();
         this.#lastAssistantMsgid = message.msgid;
         this.#transcript.endAssistant(message.msgid);
-        this.#setActivity(
-          message.toolCalls !== undefined && message.toolCalls.length > 0
-            ? { state: "tool", detail: message.toolCalls.map((call) => call.name).join(", ") }
-            : { state: "waiting", detail: "整理回复" },
-        );
+        this.#setActivity({ state: "working" });
       },
       onToolCallDelta: (delta) => {
         if (delta.reset === true) {
@@ -2478,7 +2690,7 @@ export class TuiApp implements TuiInteraction {
             this.#transcript.setToolPatchProgress(delta.id, progress);
           }
         }
-        this.#setActivity({ state: "tool", detail: delta.name || "接收工具参数" });
+        this.#setActivity({ state: "working" });
         this.#scheduleRender();
       },
       onToolCall: (call) => {
@@ -2492,21 +2704,6 @@ export class TuiApp implements TuiInteraction {
           this.#patchStreams.delete(call.id);
         }
         this.#transcript.startTool(call, this.#lastAssistantMsgid);
-        const activity: AgentActivity =
-          call.name === "create_goal" || call.name === "update_goal"
-            ? { state: "goal_init", detail: call.name }
-            : call.name === "update_plan"
-              ? { state: "goal_plan", detail: "更新 Plan" }
-              : call.name === "todo_write" && this.#goalController?.currentGoal() !== undefined
-                ? { state: "goal_checkpoint", detail: "更新 Todo" }
-                : call.name === "submit_checkpoint"
-                  ? { state: "goal_review", detail: "验证与审查" }
-                  : call.name === "get_handoff" || call.name === "handoff_update"
-                    ? { state: "goal_handoff", detail: call.name }
-                    : call.name === "final_audit"
-                      ? { state: "goal_audit", detail: "最终审计" }
-                      : { state: "tool", detail: call.name };
-        this.#setActivity(activity);
       },
       // 运行中的流式输出：只保留末尾若干行，内存有界
       onToolProgress: (call, chunk, stream) => {
@@ -2517,11 +2714,11 @@ export class TuiApp implements TuiInteraction {
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
       // ask_user：多页问答表单；用户中止时暂停自动 continuation，直到下一条输入。
       onAskUser: async (_call, questions) => {
-        this.#setActivity({ state: "waiting_user", detail: "等待回答" });
+        this.#setActivity({ state: "working" });
         const answers = await this.askUser(questions);
         if (answers === undefined) this.#goalController?.deferForUser();
         else this.#goalController?.clearUserDeferral();
-        this.#setActivity({ state: "waiting", detail: "处理回答" });
+        this.#setActivity({ state: "working" });
         return answers;
       },
       onToolResult: (call, result, message) => {
@@ -2541,7 +2738,7 @@ export class TuiApp implements TuiInteraction {
         ) {
           this.#refreshGoalStatus();
         }
-        this.#setActivity({ state: "waiting", detail: "读取工具结果" });
+        this.#setActivity({ state: "working" });
         this.#syncTodoShimmer();
       },
       onUsage: (usage) => {
@@ -2549,7 +2746,7 @@ export class TuiApp implements TuiInteraction {
         this.#scheduleRender();
       },
       onExtensionRoleFallback: async (error) => {
-        this.#setActivity({ state: "retrying", detail: "兼容性重发" });
+        this.#setActivity({ state: "working" });
         return this.#confirmExtensionRoleFallback(error);
       },
     };
@@ -2630,7 +2827,7 @@ export class TuiApp implements TuiInteraction {
       this.#refreshGoalStatus();
 
       if (aborted) {
-        this.#activity = { state: "aborted", detail: "用户中断" };
+        this.#activity = { state: "aborted" };
       } else if (failure !== undefined) {
         this.#activity = { state: "disconnected", detail: failure };
       } else {
@@ -2662,7 +2859,7 @@ export class TuiApp implements TuiInteraction {
     const controller = this.#goalController;
     if (controller === undefined || this.#busy || this.#session.queuedUserCount > 0) return;
     this.#busy = true;
-    this.#activity = { state: "goal_handoff", detail: "创建 Context Epoch" };
+    this.#activity = { state: "working" };
     this.#render(true);
     try {
       const epoch = await controller.createContextEpoch("checkpoint");
@@ -2705,9 +2902,8 @@ export class TuiApp implements TuiInteraction {
     try {
       const start = controller.beginContinuation();
       this.#goalContinuationStreak += 1;
-      void this.#runTurn(undefined, false, {
+      void this.#runTurn(undefined, {
         appendUser: false,
-        goalContinuation: true,
         fingerprintBefore: start.fingerprint,
         turnId: start.turnId,
       });
@@ -2833,6 +3029,7 @@ export class TuiApp implements TuiInteraction {
     if (force) this.#screen.invalidate();
 
     const lines = this.#compose(width, height);
+    if (hitProbeMode !== "off") this.#verifyHitProbes(lines, width, height);
     const output = this.#screen.draw(lines);
     if (output.length > 0) this.#terminal.write(`\x1b[?25l${output}`);
     this.#terminal.setCursor(this.#inputCursorRow, this.#inputCursorColumn);
@@ -2843,12 +3040,18 @@ export class TuiApp implements TuiInteraction {
       this.#pendingDialog !== undefined ||
       this.#pendingMessageMenu !== undefined ||
       this.#askFlow !== undefined;
-    const dialogLines = overlayOpen ? this.#paintDialog(this.#renderDialog(width)) : [];
+    const dialogContent: RenderedDialog = overlayOpen
+      ? this.#renderDialog(width)
+      : { lines: [], buttons: [] };
+    const dialogLines = this.#paintDialog(dialogContent.lines);
+    this.#overlayOpen = overlayOpen;
     // 弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
     const maxDialogRows = Math.max(0, height - 2);
+    // 渲染与鼠标命中共用同一个左内边距，避免两边各算一遍导致点击整体偏移
+    const dialogPadding = dialogLeftPadding(width);
     const dialogBlock = dialogLines
       .slice(0, maxDialogRows)
-      .map((line) => centerLine(line, width));
+      .map((line) => placeDialogLine(line, width, dialogPadding));
     const dialogRows = dialogBlock.length;
 
     // 思考区固定预留（默认 3 行，小终端自动收缩），不思考时是全空白 ——
@@ -2885,12 +3088,27 @@ export class TuiApp implements TuiInteraction {
           })
         : [];
 
+    // 输入框几何必须在正文高度之前确定：框高随输入行数增长（1..5 行内容），
+    // 正文高度依赖它。渲染、硬件光标、鼠标命中三处共用同一份几何。
+    const inputLayout = layoutInput(
+      this.#input,
+      this.#cursor,
+      inputBoxGeometry(width).textWidth,
+    );
+    const inputPlan = inputBoxRows({
+      height,
+      inputLines: inputLayout.lines.length,
+      todoRows: todoPanel.length,
+      thinkingRows: thinkingBlock.length,
+    });
+    const inputBoxHeight = dialogRows > 0 ? 0 : inputPlan.boxHeight;
+
     const bodyHeight =
       dialogRows > 0
         ? Math.max(1, height - 1 - todoPanel.length - dialogRows)
         : Math.max(
             1,
-            height - 2 - (INPUT_ROWS - 1) - todoPanel.length - thinkingBlock.length,
+            height - 2 - (inputBoxHeight - 1) - todoPanel.length - thinkingBlock.length,
           );
     const body = this.#composeBody(width, bodyHeight);
     const scrollbarViewportHeight = Math.max(1, bodyHeight - this.#bodyContentOffset);
@@ -2917,8 +3135,6 @@ export class TuiApp implements TuiInteraction {
     } else {
       this.#dialogTopRow = -1;
       this.#dialogHeight = 0;
-      this.#dialogButtonHits = [];
-      this.#messageButtonHits = [];
     }
 
     // “回到最新消息”放在思考区最后一行：它本来就是输入框上方的留白，
@@ -2935,36 +3151,96 @@ export class TuiApp implements TuiInteraction {
     }
 
     if (dialogRows > 0) {
-      // 弹窗直接取代输入面板；弹窗打开期间按键都路由给弹窗，输入框本来也不可用。
+      // 弹窗直接取代输入框；弹窗打开期间按键都路由给弹窗，输入框本来也不可用。
+      this.#inputBoxRect = undefined;
+      this.#inputBoxLayout = undefined;
+      this.#dialogLeftPadding = dialogPadding;
       const askCursor = this.#askFlow?.cursorPosition();
       const inner = dialogInnerWidth(width);
+
+      // 弹窗局部坐标 -> 屏幕坐标只在这里换算一次，之后命中判定就是纯包含判断
+      const toScreenRow = (line: number): number => this.#dialogTopRow + line + 1;
+      this.#messageButtonHits = [];
+      this.#dialogButtonHits = [];
+      this.#askLineHits = [];
+      for (const button of dialogContent.buttons) {
+        if (button.line >= dialogRows) continue; // 被裁掉的行不算可点
+        const rect: HitRect = {
+          top: toScreenRow(button.line),
+          bottom: toScreenRow(button.line),
+          left: dialogPadding + button.left + 1,
+          right: dialogPadding + button.right + 1,
+        };
+        if (button.target.kind === "messageButton") {
+          this.#messageButtonHits.push({ value: button.target.value, rect });
+        } else if (button.target.kind === "dialogButton") {
+          this.#dialogButtonHits.push({ value: button.target.value, rect });
+        }
+      }
+      this.#dialogRect = {
+        top: this.#dialogTopRow + 1,
+        bottom: this.#dialogTopRow + dialogRows,
+        left: dialogPadding + 1,
+        right: dialogPadding + inner + 2,
+      };
+      if (this.#askFlow !== undefined) {
+        for (let line = 1; line < dialogRows - 1; line += 1) {
+          this.#askLineHits.push({
+            value: line - 1,
+            rect: {
+              top: toScreenRow(line),
+              bottom: toScreenRow(line),
+              left: this.#dialogRect.left,
+              right: this.#dialogRect.right,
+            },
+          });
+        }
+      }
+      this.#regions = this.#buildRegions();
+
       if (
         width >= inner + 2 &&
         askCursor !== undefined &&
         askCursor.line < dialogRows
       ) {
-        const leftPadding = Math.max(0, Math.floor((width - (inner + 2)) / 2));
         this.#inputCursorRow = this.#dialogTopRow + askCursor.line + 1;
-        this.#inputCursorColumn = leftPadding + askCursor.column + 3;
+        this.#inputCursorColumn = dialogPadding + askCursor.column + 3;
       } else {
         this.#inputCursorRow = undefined;
       }
       return [this.#composeStatus(width), ...bodyView, ...todoPanel, ...dialogBlock];
     }
 
+    // 没有弹窗：清掉弹窗相关区域，正文与输入框区域照常参与命中
+    this.#dialogLeftPadding = 0;
+    this.#dialogRect = undefined;
+    this.#askLineHits = [];
+
     const inputTopRow = bodyHeight + todoPanel.length + thinkingBlock.length + 2;
-    const inputRows = this.#composeInput(width);
-    this.#inputCursorRow =
-      height >= INPUT_ROWS + 2 && inputTopRow + INPUT_ROWS - 1 <= height
-        ? inputTopRow + this.#inputCursorOffset
-        : undefined;
+    const box = composeInputBox({
+      width,
+      top: inputTopRow,
+      input: this.#input,
+      layout: inputLayout,
+      contentRows: inputPlan.contentRows,
+      placeholder: INPUT_PLACEHOLDER,
+    });
+    // 终端过小时框会被裁掉；这时不登记命中区间，否则会点到看不见的东西。
+    const boxFits =
+      height >= inputPlan.boxHeight + 2 &&
+      inputTopRow + inputPlan.boxHeight - 1 <= height;
+    this.#inputBoxRect = boxFits ? box.rect : undefined;
+    this.#inputBoxLayout = boxFits ? inputLayout : undefined;
+    this.#inputCursorRow = boxFits ? inputTopRow + box.cursor.row : undefined;
+    this.#inputCursorColumn = box.cursor.column;
+    this.#regions = this.#buildRegions();
 
     return [
       this.#composeStatus(width),
       ...bodyView,
       ...todoPanel,
       ...thinkingBlock,
-      ...inputRows,
+      ...box.lines,
     ];
   }
 
@@ -3000,9 +3276,14 @@ export class TuiApp implements TuiInteraction {
     });
   }
 
-  #renderDialog(width: number): string[] {
-    this.#dialogButtonHits = [];
-    this.#messageButtonHits = [];
+  /**
+   * 渲染弹窗，并把按钮位置**按弹窗局部坐标**返回。
+   *
+   * 局部坐标 -> 屏幕坐标的换算放在 #compose 里做：那时才知道弹窗画在屏幕的
+   * 哪一行、水平居中留白是多少（行数依赖渲染结果，算位置又依赖行数）。
+   */
+  #renderDialog(width: number): RenderedDialog {
+    const buttons: RenderedDialog["buttons"] = [];
     const inner = dialogInnerWidth(width);
     const color = fg(COLOR.dialogBorder);
     const bar = `${color}│${RESET}`;
@@ -3011,11 +3292,14 @@ export class TuiApp implements TuiInteraction {
 
     // ask_user：分页表单，内容由 AskUserFlow 自己渲染
     if (this.#askFlow !== undefined) {
-      return [
-        `${color}┌${"─".repeat(inner)}┐${RESET}`,
-        ...this.#askFlow.render(inner).map((line) => row(` ${line}`)),
-        `${color}└${"─".repeat(inner)}┘${RESET}`,
-      ];
+      return {
+        lines: [
+          `${color}┌${"─".repeat(inner)}┐${RESET}`,
+          ...this.#askFlow.render(inner).map((line) => row(` ${line}`)),
+          `${color}└${"─".repeat(inner)}┘${RESET}`,
+        ],
+        buttons,
+      };
     }
 
     if (this.#pendingMessageMenu !== undefined) {
@@ -3042,18 +3326,23 @@ export class TuiApp implements TuiInteraction {
         );
         lines.push(row(actions.text));
         const actionLine = lines.length - 1;
-        this.#messageButtonHits.push(
-          ...actions.hits.map((hit) => ({ line: actionLine, hit })),
-        );
+        for (const hit of actions.hits) {
+          buttons.push({
+            target: { kind: "messageButton", value: hit.value },
+            line: actionLine,
+            left: hit.start,
+            right: hit.end,
+          });
+        }
       }
 
       lines.push(row(` ${menu.hint}`));
       lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
-      return lines;
+      return { lines, buttons };
     }
 
     const dialog = this.#pendingDialog;
-    if (dialog === undefined) return [];
+    if (dialog === undefined) return { lines: [], buttons };
 
     const lines = [
       `${color}┌${"─".repeat(inner)}┐${RESET}`,
@@ -3074,11 +3363,18 @@ export class TuiApp implements TuiInteraction {
     });
     lines.push(row(actions.text));
     const actionLine = lines.length - 1;
-    this.#dialogButtonHits = actions.hits.map((hit) => ({ line: actionLine, hit }));
+    for (const hit of actions.hits) {
+      buttons.push({
+        target: { kind: "dialogButton", value: hit.value },
+        line: actionLine,
+        left: hit.start,
+        right: hit.end,
+      });
+    }
 
     lines.push(row(` ${dialog.hint}`));
     lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
-    return lines;
+    return { lines, buttons };
   }
 
   #composeStatus(width: number): string {
@@ -3098,50 +3394,6 @@ export class TuiApp implements TuiInteraction {
         }${RESET}${queueTag}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     return truncateAnsi(left + " ".repeat(gap) + right, width);
-  }
-
-  /**
-   * 输入面板：固定 4 行视窗。
-   *
-   * 输入内容按终端宽度折行，显式换行也会产生新视觉行；超过 4 行时只滚动
-   * 显示光标附近的行。真实光标仍由 Terminal.setCursor 定位。
-   */
-  #composeInput(width: number): string[] {
-    // 末尾留一格：写满整行会让终端自动折行，把布局顶乱
-    const fill = Math.max(0, width - 1);
-    const background = bg(COLOR.inputBg);
-    const available = Math.max(1, width - 4);
-    const layout = layoutInput(this.#input, this.#cursor, available);
-    const maxStart = Math.max(0, layout.lines.length - INPUT_ROWS);
-    const startRow = Math.max(
-      0,
-      Math.min(layout.cursorRow - INPUT_ROWS + 1, maxStart),
-    );
-    this.#inputCursorOffset = layout.cursorRow - startRow;
-    this.#inputCursorColumn = layout.cursorColumn + 3;
-
-    const rows: string[] = [];
-    for (let index = 0; index < INPUT_ROWS; index += 1) {
-      const lineIndex = startRow + index;
-      const text = layout.lines[lineIndex];
-      let raw = "";
-      if (text !== undefined) {
-        const prefix =
-          lineIndex === 0
-            ? `${fg(COLOR.inputEdge)}▌${RESET} `
-            : "  ";
-        raw = `${prefix}${fg(COLOR.inputText)}${text}${RESET}`;
-      }
-
-      // 关键：RESET([0m) 会把**背景色一起清掉**，于是 `▌` 之后的
-      // 整行都失去底色，看起来就是"输入框和灰蓝色分离"。
-      // 在每个 RESET 之后重新贴上背景色即可。
-      const content = raw.replaceAll(RESET, `${RESET}${background}`);
-      const padding = " ".repeat(Math.max(0, fill - visibleWidth(raw)));
-
-      rows.push(`${background}${content}${padding}${RESET}`);
-    }
-    return rows;
   }
 
   /**
@@ -3199,6 +3451,7 @@ export class TuiApp implements TuiInteraction {
       this.#toolHits = [];
       this.#messageHits = [];
       this.#moreHistoryHit = undefined;
+      this.#regions = this.#buildRegions();
       return drawer.lines;
     }
 
@@ -3208,17 +3461,45 @@ export class TuiApp implements TuiInteraction {
 
     this.#bodyWindowStart = viewport.start;
     this.#bodyContentOffset = showMore ? 1 : 0;
-    this.#toolHits = viewport.blocks.flatMap((block) =>
-      block.callId === undefined
+    /** 内容行区间 -> 屏幕矩形；整块滚出窗口时返回 undefined（没画出来就不可点）。 */
+    const bodyRect = (block: { start: number; contentEnd: number }): HitRect | undefined => {
+      const visible = visibleRangeOf(
+        { start: block.start, end: block.contentEnd },
+        this.#bodyWindowStart,
+        this.#bodyContentOffset,
+        this.#bodyHeight,
+      );
+      if (visible === undefined) return undefined;
+      const top = contentLineToScreenRow(
+        visible.first,
+        this.#bodyWindowStart,
+        this.#bodyContentOffset,
+        this.#bodyHeight,
+      );
+      const bottom = contentLineToScreenRow(
+        visible.last,
+        this.#bodyWindowStart,
+        this.#bodyContentOffset,
+        this.#bodyHeight,
+      );
+      return top === undefined || bottom === undefined
+        ? undefined
+        : { top, bottom, left: 1, right: width };
+    };
+
+    this.#toolHits = viewport.blocks.flatMap((block) => {
+      const rect = block.callId === undefined ? undefined : bodyRect(block);
+      return block.callId === undefined || rect === undefined
         ? []
-        : [{ callId: block.callId, start: block.start, end: block.contentEnd }],
-    );
+        : [{ callId: block.callId, rect }];
+    });
     this.#messageHits = viewport.blocks.flatMap((block) => {
       const msgid = displayMsgId(block.item);
       const undoMsgid = displayActionMsgId(block.item);
-      return msgid === undefined || undoMsgid === undefined
+      const rect = msgid === undefined || undoMsgid === undefined ? undefined : bodyRect(block);
+      return msgid === undefined || undoMsgid === undefined || rect === undefined
         ? []
-        : [{ msgid, undoMsgid, start: block.start, end: block.contentEnd }];
+        : [{ msgid, undoMsgid, rect }];
     });
 
     if (!showMore) {
@@ -3227,7 +3508,8 @@ export class TuiApp implements TuiInteraction {
     }
 
     const label = `${DIM}↑ 更早消息已折叠 ${RESET}${fg(COLOR.tool)}[ 查看更多消息 ]${RESET}`;
-    const button = composeCenteredButton(label, width, 0);
+    // 按钮画在 body 的第 0 行；body 从屏幕第 2 行开始
+    const button = composeCenteredButton(label, width, 2);
     this.#moreHistoryHit = button.hit;
     return [button.line, ...viewport.lines];
   }

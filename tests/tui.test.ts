@@ -81,6 +81,26 @@ describe("P5 · 按键解析", () => {
     ]);
   });
 
+  test("OSC 序列整段吃掉，不会漏成输入", () => {
+    const decoder = new KeyDecoder();
+    // BEL 结尾（底色查询应答）
+    expect(decoder.push("\x1b]11;rgb:1e1e/1e1e/1e1e\x07")).toEqual([]);
+    // ST 结尾（窗口标题上报）
+    expect(decoder.push("\x1b]0;my title\x1b\\")).toEqual([]);
+  });
+
+  test("OSC 跨 chunk 也不会漏出载荷", () => {
+    const decoder = new KeyDecoder();
+    expect(decoder.push("\x1b]11;rgb:ffff/ff")).toEqual([]);
+    expect(decoder.push("ff/ffff\x07")).toEqual([]);
+    // 紧接着的普通按键照常解析
+    expect(decoder.push("ok")).toEqual([{ type: "text", value: "ok" }]);
+  });
+
+  test("OSC 之后紧跟的按键不受影响", () => {
+    expect(new KeyDecoder().push("\x1b]0;t\x07\r")).toEqual([{ type: "enter" }]);
+  });
+
   test("复制反馈按字符数显示，不被换行拆成多条消息", () => {
     expect(copyNotice("你好\nworld")).toBe("[已复制 8 字符]");
   });

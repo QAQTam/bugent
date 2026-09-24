@@ -50,6 +50,11 @@ function runSandboxed(config: Record<string, unknown>, cmd: readonly string[]): 
     cwd: repoRoot,
     env: {
       ...process.env,
+      // 沙箱拒绝读取时，cat / python 的报错文案来自 glibc 的 strerror，
+      // 会跟随 LC_MESSAGES 本地化（zh_CN 下是「权限不够」）。断言要检查
+      // 具体错误语义，所以把探测进程固定到 C locale。
+      LC_ALL: "C",
+      LANG: "C",
       BUGENT_BUN_BIN: forkPath,
       BUGENT_SANDBOX_LIBRARY: libraryPath,
       SANDBOX_CONFIG: JSON.stringify(config),

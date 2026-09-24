@@ -3,6 +3,7 @@ export const DIM = "\x1b[2m";
 export const BOLD = "\x1b[1m";
 
 import { highlightCode, isNativeLanguage, normalizeLanguage } from "./highlight.ts";
+import { currentBackground } from "./theme.ts";
 
 /**
  * 内容渲染 —— 直接吃 Bun 原生能力，零依赖。
@@ -42,6 +43,11 @@ export interface MarkdownRenderOptions {
   hyperlinks?: boolean;
   /** 是否启用 Kitty Graphics；不传时只在已知支持的终端开启。 */
   kittyGraphics?: boolean;
+  /**
+   * 终端底色是否为浅色。影响行内代码的底色与字色（Bun 会给深色终端挑
+   * `48;5;236`、给浅色终端挑 `48;5;254`）。不传时用启动时探测到的结果。
+   */
+  light?: boolean;
 }
 
 function terminalSupportsHyperlinks(): boolean {
@@ -88,6 +94,8 @@ export function renderMarkdown(
   const out: string[] = [];
   const hyperlinks = options.hyperlinks ?? terminalSupportsHyperlinks();
   const kittyGraphics = options.kittyGraphics ?? terminalSupportsKittyGraphics();
+  // 显式传 light，不依赖 Bun 自己在进程启动时读的 COLORFGBG
+  const light = options.light ?? currentBackground() === "light";
 
   for (const segment of splitMarkdown(text)) {
     if (segment.kind === "prose") {
@@ -97,6 +105,7 @@ export function renderMarkdown(
       const rendered = Bun.markdown.ansi(segment.text, {
         columns: width,
         hyperlinks,
+        light,
         ...(kittyGraphics ? { kittyGraphics: true } : {}),
       });
       out.push(...wrapPreservingGraphics(rendered, width));

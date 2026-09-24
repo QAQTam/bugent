@@ -129,3 +129,50 @@ export function hitDialogActionAtLine<T = boolean>(
   const hits = rows.filter((entry) => entry.line === line).map((entry) => entry.hit);
   return hits.length === 0 ? undefined : hitDialogAction(hits, column);
 }
+
+/** 弹窗在屏幕上的位置。 */
+export interface DialogGeometry {
+  /** 弹窗首行的 0-based 屏幕行号。 */
+  top: number;
+  /** 弹窗总行数。 */
+  height: number;
+  /** 水平居中后左侧留白的列数。 */
+  leftPadding: number;
+}
+
+/** 弹窗内容区宽度（不含左右边框）。 */
+export function dialogInnerWidth(width: number): number {
+  return Math.max(16, Math.min(width - 2, 74));
+}
+
+/**
+ * 弹窗水平居中后的左内边距。
+ *
+ * 渲染与鼠标命中共用这一个函数：命中区间是在**弹窗自己的坐标系**里算的，
+ * 而鼠标坐标是屏幕坐标系，两者之间只差这个 padding。各算一遍就会偏。
+ */
+export function dialogLeftPadding(width: number): number {
+  return Math.max(0, Math.floor((width - (dialogInnerWidth(width) + 2)) / 2));
+}
+
+/**
+ * 屏幕坐标（1-based）-> 弹窗内坐标（0-based）。
+ *
+ * `leftPadding` 不能省：弹窗是水平居中的，按钮的命中区间却是在弹窗自己的
+ * 坐标系里算出来的。漏掉这一项，命中区就整体左移 padding 列 —— 终端越宽
+ * 偏得越多（80 列偏 2 列，120 列偏 22 列），表现就是"点按钮没反应"或者
+ * "点到了隔壁按钮"。
+ *
+ * 返回 undefined 表示这次点击不在弹窗范围内。
+ */
+export function dialogPointAt(
+  geometry: DialogGeometry,
+  x: number,
+  y: number,
+): { row: number; column: number } | undefined {
+  const row = y - 1 - geometry.top;
+  if (row < 0 || row >= geometry.height) return undefined;
+  const column = x - 1 - geometry.leftPadding;
+  if (column < 0) return undefined;
+  return { row, column };
+}

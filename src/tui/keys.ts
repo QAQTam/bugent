@@ -137,6 +137,9 @@ const SS3_MAP: Record<string, Key> = {
   F: { type: "end" },
 };
 
+/** 单个 OSC 序列的字节上限；超过就当作对端发了垃圾，直接丢弃。 */
+const OSC_MAX_BYTES = 2048;
+
 export class KeyDecoder {
   #pending = "";
 
@@ -258,7 +261,29 @@ export class KeyDecoder {
       return { keys: key === undefined ? [] : [key], next: index + 3 };
     }
 
+    // OSC（ESC]…）：终端主动上报，如窗口标题、底色查询应答、图形协议应答。
+    if (second === "]") return this.#parseOsc(index);
+
     // 裸 ESC + 其它字符：ESC 本身作为一次按键
     return { keys: [{ type: "escape" }], next: index + 1 };
+  }
+
+  /**
+   * 消费一个 OSC 序列：`ESC]` 之后直到 BEL 或 ST（`ESC\`）。
+   *
+   * 必须整段吃掉：载荷是终端给的元数据，一旦漏成普通字符就会被打进输入框。
+   * 返回 undefined 表示还没收到终止符，等下一块数据；只有缓冲区已经明显
+   * 超长（对端发了不带终止符的垃圾）才丢弃，避免把解码器永久卡住。
+   */
+  #parseOsc(index: number): { keys: Key[]; next: number } | undefined {
+    for (let i = index + 2; i < this.#pending.length; i += 1) {
+      const code = this.#pending.charCodeAt(i);
+      if (code === 0x07) return { keys: [], next: i + 1 }; // BEL
+      if (code === 0x1b && this.#pending[i + 1] === "\\") return { keys: [], next: i + 2 }; // ST
+    }
+    if (this.#pending.length - index > OSC_MAX_BYTES) {
+      return { keys: [], next: this.#pending.length };
+    }
+    return undefined;
   }
 }
