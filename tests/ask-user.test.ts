@@ -175,6 +175,18 @@ describe("ask_user · 自定义回答", () => {
     expect(flow.answers[0]?.custom).toBe("用 Rust 风格");
   });
 
+  test("输入态暴露硬件光标位置，供 TUI/IME 锚定", () => {
+    const { flow } = makeFlow();
+    flow.handleKey(text("e"));
+    flow.handleKey(text("a"));
+    const lines = flow.render(60);
+    const cursor = flow.cursorPosition();
+
+    expect(cursor).toBeDefined();
+    expect(lines[cursor!.line]).toContain("▸");
+    expect(cursor!.column).toBe(3);
+  });
+
   test("secret 问题自动进入输入态，渲染和汇总都不回显明文", () => {
     const { flow } = makeFlow([{ question: "API key", options: [], secret: true }]);
     expect(flow.isTyping).toBe(true);

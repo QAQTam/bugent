@@ -31,6 +31,7 @@ import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
+import { inputViewport } from "./input-view.ts";
 import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
@@ -143,6 +144,10 @@ function centerLine(line: string, width: number): string {
   const clipped = truncateAnsi(line, width);
   const padding = Math.max(0, Math.floor((width - visibleWidth(clipped)) / 2));
   return " ".repeat(padding) + clipped;
+}
+
+function dialogInnerWidth(width: number): number {
+  return Math.max(16, Math.min(width - 2, 74));
 }
 
 function todoImpact(before: TodoList, after: TodoList): string {
@@ -264,6 +269,9 @@ export class TuiApp implements TuiInteraction {
   #thinkingTimer: ReturnType<typeof setInterval> | undefined;
   #input = "";
   #cursor = 0;
+  /** Real terminal cursor position for IME/accessibility anchoring. */
+  #inputCursorRow: number | undefined;
+  #inputCursorColumn = 3;
   /** 主区滚动、钉底和历史抽屉的统一状态。 */
   #viewState: HistoryViewState = initialHistoryView();
   /** 上一次布局总行数，用于回看时抵消新增内容造成的位移。 */
@@ -2176,7 +2184,8 @@ export class TuiApp implements TuiInteraction {
 
     const lines = this.#compose(width, height);
     const output = this.#screen.draw(lines);
-    if (output.length > 0) this.#terminal.write(output);
+    if (output.length > 0) this.#terminal.write(`\x1b[?25l${output}`);
+    this.#terminal.setCursor(this.#inputCursorRow, this.#inputCursorColumn);
   }
 
   #compose(width: number, height: number): string[] {
@@ -2260,8 +2269,25 @@ export class TuiApp implements TuiInteraction {
 
     if (dialogRows > 0) {
       // 弹窗直接取代输入面板；弹窗打开期间按键都路由给弹窗，输入框本来也不可用。
+      const askCursor = this.#askFlow?.cursorPosition();
+      const inner = dialogInnerWidth(width);
+      if (
+        width >= inner + 2 &&
+        askCursor !== undefined &&
+        askCursor.line < dialogRows
+      ) {
+        const leftPadding = Math.max(0, Math.floor((width - (inner + 2)) / 2));
+        this.#inputCursorRow = this.#dialogTopRow + askCursor.line + 1;
+        this.#inputCursorColumn = leftPadding + askCursor.column + 3;
+      } else {
+        this.#inputCursorRow = undefined;
+      }
       return [this.#composeStatus(width), ...body, ...todoPanel, ...dialogBlock];
     }
+
+    const inputTopRow = bodyHeight + todoPanel.length + thinkingBlock.length + 2;
+    this.#inputCursorRow =
+      height >= INPUT_ROWS + 2 && inputTopRow <= height ? inputTopRow : undefined;
 
     return [
       this.#composeStatus(width),
@@ -2307,7 +2333,7 @@ export class TuiApp implements TuiInteraction {
   #renderDialog(width: number): string[] {
     this.#dialogButtonHits = [];
     this.#messageButtonHits = [];
-    const inner = Math.max(16, Math.min(width - 2, 74));
+    const inner = dialogInnerWidth(width);
     const color = fg(COLOR.dialogBorder);
     const bar = `${color}│${RESET}`;
     const row = (text: string): string =>
@@ -2413,7 +2439,7 @@ export class TuiApp implements TuiInteraction {
 
     const rows: string[] = [];
     for (let index = 0; index < INPUT_ROWS; index += 1) {
-      const raw = index === 0 ? this.#composeInputText() : "";
+      const raw = index === 0 ? this.#composeInputText(width) : "";
 
       // 关键：RESET([0m) 会把**背景色一起清掉**，于是 `▌` 之后的
       // 整行都失去底色，看起来就是"输入框和灰蓝色分离"。
@@ -2426,29 +2452,25 @@ export class TuiApp implements TuiInteraction {
     return rows;
   }
 
-  /** 第一行的内容：提示符 + 输入文本 + 光标。 */
-  #composeInputText(): string {
+  /** 第一行的内容：提示符 + 输入文本；真实光标由 Terminal.setCursor 定位。 */
+  #composeInputText(width: number): string {
     const edge = `${fg(COLOR.inputEdge)}▌${RESET} `;
     const textColor = fg(COLOR.inputText);
-    const available = Math.max(1, this.#terminal.size.width - 4);
+    const available = Math.max(1, width - 4);
     const chars = Array.from(this.#input);
-
-    // 水平滚动，保证光标可见
-    let start = 0;
-    while (start < this.#cursor && visibleWidth(chars.slice(start, this.#cursor).join("")) >= available) {
-      start += 1;
-    }
+    const view = inputViewport(this.#input, this.#cursor, available);
+    this.#inputCursorColumn = view.cursorColumn;
 
     let used = 0;
     let rendered = "";
-    for (let i = start; i < chars.length; i += 1) {
+    for (let i = view.start; i < chars.length; i += 1) {
       const char = chars[i]!;
       const charWidth = visibleWidth(char);
       if (used + charWidth > available) break;
-      rendered += i === this.#cursor ? `\x1b[7m${char}\x1b[27m` : char;
+      rendered += char;
       used += charWidth;
     }
-    if (this.#cursor >= chars.length) rendered += "\x1b[7m \x1b[27m";
+    if (this.#cursor >= chars.length) rendered += " ";
 
     return `${edge}${textColor}${rendered}${RESET}`;
   }

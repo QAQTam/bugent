@@ -64,6 +64,50 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
+    "硬件光标跟随输入逻辑位置，供 IME 定位候选窗",
+    async () => {
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 60,
+        rows: 14,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, TERM: "xterm-256color" },
+        terminal,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        expect(output).toContain("\x1b[11;3H\x1b[?25h");
+
+        output = "";
+        terminal.write("你好");
+        await waitFor(() => output, (text) => strip(text).includes("你好"));
+        expect(output).toContain("\x1b[11;7H\x1b[?25h");
+
+        output = "";
+        terminal.write("\x1b[D");
+        await waitFor(() => output, (text) => text.includes("\x1b[11;5H\x1b[?25h"));
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
     "消息操作按钮支持 hover、按下和抬起确认",
     async () => {
       const home = await mkdtemp(join(tmpdir(), "bugent-hover-"));

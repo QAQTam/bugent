@@ -14,6 +14,7 @@
 
 import { BOLD, DIM, RESET, fg, renderPlain } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
+import { inputViewport } from "./input-view.ts";
 import { COLOR } from "./theme.ts";
 import type { Key } from "./keys.ts";
 
@@ -68,6 +69,9 @@ export class AskUserFlow {
   #cursor = 0;
   #typing = false;
   #buffer = "";
+  /** Hardware-cursor position in render() output while the typing form is active. */
+  #cursorLine: number | undefined;
+  #cursorColumn: number | undefined;
 
   /**
    * 上一次 render 时，输出行号 -> 选项下标 的映射。
@@ -112,6 +116,12 @@ export class AskUserFlow {
 
   get isTyping(): boolean {
     return this.#typing;
+  }
+
+  /** 0-based line index and visible column inside render() output. */
+  cursorPosition(): { line: number; column: number } | undefined {
+    if (this.#cursorLine === undefined || this.#cursorColumn === undefined) return undefined;
+    return { line: this.#cursorLine, column: this.#cursorColumn };
   }
 
   get escArmed(): boolean {
@@ -315,6 +325,8 @@ export class AskUserFlow {
   render(width: number): string[] {
     this.#optionRows.clear();
     this.#summaryRows.clear();
+    this.#cursorLine = undefined;
+    this.#cursorColumn = undefined;
 
     const inner = Math.max(20, width - 4);
     if (this.isSummary) return this.#renderSummary(inner);
@@ -409,7 +421,22 @@ export class AskUserFlow {
     lines.push("");
     const shown =
       question.secret === true ? "•".repeat(Array.from(this.#buffer).length) : this.#buffer;
-    lines.push(`${fg(COLOR.prompt)}▸${RESET} ${shown}\x1b[7m \x1b[27m`);
+    const prefix = `${fg(COLOR.prompt)}▸${RESET} `;
+    const prefixWidth = visibleWidth(prefix);
+    const view = inputViewport(shown, Array.from(shown).length, Math.max(1, inner - prefixWidth));
+    const chars = Array.from(shown);
+    let rendered = "";
+    let used = 0;
+    for (let index = view.start; index < chars.length; index += 1) {
+      const char = chars[index]!;
+      const width = visibleWidth(char);
+      if (used + width > inner - prefixWidth) break;
+      rendered += char;
+      used += width;
+    }
+    this.#cursorLine = lines.length;
+    this.#cursorColumn = prefixWidth + used;
+    lines.push(`${prefix}${rendered}`);
     lines.push("");
     lines.push(`${DIM}Enter 确认   Backspace 删除   Esc 取消${RESET}`);
     return lines;

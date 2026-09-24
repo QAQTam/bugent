@@ -11,7 +11,7 @@
 
 ```bash
 bun test
-# 495 pass / 0 fail
+# 501 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -519,10 +519,10 @@ bun run package:bugent
 
 ```text
 dist/bugent/bugent-0.0.0-linux-x64/bugent
-sha256: 2e4e68e378a06cbab3e626c1897e5a03293b8dad3744176ed889af71c15a10a4
+sha256: 1ac8d0d0c48b2d72af140f01a19a7faba481d185a335e44887d7748d094ed061
 
 dist/bugent/bugent-0.0.0-linux-x64.tar.gz
-sha256: f13b7644623a6818f0734265604e589b309ff332a1cb469871473e0ba9811876
+sha256: 19bb6da77b7eede7267d4a0b484f3a7f2cb30e24a52798eb211894261badf5e5
 ```
 
 构建工具链注意：
@@ -584,7 +584,7 @@ MCP 接线：
 
 ```text
 bun test
-# 495 pass / 0 fail
+# 501 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -627,7 +627,26 @@ disable_defaults = false
 disabled = ["legacy-skill"]
 ```
 
-## 10.4 buTUI experimental entry
+## 10.4 旧 TUI 输入法光标
+
+旧 TUI 原先隐藏硬件光标，只用反显单元格模拟输入光标。IME 候选窗锚定的是
+终端真实光标，因此候选窗会停留在上一帧末尾。
+
+修复：
+
+- 主输入框每帧通过 `Terminal.setCursor(row, column)` 把真实光标移动到逻辑插入点；
+- 光标列由 `src/tui/input-view.ts` 统一计算，覆盖 CJK/emoji 宽字符和水平滚动；
+- 输入行不再绘制反显块，真实光标直接覆盖当前字符/空白；
+- 弹窗打开时隐藏真实光标；
+- `ask_user` 的自由文本输入也暴露逻辑光标位置，由同一套 dialog 坐标换算定位。
+
+回归测试：
+
+- `tests/input-view.test.ts` 覆盖宽度与滚动；
+- `tests/tui-pty.test.ts` 验证 PTY 中真实光标序列随输入和左移变化；
+- `tests/ask-user.test.ts` 验证输入态暴露硬件光标位置。
+
+## 10.5 buTUI experimental entry
 
 已引入独立实验入口，现有 `src/tui` 仍为默认 UI，两套 UI 并行维护：
 

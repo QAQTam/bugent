@@ -103,4 +103,21 @@ export class Terminal {
   write(text: string): void {
     process.stdout.write(text);
   }
+
+  /**
+   * Move the real terminal cursor to the logical input position.
+   *
+   * IME candidate windows and some terminal accessibility tools anchor to the
+   * hardware cursor, not to a reverse-video cell drawn in the frame buffer.
+   * Passing no position hides the cursor while a dialog owns the screen.
+   */
+  setCursor(row?: number, column?: number): void {
+    if (row === undefined || column === undefined) {
+      this.write("\x1b[?25l");
+      return;
+    }
+    const safeRow = Math.max(1, row);
+    const safeColumn = Math.max(1, column);
+    this.write(`\x1b[${safeRow};${safeColumn}H\x1b[?25h`);
+  }
 }
