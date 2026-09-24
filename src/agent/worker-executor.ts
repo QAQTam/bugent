@@ -10,6 +10,7 @@ import { AgentSession } from "../core/session.ts";
 import { runUserTurn } from "../core/loop.ts";
 import type { ModelClient } from "../provider/types.ts";
 import { createBashTool } from "../tools/bash.ts";
+import { createApplyPatchTool } from "../tools/apply-patch.ts";
 import {
   createEditFileTool,
   createReadFileTool,
@@ -79,7 +80,8 @@ function workerRegistry(cwd: string): ToolRegistry {
   const registry = new ToolRegistry()
     .register(createReadFileTool())
     .register(createWriteFileTool())
-    .register(createEditFileTool());
+    .register(createEditFileTool())
+    .register(createApplyPatchTool());
   if (isSandboxAvailable()) {
     registry.register(
       createBashTool(

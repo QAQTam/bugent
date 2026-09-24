@@ -1,0 +1,87 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createApplyPatchTool, APPLY_PATCH_TOOL_NAME } from "../src/tools/apply-patch.ts";
+import { createWorkspaceChange } from "../src/core/workspace.ts";
+import type { ToolCtx } from "../src/tools/types.ts";
+
+const dirs: string[] = [];
+
+afterEach(async () => {
+  for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+async function workspace(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "bugent-apply-patch-tool-"));
+  dirs.push(dir);
+  return dir;
+}
+
+describe("apply_patch tool", () => {
+  test("uses Codex-compatible tool name, description and permission", () => {
+    const tool = createApplyPatchTool();
+    expect(tool.name).toBe(APPLY_PATCH_TOOL_NAME);
+    expect(tool.description).toContain("*** Begin Patch");
+    expect(tool.description).toContain("*** Update File:");
+    expect(tool.defaultPermission).toBe("ask");
+    expect(tool.requires).toEqual({ write: true });
+  });
+
+  test("applies a multi-file patch and reports workspace edits", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "a.txt"), "one\n", "utf8");
+    const edits: unknown[] = [];
+    const ctx: ToolCtx = {
+      cwd,
+      signal: new AbortController().signal,
+      callId: "call-1",
+      sessionId: "session-1",
+      onWorkspaceChange: (edit) => edits.push(edit),
+    };
+    const tool = createApplyPatchTool();
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: b.txt",
+      "+two",
+      "*** Update File: a.txt",
+      "@@",
+      "-one",
+      "+ONE",
+      "*** End Patch",
+    ].join("\n");
+
+    const output = await tool.run({ patch }, ctx);
+    expect(output).toContain("Success. Updated the following files:");
+    expect(output).toContain("A b.txt");
+    expect(output).toContain("M a.txt");
+    expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("ONE\n");
+    expect(await readFile(join(cwd, "b.txt"), "utf8")).toBe("two\n");
+    expect(edits).toHaveLength(2);
+
+    const change = createWorkspaceChange(edits as never);
+    expect(change?.files.map((file) => file.path)).toEqual(["b.txt", "a.txt"]);
+  });
+
+  test("derives file-level resource locks and rejects path escape", async () => {
+    const cwd = await workspace();
+    const tool = createApplyPatchTool();
+    const patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch";
+    const ctx: ToolCtx = {
+      cwd,
+      signal: new AbortController().signal,
+      callId: "call-1",
+      sessionId: "session-1",
+    };
+    expect(tool.resources?.({ patch }, ctx)).toEqual([
+      { key: "workspace/a.txt", access: "write" },
+    ]);
+
+    await expect(
+      tool.run(
+        { patch: "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch" },
+        ctx,
+      ),
+    ).rejects.toThrow(/越界/);
+  });
+});

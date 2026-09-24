@@ -14,6 +14,7 @@ import {
 import { createTodoWriteTool } from "./todo.ts";
 import { createAskUserTool } from "./ask_user.ts";
 import { createAgentTools, type AgentToolsOptions } from "./agent.ts";
+import { createApplyPatchTool } from "./apply-patch.ts";
 import { ToolRegistry } from "./types.ts";
 import type { PermissionRule } from "../permission/policy.ts";
 import type { GoalController } from "../goal/controller.ts";
@@ -67,6 +68,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     .register(createReadFileTool())
     .register(createWriteFileTool())
     .register(createEditFileTool())
+    .register(createApplyPatchTool())
     .register(
       createTodoWriteTool(
         options.goalController !== undefined

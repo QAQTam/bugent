@@ -325,10 +325,13 @@ decision = "ask"
 | `read_file` | 读文件，带行号，支持 `offset`/`limit` | 路径约束 |
 | `write_file` | 原子写（临时文件 + rename），自动建父目录 | 路径约束 |
 | `edit_file` | 精确字符串替换，不唯一时报错而非猜测 | 路径约束 |
+| `apply_patch` | Codex-compatible 多文件 patch；Add/Update/Delete/Move，原子应用并接入 undo | 路径约束 + 写锁 |
 | `todo_write` | 带 summary/id/completion 的待办清单，sticky 面板实时显示，进行中项带 shimmer | 无副作用，默认放行 |
 | `ask_user` | 分页问答表单（最多 5 题，选项 A~D + 自由回答） | 无副作用，默认放行 |
 | `skill__<name>__load` | 按需加载一个已发现 skill 的 `SKILL.md` 正文 | 固定只读 skill 文件，默认放行 |
 | `mcp__<server>__<tool>` | 调用 MCP server 暴露的工具 | 独立进程，由原生 sandbox capability grant 约束 |
+
+`apply_patch` 的兼容语法与匹配规则见 [`docs/apply-patch.md`](docs/apply-patch.md)。
 
 ### 输出折叠
 
