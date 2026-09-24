@@ -25,6 +25,7 @@ Minimal working state:
 - `AgentSession` + `runUserTurn`;
 - real `ToolRegistry`;
 - ledger-backed `StreamWindow` transcript with file spill/retention;
+- automatic bottom follow, PgUp/PgDn, and controller-driven redraw;
 - streaming assistant text and tool summaries;
 - live `apply_patch` Diff cards;
 - permission, mode-escalation, and network prompts in a focus-trapped Modal;
@@ -55,9 +56,9 @@ The transcript is projected through `StreamLedger` + `StreamWindow`; stable
 history can spill to `~/.bugent/butui/<session>/`. The experimental entry keeps
 the sidecars during the process and attempts cleanup on normal disposal.
 
-The sibling checkout is anchored to `QAQTam/buTUI@v0.2.0-exp`
-(`7896dab`, `fix(layout): isolate stream tail cache from committed lines`). It
-is not referenced through a GitHub package URL because `@butui/*` packages are
+The sibling checkout is anchored to `QAQTam/buTUI@v0.2.1-exp`
+(`2be2a14`, `fix(stream): preserve follow across revisions and resize`). It is
+not referenced through a GitHub package URL because `@butui/*` packages are
 still private workspace packages inside a monorepo; a repository-level git
 dependency cannot resolve those subpackages reliably.
 

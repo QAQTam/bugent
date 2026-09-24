@@ -14,6 +14,7 @@ import {
   createDiffStream,
   type DiffLine,
   type DiffStream,
+  type StreamWindowController,
 } from "@butui/stream";
 import { For, Show, createSignal, flush } from "solid-js";
 import { resolve } from "node:path";
@@ -66,6 +67,7 @@ const [prompt, setPrompt] = createSignal<PendingPrompt>();
 const promptQueue: PendingPrompt[] = [];
 const patchStreams = new Map<string, PatchStreamProgress>();
 let currentAbort: AbortController | undefined;
+let transcriptController: StreamWindowController | undefined;
 let app: TuiApp | undefined;
 
 function enqueuePrompt(next: PendingPrompt): void {
@@ -421,6 +423,9 @@ const createdApp = createTuiApp({
             revision={transcript.revision}
             scrollbar
             smooth
+            onController={controller => {
+              transcriptController = controller;
+            }}
           />
           <Show when={toolCards().length > 0}>
             <box gap={1}>
@@ -562,6 +567,13 @@ const createdApp = createTuiApp({
     }
     if (event.name === "escape" && busy()) {
       currentAbort?.abort();
+      return true;
+    }
+    if (event.name === "pageup" || event.name === "pagedown") {
+      if (transcriptController === undefined) return false;
+      void transcriptController
+        .pageBy(event.name === "pageup" ? -1 : 1)
+        .catch(() => {});
       return true;
     }
     return false;
