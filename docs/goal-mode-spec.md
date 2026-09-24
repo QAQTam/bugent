@@ -1,6 +1,6 @@
 # bugent Goal Mode 2.0 Spec
 
-> 状态：设计稿
+> 状态：P0～P6 已落地（P5 auto_continue 默认关闭）
 > 目标版本：bugent `0.1.0`
 > 基线：bugent `0.0.0` / schema v9
 > 参考：Codex thread goal、continuation、budget accounting、blocked audit，以及 bugent 现有 session / tool batch / branch / todo / ask_user。

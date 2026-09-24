@@ -382,6 +382,11 @@ export function createTodoWriteTool(
     // 无副作用，只改显示状态 —— 不该为它打断用户
     needsSandbox: false,
     defaultPermission: "allow",
+    resources() {
+      return options.goalController === undefined
+        ? []
+        : [{ key: "goal", access: "write" as const }];
+    },
 
     describe(input: unknown) {
       const raw = (input as TodoWriteInput | null)?.todos;

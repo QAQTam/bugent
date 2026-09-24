@@ -355,14 +355,16 @@ function renderContinuation(goal: Goal): string {
 export const GOAL_INITIALIZATION_INSTRUCTION = [
   "# Explicit Goal Initialization",
   "",
-  "用户刚刚显式执行了 `/goal`。当前任务只做 Goal Contract 初始化，不要开始实现。",
+  "用户刚刚显式执行了 `/goal`。先完成 Goal Contract、Plan、Checkpoint 和首个 Todo，再停止等待执行。",
   "",
   "步骤：",
   "1. 先从现有对话、工作区和最近消息中检查已知信息。",
   "2. 只对无法推断且会改变方向的信息调用 `ask_user`；不要机械地重复提问。",
   "3. 汇总 objective、success_criteria、constraints、non_goals、risk_policy、token_budget。",
   "4. 调用 `create_goal` 一次。不要在普通对话中调用它。",
-  "5. 创建成功后停止，不要立即执行计划或改代码；Plan/Checkpoint/Todo 属于后续阶段。",
+  "5. 调用 `update_plan`，给出 phases、checkpoints、assumptions；首次必须包含 Checkpoint。",
+  "6. 只为第一个 Checkpoint 调用 `todo_write`，并使用返回的 checkpointId。",
+  "7. 确认 Goal 进入 active/executing 后停止，不要立即改代码。",
   "",
   "Goal Contract 必须可验证；口头描述不算证据要求。",
 ].join("\n");
