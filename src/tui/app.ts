@@ -31,7 +31,7 @@ import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
-import { inputViewport } from "./input-view.ts";
+import { inputIndexAt, layoutInput } from "./input-view.ts";
 import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
@@ -272,6 +272,8 @@ export class TuiApp implements TuiInteraction {
   /** Real terminal cursor position for IME/accessibility anchoring. */
   #inputCursorRow: number | undefined;
   #inputCursorColumn = 3;
+  /** Cursor row within the visible input panel. */
+  #inputCursorOffset = 0;
   /** 主区滚动、钉底和历史抽屉的统一状态。 */
   #viewState: HistoryViewState = initialHistoryView();
   /** 上一次布局总行数，用于回看时抵消新增内容造成的位移。 */
@@ -578,6 +580,10 @@ export class TuiApp implements TuiInteraction {
         this.#submit();
         return;
 
+      case "newline":
+        this.#insert("\n");
+        return;
+
       case "backspace": {
         if (this.#cursor === 0) return;
         const chars = Array.from(this.#input);
@@ -607,22 +613,29 @@ export class TuiApp implements TuiInteraction {
         this.#render();
         return;
 
-      case "home":
-        this.#cursor = 0;
+      case "home": {
+        const layout = this.#inputLayout();
+        this.#cursor = layout.starts[layout.cursorRow] ?? 0;
         this.#render();
         return;
+      }
 
-      case "end":
-        this.#cursor = Array.from(this.#input).length;
+      case "end": {
+        const layout = this.#inputLayout();
+        const line = layout.lines[layout.cursorRow] ?? "";
+        this.#cursor = inputIndexAt(layout, layout.cursorRow, visibleWidth(line));
         this.#render();
         return;
+      }
 
       case "up":
+        if (this.#moveInputVertical(-1)) return;
         if (this.#viewState.historyOpen) this.#scrollHistoryBy(1);
         else this.#scrollBy(1);
         return;
 
       case "down":
+        if (this.#moveInputVertical(1)) return;
         if (this.#viewState.historyOpen) this.#scrollHistoryBy(-1);
         else this.#scrollBy(-1);
         return;
@@ -648,8 +661,7 @@ export class TuiApp implements TuiInteraction {
       }
 
       case "paste": {
-        // 当前输入框是单行模型：多行粘贴折成空格，不能把内部换行当成 Enter 提交。
-        this.#insert(key.value.replace(/\r\n?|\n/g, " "));
+        this.#insert(key.value.replace(/\r\n?/g, "\n"));
         return;
       }
     }
@@ -829,6 +841,27 @@ export class TuiApp implements TuiInteraction {
     this.#input = chars.join("");
     this.#cursor += Array.from(text).length;
     this.#render();
+  }
+
+  #inputLayout() {
+    const available = Math.max(1, this.#terminal.size.width - 4);
+    return layoutInput(this.#input, this.#cursor, available);
+  }
+
+  /** Move across visual rows; return false only when the input is one row. */
+  #moveInputVertical(delta: number): boolean {
+    const layout = this.#inputLayout();
+    if (layout.lines.length <= 1) return false;
+    const targetRow = Math.max(
+      0,
+      Math.min(layout.cursorRow + delta, layout.lines.length - 1),
+    );
+    if (targetRow === layout.cursorRow) return true;
+    const targetLine = layout.lines[targetRow] ?? "";
+    const targetColumn = Math.min(layout.cursorColumn, visibleWidth(targetLine));
+    this.#cursor = inputIndexAt(layout, targetRow, targetColumn);
+    this.#render();
+    return true;
   }
 
   #scrollBy(delta: number): void {
@@ -2286,15 +2319,18 @@ export class TuiApp implements TuiInteraction {
     }
 
     const inputTopRow = bodyHeight + todoPanel.length + thinkingBlock.length + 2;
+    const inputRows = this.#composeInput(width);
     this.#inputCursorRow =
-      height >= INPUT_ROWS + 2 && inputTopRow <= height ? inputTopRow : undefined;
+      height >= INPUT_ROWS + 2 && inputTopRow + INPUT_ROWS - 1 <= height
+        ? inputTopRow + this.#inputCursorOffset
+        : undefined;
 
     return [
       this.#composeStatus(width),
       ...body,
       ...todoPanel,
       ...thinkingBlock,
-      ...this.#composeInput(width),
+      ...inputRows,
     ];
   }
 
@@ -2427,19 +2463,37 @@ export class TuiApp implements TuiInteraction {
   }
 
   /**
-   * 输入面板：4 行"阴影"区块。
+   * 输入面板：固定 4 行视窗。
    *
-   * 之前只有一行 `› ___`，太单薄；现在做成带底色的面板 ——
-   * 第一行放输入内容，其余三行留白（同时也给光标和长文本留了呼吸空间）。
+   * 输入内容按终端宽度折行，显式换行也会产生新视觉行；超过 4 行时只滚动
+   * 显示光标附近的行。真实光标仍由 Terminal.setCursor 定位。
    */
   #composeInput(width: number): string[] {
     // 末尾留一格：写满整行会让终端自动折行，把布局顶乱
     const fill = Math.max(0, width - 1);
     const background = bg(COLOR.inputBg);
+    const available = Math.max(1, width - 4);
+    const layout = layoutInput(this.#input, this.#cursor, available);
+    const maxStart = Math.max(0, layout.lines.length - INPUT_ROWS);
+    const startRow = Math.max(
+      0,
+      Math.min(layout.cursorRow - INPUT_ROWS + 1, maxStart),
+    );
+    this.#inputCursorOffset = layout.cursorRow - startRow;
+    this.#inputCursorColumn = layout.cursorColumn + 3;
 
     const rows: string[] = [];
     for (let index = 0; index < INPUT_ROWS; index += 1) {
-      const raw = index === 0 ? this.#composeInputText(width) : "";
+      const lineIndex = startRow + index;
+      const text = layout.lines[lineIndex];
+      let raw = "";
+      if (text !== undefined) {
+        const prefix =
+          lineIndex === 0
+            ? `${fg(COLOR.inputEdge)}▌${RESET} `
+            : "  ";
+        raw = `${prefix}${fg(COLOR.inputText)}${text}${RESET}`;
+      }
 
       // 关键：RESET([0m) 会把**背景色一起清掉**，于是 `▌` 之后的
       // 整行都失去底色，看起来就是"输入框和灰蓝色分离"。
@@ -2450,29 +2504,6 @@ export class TuiApp implements TuiInteraction {
       rows.push(`${background}${content}${padding}${RESET}`);
     }
     return rows;
-  }
-
-  /** 第一行的内容：提示符 + 输入文本；真实光标由 Terminal.setCursor 定位。 */
-  #composeInputText(width: number): string {
-    const edge = `${fg(COLOR.inputEdge)}▌${RESET} `;
-    const textColor = fg(COLOR.inputText);
-    const available = Math.max(1, width - 4);
-    const chars = Array.from(this.#input);
-    const view = inputViewport(this.#input, this.#cursor, available);
-    this.#inputCursorColumn = view.cursorColumn;
-
-    let used = 0;
-    let rendered = "";
-    for (let i = view.start; i < chars.length; i += 1) {
-      const char = chars[i]!;
-      const charWidth = visibleWidth(char);
-      if (used + charWidth > available) break;
-      rendered += char;
-      used += charWidth;
-    }
-    if (this.#cursor >= chars.length) rendered += " ";
-
-    return `${edge}${textColor}${rendered}${RESET}`;
   }
 
   /**

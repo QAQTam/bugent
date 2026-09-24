@@ -59,6 +59,13 @@ describe("P5 · 按键解析", () => {
     expect(decoder.push("\t")).toEqual([{ type: "tab" }]);
   });
 
+  test("Ctrl+J / Alt+Enter / 增强键盘协议产生换行而非提交", () => {
+    expect(new KeyDecoder().push("\n")).toEqual([{ type: "newline" }]);
+    expect(new KeyDecoder().push("\x1b\r")).toEqual([{ type: "newline" }]);
+    expect(new KeyDecoder().push("\x1b[13;2u")).toEqual([{ type: "newline" }]);
+    expect(new KeyDecoder().push("\x1b[27;2;13~")).toEqual([{ type: "newline" }]);
+  });
+
   test("bracketed paste 整体成为一个 paste 事件，内部换行不触发提交", () => {
     const decoder = new KeyDecoder();
     expect(decoder.push("\x1b[200~hello\nworld\x1b[201~")).toEqual([

@@ -90,7 +90,9 @@ const HELP = `bugent — 终端里的 AI agent
       --max-steps <n>        单轮最大工具往返次数（默认 800）
   -h, --help                 显示帮助
 
-TUI 内斜杠命令：
+TUI 内：
+  Enter             发送消息
+  Ctrl+J / Alt+Enter 输入换行
   /                 打开命令菜单
   /context          查看当前 session 的 provider / model / sandbox
   /mode <mode>      切换当前 session 的沙箱档位
@@ -525,7 +527,7 @@ async function main(): Promise<void> {
               : `${policy.ruleCount} 条规则${policy.ruleCount === 0 ? "（放行交给档位判断）" : ""}`
           }`,
           "",
-          "输入消息开始对话；输入 / 查看命令；`/context` 查看当前 session 配置；运行中按 `ESC` 中断。",
+          "输入消息开始对话；输入 / 查看命令；`/context` 查看当前 session 配置；Enter 发送，Ctrl+J / Alt+Enter 换行；运行中按 `ESC` 中断。",
           "右键消息可撤回 / 分叉 / 重试（原分支会保留）。",
         ].join("\n"),
         ...(audit !== undefined ? { audit } : {}),

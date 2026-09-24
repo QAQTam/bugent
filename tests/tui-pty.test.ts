@@ -50,7 +50,10 @@ describe("TUI PTY 冒烟", () => {
 
         output = "";
         terminal.write("\x1b[200~one\ntwo\x1b[201~");
-        await waitFor(() => output, (text) => strip(text).includes("one two"));
+        await waitFor(
+          () => output,
+          (text) => strip(text).includes("one") && strip(text).includes("two"),
+        );
         expect(strip(output)).not.toContain("turn 1");
 
         terminal.write("\x03");
@@ -108,6 +111,56 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
+    "Ctrl+J 输入多行，Enter 一次性提交",
+    async () => {
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 60,
+        rows: 14,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, TERM: "xterm-256color" },
+        terminal,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("line1\nline2");
+        await waitFor(
+          () => output,
+          (text) => strip(text).includes("line1") && strip(text).includes("line2"),
+        );
+        expect(output).toContain("\x1b[12;3H\x1b[?25h");
+
+        output = "";
+        terminal.write("\r");
+        await waitFor(
+          () => output,
+          (text) => strip(text).includes("[mock] line1") && strip(text).includes("line2"),
+        );
+        expect(strip(output)).toContain("turn 1");
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
     "消息操作按钮支持 hover、按下和抬起确认",
     async () => {
       const home = await mkdtemp(join(tmpdir(), "bugent-hover-"));
@@ -131,10 +184,10 @@ describe("TUI PTY 冒烟", () => {
 
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
-        terminal.write("hello\n");
+        terminal.write("hello\r");
         await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
 
-        terminal.write("\x1b[<2;20;11M\x1b[<2;20;11m");
+        terminal.write("\x1b[<2;20;12M\x1b[<2;20;12m");
         await waitFor(() => output, (text) => strip(text).includes("消息操作"));
         expect(output).toContain(bg(COLOR.dialogBg));
 
@@ -187,27 +240,27 @@ describe("TUI PTY 冒烟", () => {
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
-        terminal.write("/\n");
+        terminal.write("/\r");
         await waitFor(() => output, (text) => strip(text).includes("选择命令"));
         await waitFor(() => output, (text) => strip(text).includes("/context"));
 
-        terminal.write("a\n");
+        terminal.write("a\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("会话上下文"));
         await waitFor(() => output, (text) => strip(text).includes("sandbox"));
 
         terminal.write("m");
         await waitFor(() => output, (text) => strip(text).includes("选择要调整的配置"));
-        terminal.write("a\n");
+        terminal.write("a\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("选择当前 session 的沙箱档位"));
-        terminal.write("a\n");
+        terminal.write("a\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("当前 session 配置已更新"));
         await waitFor(() => output, (text) => strip(text).includes("read-only"));
@@ -248,26 +301,26 @@ describe("TUI PTY 冒烟", () => {
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
-        terminal.write("/key\n");
+        terminal.write("/key\r");
         await waitFor(() => output, (text) => strip(text).includes("输入 API key"));
-        terminal.write("sk-secret-123\n");
+        terminal.write("sk-secret-123\r");
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("API key 仅当前进程生效"));
         expect(strip(output)).not.toContain("sk-secret-123");
 
         output = "";
-        terminal.write("/model\n");
+        terminal.write("/model\r");
         await waitFor(() => output, (text) => strip(text).includes("输入模型名"));
-        terminal.write("echo2\n");
+        terminal.write("echo2\r");
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("mock/echo2"));
 
         terminal.write("\x03");
@@ -307,42 +360,42 @@ describe("TUI PTY 冒烟", () => {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
         output = "";
-        terminal.write("/provider\n");
+        terminal.write("/provider\r");
         await waitFor(() => output, (text) => strip(text).includes("选择当前 session 的 provider"));
-        terminal.write("c\n");
+        terminal.write("c\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("输入 provider id"));
-        terminal.write("localnew\n");
+        terminal.write("localnew\r");
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("选择 provider endpoint"));
-        terminal.write("b\n");
+        terminal.write("b\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("输入 base URL"));
-        terminal.write("\n");
+        terminal.write("\r");
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("配置高级字段？"));
-        terminal.write("a\n");
+        terminal.write("a\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("输入 API key"));
-        terminal.write("\n");
+        terminal.write("\r");
         output = "";
-        terminal.write("\n");
+        terminal.write("\r");
         await waitFor(() => output, (text) => strip(text).includes("汇总"));
-        terminal.write("\n");
+        terminal.write("\r");
 
         await waitFor(() => output, (text) => strip(text).includes("localnew/echo"));
 
@@ -383,8 +436,8 @@ describe("TUI PTY 冒烟", () => {
 
         // 多轮消息把 transcript 推过三屏阈值。
         terminal.write(
-          Array.from({ length: 10 }, (_, index) => `m${String(index + 1).padStart(2, "0")}`).join("\n") +
-            "\n",
+          Array.from({ length: 10 }, (_, index) => `m${String(index + 1).padStart(2, "0")}`).join("\r") +
+            "\r",
         );
         await waitFor(() => output, (text) => strip(text).includes("turn 10"));
 
@@ -400,7 +453,7 @@ describe("TUI PTY 冒烟", () => {
         await waitFor(() => output, (text) => text.length > 0);
         expect(strip(output)).not.toContain("更早消息 · ↑↓");
 
-        terminal.write("/exit\n");
+        terminal.write("/exit\r");
         expect(await proc.exited).toBe(0);
       } finally {
         if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");

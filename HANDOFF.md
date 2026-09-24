@@ -11,7 +11,7 @@
 
 ```bash
 bun test
-# 501 pass / 0 fail
+# 507 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -519,10 +519,10 @@ bun run package:bugent
 
 ```text
 dist/bugent/bugent-0.0.0-linux-x64/bugent
-sha256: 1ac8d0d0c48b2d72af140f01a19a7faba481d185a335e44887d7748d094ed061
+sha256: 1d5d7dee89b6a9457fdf48282c1385467b87fb08ff71baa33758b0850d0ff54e
 
 dist/bugent/bugent-0.0.0-linux-x64.tar.gz
-sha256: 19bb6da77b7eede7267d4a0b484f3a7f2cb30e24a52798eb211894261badf5e5
+sha256: a5ccee471b78e1242e045a0317d10e6fdcb9a9e0bfc9bd84d8c5ae96eb5edbbb
 ```
 
 构建工具链注意：
@@ -584,7 +584,7 @@ MCP 接线：
 
 ```text
 bun test
-# 501 pass / 0 fail
+# 507 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -627,7 +627,7 @@ disable_defaults = false
 disabled = ["legacy-skill"]
 ```
 
-## 10.4 旧 TUI 输入法光标
+## 10.4 旧 TUI 输入法光标与多行输入
 
 旧 TUI 原先隐藏硬件光标，只用反显单元格模拟输入光标。IME 候选窗锚定的是
 终端真实光标，因此候选窗会停留在上一帧末尾。
@@ -635,15 +635,25 @@ disabled = ["legacy-skill"]
 修复：
 
 - 主输入框每帧通过 `Terminal.setCursor(row, column)` 把真实光标移动到逻辑插入点；
-- 光标列由 `src/tui/input-view.ts` 统一计算，覆盖 CJK/emoji 宽字符和水平滚动；
+- 光标列由 `src/tui/input-view.ts` 统一计算，覆盖 CJK/emoji 宽字符和折行；
 - 输入行不再绘制反显块，真实光标直接覆盖当前字符/空白；
 - 弹窗打开时隐藏真实光标；
 - `ask_user` 的自由文本输入也暴露逻辑光标位置，由同一套 dialog 坐标换算定位。
 
+多行输入：
+
+- `Ctrl+J`、`Alt+Enter` 插入换行；增强键盘协议下的 Shift+Enter 也映射为换行；
+- 普通 `Enter` 仍然提交；
+- 输入框固定 4 行视窗，按终端宽度自动折行，超过 4 行时跟随光标滚动；
+- `Up/Down` 在多行/折行内容中移动视觉行，单行时仍保留历史滚动；
+- bracketed paste 保留内部换行，不再折叠成空格；
+- `Home/End` 按当前视觉行移动。
+
 回归测试：
 
-- `tests/input-view.test.ts` 覆盖宽度与滚动；
-- `tests/tui-pty.test.ts` 验证 PTY 中真实光标序列随输入和左移变化；
+- `tests/input-view.test.ts` 覆盖多行、折行、CJK 宽字符和行列映射；
+- `tests/tui.test.ts` 覆盖 Ctrl+J / Alt+Enter / 增强键盘协议；
+- `tests/tui-pty.test.ts` 验证真实 PTY 中多行输入与一次提交；
 - `tests/ask-user.test.ts` 验证输入态暴露硬件光标位置。
 
 ## 10.5 buTUI experimental entry

@@ -12,6 +12,7 @@ export type Key =
   | { type: "text"; value: string }
   | { type: "paste"; value: string }
   | { type: "enter" }
+  | { type: "newline" }
   | { type: "backspace" }
   | { type: "delete" }
   | { type: "tab" }
@@ -73,6 +74,24 @@ function csiToKey(final: string, params: string): Key | undefined {
   if (final === "M" || final === "m") {
     const mouse = parseMouse(params, final);
     if (mouse !== undefined) return mouse;
+  }
+
+  if (final === "u") {
+    const parts = params.split(";").map((part) => Number.parseInt(part, 10));
+    const codePoint = parts[0];
+    if (codePoint === 13) {
+      return parts.length === 1 ? { type: "enter" } : { type: "newline" };
+    }
+    if (codePoint !== undefined && Number.isFinite(codePoint) && codePoint >= 0x20) {
+      return { type: "text", value: String.fromCodePoint(codePoint) };
+    }
+    return undefined;
+  }
+
+  if (final === "~") {
+    const parts = params.split(";").map((part) => Number.parseInt(part, 10));
+    if (parts[0] === 27 && parts[2] === 13) return { type: "newline" };
+    if (parts[0] === 13 && parts.length > 1) return { type: "newline" };
   }
 
   switch (final) {
@@ -139,8 +158,13 @@ export class KeyDecoder {
 
       const code = char.charCodeAt(0);
 
-      if (code === 0x0d || code === 0x0a) {
+      if (code === 0x0d) {
         keys.push({ type: "enter" });
+        i += 1;
+        continue;
+      }
+      if (code === 0x0a) {
+        keys.push({ type: "newline" });
         i += 1;
         continue;
       }
@@ -194,6 +218,11 @@ export class KeyDecoder {
     const second = this.#pending[index + 1];
 
     if (second === undefined) return undefined; // 可能是裸 ESC，交给 flush
+
+    // Alt/Option+Enter is encoded as ESC followed by the Enter byte.
+    if (second === "\r" || second === "\n") {
+      return { keys: [{ type: "newline" }], next: index + 2 };
+    }
 
     if (second === "[") {
       const start = index + 2;
