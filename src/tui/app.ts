@@ -2604,11 +2604,43 @@ export class TuiApp implements TuiInteraction {
       }
       this.#render();
 
-      // 用户输入始终优先于 Goal continuation。
+      // 用户输入始终优先于 Goal continuation / context refresh。
       if (completed && !aborted) {
         if (this.#session.queuedUserCount > 0) this.#drainQueuedUser();
-        else if (failure === undefined) this.#maybeContinueGoal();
+        else if (failure === undefined) {
+          if (this.#goalController?.shouldAutoRefreshContext() === true) {
+            void this.#refreshGoalContext();
+          } else {
+            this.#maybeContinueGoal();
+          }
+        }
       }
+    }
+  }
+
+  async #refreshGoalContext(): Promise<void> {
+    const controller = this.#goalController;
+    if (controller === undefined || this.#busy || this.#session.queuedUserCount > 0) return;
+    this.#busy = true;
+    this.#activity = { state: "goal_handoff", detail: "创建 Context Epoch" };
+    this.#render(true);
+    try {
+      const epoch = await controller.createContextEpoch("checkpoint");
+      if (this.#switchRuntime(epoch.branchId, `Checkpoint 后已切换 Context Epoch ${epoch.epochId}`)) {
+        this.#refreshGoalStatus();
+        this.#render(true);
+      }
+    } catch (error) {
+      this.#transcript.pushError(
+        `Context Epoch 创建失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+      this.#render(true);
+    } finally {
+      this.#busy = false;
+      this.#activity = { state: "idle" };
+      this.#refreshGoalStatus();
+      this.#render(true);
+      if (!this.#busy && this.#session.queuedUserCount === 0) this.#maybeContinueGoal();
     }
   }
 

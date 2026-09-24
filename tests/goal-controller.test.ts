@@ -29,7 +29,14 @@ afterEach(async () => {
   dirs.length = 0;
 });
 
-async function setup(options: { reviewRunner?: ReviewRunner; cwd?: string } = {}): Promise<{
+async function setup(
+  options: {
+    reviewRunner?: ReviewRunner;
+    cwd?: string;
+    contextRefresh?: "checkpoint" | "threshold" | "manual";
+    handoffRoot?: string;
+  } = {},
+): Promise<{
   store: SessionStore;
   session: AgentSession;
   controller: GoalController;
@@ -57,7 +64,12 @@ async function setup(options: { reviewRunner?: ReviewRunner; cwd?: string } = {}
   const controller = new GoalController({
     repository: new GoalRepository(store.db),
     session,
+    store,
     cwd: options.cwd ?? "/tmp",
+    ...(options.handoffRoot !== undefined ? { handoffRoot: options.handoffRoot } : {}),
+    ...(options.contextRefresh !== undefined
+      ? { contextRefresh: options.contextRefresh }
+      : {}),
     ...(options.reviewRunner !== undefined ? { reviewRunner: options.reviewRunner } : {}),
     now: () => 100,
   });
@@ -808,6 +820,86 @@ describe("Goal P6 · final audit", () => {
       },
     };
   }
+
+  test("context_refresh=checkpoint 会在 Checkpoint 后标记 handoff", async () => {
+    const handoffRoot = await mkdtemp(join(tmpdir(), "bugent-goal-refresh-"));
+    dirs.push(handoffRoot);
+    const { controller } = await setup({
+      contextRefresh: "checkpoint",
+      handoffRoot,
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [
+              { criterion: "cp1 ok", status: "proven", evidence: ["ev"] },
+            ],
+            findings: [],
+            unresolvedQuestions: [],
+          };
+        },
+      },
+    });
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "两阶段 Goal",
+      objective: "验证 checkpoint refresh",
+      successCriteria: ["两阶段完成"],
+    });
+    controller.applyPlan({
+      phases: [
+        {
+          id: "p1",
+          title: "阶段",
+          objective: "两个 checkpoint",
+          checkpointIds: ["cp1", "cp2"],
+          dependsOn: [],
+          risks: [],
+          verification: ["test"],
+        },
+      ],
+      checkpoints: [
+        {
+          id: "cp1",
+          order: 1,
+          title: "第一段",
+          deliverable: "cp1",
+          acceptanceCriteria: ["cp1 ok"],
+          evidenceRequired: ["test"],
+        },
+        {
+          id: "cp2",
+          order: 2,
+          title: "第二段",
+          deliverable: "cp2",
+          acceptanceCriteria: ["cp2 ok"],
+          evidenceRequired: ["test"],
+          dependsOn: ["cp1"],
+        },
+      ],
+    });
+    controller.writeTodos({
+      checkpointId: "cp1",
+      todos: [
+        {
+          id: "t1",
+          content: "完成 cp1",
+          status: "completed",
+          completionEvidence: ["test"],
+        },
+      ],
+    });
+    await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "完成第一段",
+      evidence,
+    });
+    expect(controller.currentGoal()?.phase).toBe("handoff");
+    expect(controller.currentGoal()?.activeCheckpointId).toBe("cp2");
+
+    await controller.createContextEpoch("checkpoint");
+    expect(controller.currentGoal()?.phase).toBe("executing");
+  });
 
   test("最后一个 Checkpoint 完成后仍需 goal-level audit 才能 complete", async () => {
     const { controller } = await setup({ reviewRunner: approveRunner() });

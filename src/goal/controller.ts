@@ -109,6 +109,7 @@ export interface GoalControllerOptions {
   reviewRunner?: ReviewRunner;
   defaultReviewPolicy?: ReviewPolicy;
   maxTokenBudget?: number;
+  contextRefresh?: "checkpoint" | "threshold" | "manual";
   now?: () => number;
 }
 
@@ -378,6 +379,7 @@ export class GoalController {
   readonly reviewRunner: ReviewRunner | undefined;
   readonly defaultReviewPolicy: ReviewPolicy;
   readonly maxTokenBudget: number | undefined;
+  readonly contextRefresh: "checkpoint" | "threshold" | "manual";
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
   #waitingUser = false;
@@ -391,6 +393,7 @@ export class GoalController {
     this.reviewRunner = options.reviewRunner;
     this.defaultReviewPolicy = options.defaultReviewPolicy ?? "medium";
     this.maxTokenBudget = options.maxTokenBudget;
+    this.contextRefresh = options.contextRefresh ?? "manual";
     this.#now = options.now ?? Date.now;
   }
 
@@ -535,6 +538,10 @@ export class GoalController {
         handoffId: handoff.id,
         reason,
       });
+      if (goal.phase === "handoff") {
+        this.repository.setGoalPhase(goal.id, "epoch_switch");
+        this.repository.setGoalPhase(goal.id, "executing");
+      }
       return { branchId, epochId: epoch.id, handoffRevision: handoff.revision };
     } catch (error) {
       if (previousBranchId !== undefined) store.setActiveBranch(this.session.id, previousBranchId);
@@ -830,7 +837,10 @@ export class GoalController {
       this.repository.setGoalPhase(goal.id, "checkpoint_audit");
       if (next !== undefined) {
         this.repository.activateCheckpoint(next.id);
-        this.repository.setGoalPhase(goal.id, "executing");
+        this.repository.setGoalPhase(
+          goal.id,
+          this.contextRefresh === "checkpoint" ? "handoff" : "executing",
+        );
       }
       await this.syncHandoff("system");
       return {
@@ -884,7 +894,10 @@ export class GoalController {
       if (next !== undefined) {
         nextCheckpointId = next.id;
         this.repository.activateCheckpoint(next.id);
-        this.repository.setGoalPhase(goal.id, "executing");
+        this.repository.setGoalPhase(
+          goal.id,
+          this.contextRefresh === "checkpoint" ? "handoff" : "executing",
+        );
       }
     } else {
       updatedCheckpoint = this.repository.requireCheckpoint(checkpoint.id);
@@ -1070,6 +1083,15 @@ export class GoalController {
 
   get waitingUser(): boolean {
     return this.#waitingUser;
+  }
+
+  shouldAutoRefreshContext(): boolean {
+    const goal = this.currentGoal();
+    return (
+      this.contextRefresh === "checkpoint" &&
+      goal?.status === "active" &&
+      goal.phase === "handoff"
+    );
   }
 
   canAutoContinue(): { allowed: boolean; reason?: string } {

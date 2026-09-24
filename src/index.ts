@@ -438,6 +438,9 @@ async function main(): Promise<void> {
           ...(config.goals?.maxGoalTokenBudget !== undefined
             ? { maxTokenBudget: config.goals.maxGoalTokenBudget }
             : {}),
+          ...(config.goals?.contextRefresh !== undefined
+            ? { contextRefresh: config.goals.contextRefresh }
+            : {}),
           reviewRunner: createReadOnlyReviewRunner({
             client: reviewClient,
             model: reviewModel,
@@ -678,6 +681,9 @@ async function main(): Promise<void> {
                     : {}),
                   ...(config.goals?.maxGoalTokenBudget !== undefined
                     ? { maxGoalTokenBudget: config.goals.maxGoalTokenBudget }
+                    : {}),
+                  ...(config.goals?.contextRefresh !== undefined
+                    ? { goalContextRefresh: config.goals.contextRefresh }
                     : {}),
                   goalReviewClient: runtimeReviewClient,
                   goalReviewModel: runtimeReviewRef?.model ?? model,

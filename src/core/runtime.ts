@@ -114,6 +114,7 @@ export interface CreateSessionRuntimeOptions {
   maxGoalTokenBudget?: number;
   goalReviewClient?: ModelClient;
   goalReviewModel?: string;
+  goalContextRefresh?: "checkpoint" | "threshold" | "manual";
   cwd: string;
   store: SessionStore | undefined;
   /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
@@ -219,6 +220,9 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
             : {}),
           ...(options.maxGoalTokenBudget !== undefined
             ? { maxTokenBudget: options.maxGoalTokenBudget }
+            : {}),
+          ...(options.goalContextRefresh !== undefined
+            ? { contextRefresh: options.goalContextRefresh }
             : {}),
           reviewRunner: createReadOnlyReviewRunner({
             client: options.goalReviewClient ?? options.client,
