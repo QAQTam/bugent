@@ -16,6 +16,16 @@ import type { StoredMessage } from "./message.ts";
 import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 
+export interface ToolCallDelta {
+  id: string;
+  name: string;
+  argsDelta: string;
+  /** 当前累积的原始 arguments，供 freeform 工具的流式预览使用。 */
+  rawArgs: string;
+  /** 当前能解析出的部分参数；JSON 尚未闭合时可能是 `_raw` 包装。 */
+  args: unknown;
+}
+
 export interface LoopHooks {
   /** 用户消息落库后触发；TUI 用它拿到可点击的 msgid。 */
   onUser?(message: StoredMessage): void;
@@ -28,6 +38,12 @@ export interface LoopHooks {
    */
   onReasoning?(delta: string): void;
   onAssistant?(message: StoredMessage): void;
+  /**
+   * 工具参数流式增量。工具真正开始执行前即可用于临时卡片和进度预览。
+   *
+   * `reset=true` 表示 provider 重试，调用方应丢弃尚未落地的 provisional 卡片。
+   */
+  onToolCallDelta?(delta: ToolCallDelta & { reset?: boolean }): void;
   onToolCall?(call: ToolCall): void;
   /** 工具运行中的流式输出（仅用于 UI 展示，不影响回传给模型的结果）。 */
   onToolProgress?(call: ToolCall, chunk: string, stream: "stdout" | "stderr"): void;
@@ -93,6 +109,18 @@ function parseArgs(raw: string): unknown {
   }
 }
 
+function parseToolArgs(raw: string, tools: ToolRegistry | undefined, name: string): unknown {
+  const tool = tools?.get(name);
+  if (tool?.inputFormat === "freeform" && tool.parseInput !== undefined) {
+    try {
+      return tool.parseInput(raw);
+    } catch {
+      return { _raw: raw, _parseError: true };
+    }
+  }
+  return parseArgs(raw);
+}
+
 function isDeveloperRoleError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /developer/i.test(message) || /invalid.*role|role.*invalid|unsupported.*role/i.test(message);
@@ -119,6 +147,9 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     },
     onAssistant: (message) => {
       for (const group of active) group.onAssistant?.(message);
+    },
+    onToolCallDelta: (delta) => {
+      for (const group of active) group.onToolCallDelta?.(delta);
     },
     onToolCall: (call) => {
       for (const group of active) group.onToolCall?.(call);
@@ -238,12 +269,23 @@ export async function runTurn(
 
               case "tool_call": {
                 const existing = pending.get(chunk.id);
-                if (existing === undefined) {
-                  pending.set(chunk.id, { id: chunk.id, name: chunk.name, args: chunk.argsDelta });
-                } else {
-                  if (chunk.name.length > 0) existing.name = chunk.name;
-                  existing.args += chunk.argsDelta;
-                }
+                const acc =
+                  existing ??
+                  ({
+                    id: chunk.id,
+                    name: chunk.name,
+                    args: "",
+                  } satisfies PendingCall);
+                if (existing === undefined) pending.set(chunk.id, acc);
+                if (chunk.name.length > 0) acc.name = chunk.name;
+                acc.args += chunk.argsDelta;
+                hooks.onToolCallDelta?.({
+                  id: acc.id,
+                  name: acc.name,
+                  argsDelta: chunk.argsDelta,
+                  rawArgs: acc.args,
+                  args: parseToolArgs(acc.args, tools, acc.name),
+                });
                 break;
               }
 
@@ -273,6 +315,14 @@ export async function runTurn(
           text = "";
           reasoning = "";
           pending.clear();
+          hooks.onToolCallDelta?.({
+            id: "",
+            name: "",
+            argsDelta: "",
+            rawArgs: "",
+            args: undefined,
+            reset: true,
+          });
           reason = "stop";
         }
       }
@@ -280,7 +330,7 @@ export async function runTurn(
       const calls: ToolCall[] = [...pending.values()].map((acc) => ({
         id: acc.id,
         name: acc.name,
-        args: parseArgs(acc.args),
+        args: parseToolArgs(acc.args, tools, acc.name),
       }));
 
       const assistantMessage = session.appendAssistant(

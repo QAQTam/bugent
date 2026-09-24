@@ -8,6 +8,8 @@
  */
 
 import type { ToolCall, Usage } from "../provider/types.ts";
+import type { ToolCallDelta } from "../core/loop.ts";
+import type { PatchProgress } from "../patch/streaming-progress.ts";
 import { storedText, type MsgId, type StoredMessage } from "../core/message.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
 
@@ -34,6 +36,10 @@ export type DisplayItem =
       progressStream?: "stdout" | "stderr";
       /** 结构化展示信息；不进入模型上下文。 */
       presentation?: ToolPresentation;
+      /** 参数仍在流式到达，尚未进入真实工具执行。 */
+      streaming?: boolean;
+      /** apply_patch 参数增量解析出的实时 diff 统计。 */
+      patchProgress?: PatchProgress;
       /** 用户点击折叠行后展开全文（鼠标交互）。 */
       expanded: boolean;
     }
@@ -140,7 +146,81 @@ export class Transcript {
     this.#streamingIndex = undefined;
   }
 
+  #openToolIndex(callId: string): number | undefined {
+    for (let index = this.#items.length - 1; index >= 0; index -= 1) {
+      const item = this.#items[index];
+      if (item !== undefined && item.kind === "tool" && item.callId === callId && !item.done) {
+        return index;
+      }
+    }
+    return undefined;
+  }
+
+  /** 参数增量到达时创建或更新 provisional 工具卡片。 */
+  updateToolCallDelta(delta: ToolCallDelta): void {
+    if (delta.id.length === 0) return;
+    const existing = this.#openToolIndex(delta.id);
+    if (existing !== undefined) {
+      const item = this.#items[existing];
+      if (item !== undefined && item.kind === "tool") {
+        if (delta.name.length > 0) item.name = delta.name;
+        item.args = delta.args;
+        item.streaming = true;
+        this.#bump(existing);
+      }
+      return;
+    }
+
+    this.#push({
+      kind: "tool",
+      callId: delta.id,
+      name: delta.name || "tool",
+      args: delta.args,
+      output: "",
+      ok: true,
+      done: false,
+      streaming: true,
+      progress: "",
+      expanded: false,
+    });
+  }
+
+  /** provider 重试时丢弃尚未执行、也没有持久化 msgid 的 provisional 卡片。 */
+  clearStreamingTools(): void {
+    for (let index = this.#items.length - 1; index >= 0; index -= 1) {
+      const item = this.#items[index];
+      if (item !== undefined && item.kind === "tool" && item.streaming === true && !item.done) {
+        this.#items.splice(index, 1);
+        this.#versions.splice(index, 1);
+      }
+    }
+    this.#revision += 1;
+  }
+
+  setToolPatchProgress(callId: string, progress: PatchProgress): void {
+    const index = this.#openToolIndex(callId);
+    if (index === undefined) return;
+    const item = this.#items[index];
+    if (item !== undefined && item.kind === "tool") {
+      item.patchProgress = progress;
+      this.#bump(index);
+    }
+  }
+
   startTool(call: ToolCall, assistantMsgid?: MsgId): void {
+    const existing = this.#openToolIndex(call.id);
+    if (existing !== undefined) {
+      const item = this.#items[existing];
+      if (item !== undefined && item.kind === "tool") {
+        item.name = call.name;
+        item.args = call.args;
+        item.streaming = false;
+        if (assistantMsgid !== undefined) item.assistantMsgid = assistantMsgid;
+        this.#bump(existing);
+        return;
+      }
+    }
+
     this.#push({
       kind: "tool",
       callId: call.id,
@@ -199,6 +279,10 @@ export class Transcript {
         item.output = output;
         item.ok = ok;
         item.done = true;
+        item.streaming = false;
+        if (item.patchProgress !== undefined) {
+          item.patchProgress = { ...item.patchProgress, complete: true };
+        }
         if (msgid !== undefined) item.msgid = msgid;
         if (presentation !== undefined) item.presentation = presentation;
         this.#bump(i);

@@ -96,6 +96,18 @@ describe("P7 · write_file", () => {
     expect(await readFile(join(cwd, "c.txt"), "utf8")).toBe("new");
   });
 
+  test("覆盖时保留原文件权限", async () => {
+    if (process.platform === "win32") return;
+    const cwd = await workspace();
+    const path = join(cwd, "script.sh");
+    await writeFile(path, "#!/bin/sh\necho old\n", "utf8");
+    await chmod(path, 0o755);
+
+    await writeTool.run({ path: "script.sh", content: "#!/bin/sh\necho new\n" }, ctxFor(cwd));
+
+    expect((await stat(path)).mode & 0o777).toBe(0o755);
+  });
+
   test("写入后不留临时文件", async () => {
     const cwd = await workspace();
     await writeTool.run({ path: "d.txt", content: "x" }, ctxFor(cwd));

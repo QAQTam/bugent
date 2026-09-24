@@ -51,13 +51,13 @@ bun run src/index.ts --no-persist     # 不落盘
 bun test
 bun run typecheck
 
-# 编译 0.0.0 单文件二进制与发布归档
+# 编译 0.1.0 单文件二进制与发布归档
 bun run package:bugent
-./dist/bugent/bugent-0.0.0-linux-x64/bugent --version
+./dist/bugent/bugent-0.1.0-linux-x64/bugent --version
 ```
 
 单文件二进制内嵌 system prompt 和 `libbugent-sandbox.so`。首次启动时把原生
-provider 解包到 `~/.bugent/runtime/0.0.0/lib/`，因此 MCP 沙箱不依赖发布目录
+provider 解包到 `~/.bugent/runtime/0.1.0/lib/`，因此 MCP 沙箱不依赖发布目录
 旁边存在额外动态库。
 
 TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可用 `--resume` 回去）。

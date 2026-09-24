@@ -186,6 +186,53 @@ describe("P4 · agent loop", () => {
     expect(result.steps).toBe(3);
     expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
   });
+
+  test("freeform 工具通过 parseInput 接收原始 arguments，并发出流式增量", async () => {
+    const seenInput: string[] = [];
+    const deltas: string[] = [];
+    const freeformTool: Tool<string, string> = {
+      name: "freeform",
+      description: "test",
+      parameters: { type: "object", properties: {} },
+      inputFormat: "freeform",
+      parseInput(raw) {
+        const parsed = JSON.parse(raw) as { value: string };
+        return parsed.value;
+      },
+      describe() {
+        return { resource: "test", summary: "test" };
+      },
+      async run(input) {
+        seenInput.push(input);
+        return input;
+      },
+    };
+    const args = JSON.stringify({ value: "raw payload" });
+    const session = newSession([
+      {
+        chunks: [
+          { type: "tool_call", id: "c1", name: "freeform", argsDelta: args.slice(0, 5) },
+          { type: "tool_call", id: "c1", name: "freeform", argsDelta: args.slice(5) },
+          { type: "done", reason: "tool_calls" },
+        ],
+      },
+      { text: "done" },
+    ]);
+    session.appendUser("run");
+
+    await runTurn(session, {
+      tools: new ToolRegistry().register(freeformTool),
+      cwd: "/tmp",
+      hooks: {
+        onToolCallDelta(delta) {
+          if (delta.rawArgs.length > 0) deltas.push(delta.rawArgs);
+        },
+      },
+    });
+
+    expect(seenInput).toEqual(["raw payload"]);
+    expect(deltas).toEqual([args.slice(0, 5), args]);
+  });
 });
 
 describe("P4 · runUserTurn 契约", () => {

@@ -2,6 +2,14 @@
 
 从 `init` 到现在的全部改动。按「做了什么 → 为什么这么做 → 踩了什么坑」组织。
 
+## 0.1.0 发布摘要
+
+- `apply_patch` 完成 Codex 兼容的解析、上下文锚点、流式增量解析、多文件事务与 undo 集成。
+- TUI 在模型仍在发送工具参数时，即显示 provisional `apply_patch` 卡片与实时 `+N -M`。
+- freeform 与 JSON function-argument 两种 patch 输入均受支持，不改变现有 provider 隔离。
+- `write_file` 覆盖文件时保留原权限。
+- 单文件发布版本统一为 `0.1.0`。
+
 ## 概览
 
 | | |

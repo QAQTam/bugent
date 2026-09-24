@@ -328,14 +328,20 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
 
       // 先读旧内容，写完才能给出 diff（新建文件时旧内容为空）
       const existed = await Bun.file(absolute).exists();
+      const fileStat = existed ? await stat(absolute) : undefined;
       const before = existed ? await Bun.file(absolute).text() : "";
 
       await mkdir(dirname(absolute), { recursive: true });
 
       // 原子写：先写同目录下的临时文件，再 rename，避免写一半崩掉留下半截文件
       const temp = `${absolute}.bugent-tmp-${process.pid}-${Date.now()}`;
+      const mode = fileStat?.mode === undefined ? undefined : fileStat.mode & 0o777;
       try {
-        await writeFile(temp, content, "utf8");
+        await writeFile(temp, content, {
+          encoding: "utf8",
+          ...(mode !== undefined ? { mode } : {}),
+        });
+        if (mode !== undefined) await chmod(temp, mode);
         await rename(temp, absolute);
       } catch (error) {
         await unlink(temp).catch(() => {});

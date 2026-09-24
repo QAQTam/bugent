@@ -28,6 +28,8 @@ import { applyWorkspaceUndo, planWorkspaceUndo } from "../core/workspace-undo.ts
 import type { MsgId, StoredMessage } from "../core/message.ts";
 import { storedText } from "../core/message.ts";
 import type { ToolRegistry } from "../tools/types.ts";
+import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
+import { PatchStreamProgress } from "../patch/streaming-progress.ts";
 import { parseModelRef } from "../provider/registry.ts";
 import type { PersistedProviderConfig } from "../provider/registry.ts";
 import { Screen } from "./screen.ts";
@@ -284,6 +286,8 @@ export class TuiApp implements TuiInteraction {
   #lastAssistantMsgid: MsgId | undefined;
 
   #transcript = new Transcript();
+  /** apply_patch 参数流式解析器；工具真正开始时移除。 */
+  #patchStreams = new Map<string, PatchStreamProgress>();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
   #layout = new TranscriptLayout<DisplayItem>();
   /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
@@ -2415,6 +2419,8 @@ export class TuiApp implements TuiInteraction {
     this.#busy = true;
     this.#abort = controller;
     this.#thinking.reset();
+    this.#patchStreams.clear();
+    this.#transcript.clearStreamingTools();
     this.#activity = retry
       ? { state: "retrying", detail: "重新请求" }
       : options.goalContinuation
@@ -2452,7 +2458,39 @@ export class TuiApp implements TuiInteraction {
             : { state: "waiting", detail: "整理回复" },
         );
       },
+      onToolCallDelta: (delta) => {
+        if (delta.reset === true) {
+          this.#patchStreams.clear();
+          this.#transcript.clearStreamingTools();
+          this.#scheduleRender();
+          return;
+        }
+
+        this.#transcript.updateToolCallDelta(delta);
+        if (delta.name === APPLY_PATCH_TOOL_NAME) {
+          let stream = this.#patchStreams.get(delta.id);
+          if (stream === undefined) {
+            stream = new PatchStreamProgress();
+            this.#patchStreams.set(delta.id, stream);
+          }
+          const progress = stream.push(delta.rawArgs);
+          if (progress !== undefined) {
+            this.#transcript.setToolPatchProgress(delta.id, progress);
+          }
+        }
+        this.#setActivity({ state: "tool", detail: delta.name || "接收工具参数" });
+        this.#scheduleRender();
+      },
       onToolCall: (call) => {
+        const patchStream = this.#patchStreams.get(call.id);
+        if (patchStream !== undefined) {
+          try {
+            this.#transcript.setToolPatchProgress(call.id, patchStream.finish());
+          } catch {
+            // 真正的执行器会返回带行号的解析错误；预览失败不提前污染卡片。
+          }
+          this.#patchStreams.delete(call.id);
+        }
         this.#transcript.startTool(call, this.#lastAssistantMsgid);
         const activity: AgentActivity =
           call.name === "create_goal" || call.name === "update_goal"
@@ -2540,6 +2578,8 @@ export class TuiApp implements TuiInteraction {
     } finally {
       const aborted = controller.signal.aborted;
       const endedAt = Date.now();
+      this.#patchStreams.clear();
+      this.#transcript.clearStreamingTools();
       this.#transcript.endAssistant();
       this.#thinking.reset();
       this.#busy = false;

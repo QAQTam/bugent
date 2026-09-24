@@ -38,8 +38,14 @@ function argsSummary(item: ToolItem): string {
   const path = args.path;
   if (typeof path === "string") return path;
 
+  const patch = args.patch;
+  if (typeof patch === "string") {
+    const operations = patch.match(/^\*\*\* (?:Add|Delete|Update) File: /gm)?.length ?? 0;
+    return operations > 0 ? `${operations} 个文件` : "patch";
+  }
+
   // ask_user：显示题数比显示一整坨 JSON 有意义得多
-  const questions = args.questions;
+   const questions = args.questions;
   if (Array.isArray(questions)) return `${questions.length} 题`;
 
   try {
@@ -336,6 +342,82 @@ export function renderDiffTool(item: ToolItem, width: number): string[] {
   return [
     head,
     ...lines,
+    ...foldTail(colored, DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
+  ];
+}
+
+function patchKindMarker(kind: "add" | "delete" | "update" | "move"): string {
+  switch (kind) {
+    case "add":
+      return "A";
+    case "delete":
+      return "D";
+    case "move":
+      return "R";
+    case "update":
+    default:
+      return "M";
+  }
+}
+
+function patchKindColor(kind: "add" | "delete" | "update" | "move"): string {
+  if (kind === "add") return COLOR.diffAdd;
+  if (kind === "delete") return COLOR.diffRemove;
+  return COLOR.tool;
+}
+
+/** apply_patch：参数流式阶段即显示文件与 +N -M，执行后显示操作清单。 */
+export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
+  const progress = item.patchProgress;
+  const stat =
+    progress === undefined
+      ? item.done && item.ok
+        ? parseDiffStat(item.output)
+        : undefined
+      : { added: progress.added, removed: progress.removed };
+  const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
+
+  if (!item.done) {
+    const lines = [head];
+    if (progress === undefined || progress.files.length === 0) {
+      lines.push(`${DIM}  构建补丁…${RESET}`);
+      return lines;
+    }
+    for (const file of progress.files.slice(0, 4)) {
+      const marker = patchKindMarker(file.kind);
+      const path =
+        file.kind === "move" && file.destination !== undefined
+          ? `${file.path} → ${file.destination}`
+          : file.path;
+      lines.push(
+        `${fg(patchKindColor(file.kind))}  ${marker} ${path}${RESET}` +
+          (file.added > 0 || file.removed > 0
+            ? ` ${DIM}${formatStatBadge(file)}${RESET}`
+            : ""),
+      );
+    }
+    if (progress.files.length > 4) {
+      lines.push(`${DIM}  … 还有 ${progress.files.length - 4} 个文件${RESET}`);
+    }
+    return lines;
+  }
+
+  if (!item.ok) {
+    const body = item.output.split("\n");
+    return [head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, COLOR.error, item.expanded)];
+  }
+
+  const [summary, ...operations] = item.output.split("\n");
+  const colored = operations
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const marker = line[0] ?? "?";
+      const color = marker === "A" ? COLOR.diffAdd : marker === "D" ? COLOR.diffRemove : COLOR.tool;
+      return `${fg(color)}  ${line}${RESET}`;
+    });
+  return [
+    head,
+    `${DIM}${summary ?? ""}${RESET}`,
     ...foldTail(colored, DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
   ];
 }

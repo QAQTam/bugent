@@ -24,14 +24,32 @@ const APPLY_PATCH_PARAMETERS: JSONSchema = {
 };
 
 function patchText(input: unknown): string {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("apply_patch input 必须是 object");
+  if (typeof input === "string") {
+    if (input.trim().length === 0) throw new Error("patch 必须是非空字符串");
+    return input;
   }
-  const value = (input as Record<string, unknown>).patch;
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("apply_patch input 必须是 patch 字符串或 object");
+  }
+  const record = input as Record<string, unknown>;
+  const value = record.patch ?? (record._parseError === true ? record._raw : undefined);
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error("patch 必须是非空字符串");
   }
   return value;
+}
+
+function parsePatchInput(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("*** Begin Patch")) return trimmed;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (typeof parsed === "string") return parsed;
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // 流式中的半截 JSON 交由流式进度解析器处理；最终调用会得到完整文本。
+  }
+  return trimmed;
 }
 
 function resourceClaims(input: unknown, ctx: ToolCtx): readonly ResourceClaim[] {
@@ -63,7 +81,8 @@ export function createApplyPatchTool(): Tool<unknown, string> {
     description: [
       "The `apply_patch` tool can be used to edit files.",
       "This is a Codex-compatible patch format and edits one or more files atomically.",
-      "Do not wrap the patch in a shell command or JSON string literal.",
+      "The executor accepts a FREEFORM patch string. When exposed through a JSON function interface, put that string in the `patch` field.",
+      "Do not wrap the patch in a shell command.",
       "Patch grammar:",
       "*** Begin Patch",
       "*** Add File: path",
@@ -80,6 +99,8 @@ export function createApplyPatchTool(): Tool<unknown, string> {
       "Use context lines liberally so the anchor is unambiguous.",
     ].join("\n"),
     parameters: APPLY_PATCH_PARAMETERS,
+    inputFormat: "freeform",
+    parseInput: parsePatchInput,
     defaultPermission: "ask",
     requires: { write: true },
     resources: resourceClaims,

@@ -63,6 +63,24 @@ describe("apply_patch tool", () => {
     expect(change?.files.map((file) => file.path)).toEqual(["b.txt", "a.txt"]);
   });
 
+  test("accepts the same patch as freeform text or a JSON function argument", async () => {
+    const cwd = await workspace();
+    const ctx: ToolCtx = {
+      cwd,
+      signal: new AbortController().signal,
+      callId: "call-freeform",
+      sessionId: "session-1",
+    };
+    const tool = createApplyPatchTool();
+    const patch = "*** Begin Patch\n*** Add File: free.txt\n+ok\n*** End Patch";
+
+    await tool.run(patch, ctx);
+    expect(await readFile(join(cwd, "free.txt"), "utf8")).toBe("ok\n");
+
+    await tool.run({ patch: "*** Begin Patch\n*** Update File: free.txt\n@@\n-ok\n+still ok\n*** End Patch" }, ctx);
+    expect(await readFile(join(cwd, "free.txt"), "utf8")).toBe("still ok\n");
+  });
+
   test("derives file-level resource locks and rejects path escape", async () => {
     const cwd = await workspace();
     const tool = createApplyPatchTool();

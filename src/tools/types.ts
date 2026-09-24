@@ -6,7 +6,7 @@
  * 都不需要回头改工具实现。
  */
 
-import type { JSONSchema, ToolCall, ToolSchema } from "../provider/types.ts";
+import type { JSONSchema, ToolCall, ToolInputFormat, ToolSchema } from "../provider/types.ts";
 import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
@@ -83,6 +83,18 @@ export interface Tool<I = unknown, O = unknown> {
   name: string;
   description: string;
   parameters: JSONSchema;
+  /**
+   * 工具参数的原生格式。Chat Completions 没有 custom tool 协议，仍会发送
+   * `parameters`；支持 freeform 的 adapter 可据此选择更合适的 wire format。
+   */
+  inputFormat?: ToolInputFormat;
+  /**
+   * freeform 工具用原始 arguments 字符串恢复自己的输入。
+   *
+   * JSON 工具不需要实现；loop 默认仍走 JSON.parse。这样 apply_patch 可以
+   * 同时接受 Codex 原始 patch 与兼容层产生的 `{"patch":"..."}`。
+   */
+  parseInput?(raw: string): unknown;
   /** 标记为 true 时，P6 的沙箱层会强制包裹执行。 */
   needsSandbox?: boolean;
   /**
@@ -130,7 +142,12 @@ export interface ToolExecution {
 }
 
 export function toToolSchema(tool: Tool): ToolSchema {
-  return { name: tool.name, description: tool.description, parameters: tool.parameters };
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+    ...(tool.inputFormat !== undefined ? { format: tool.inputFormat } : {}),
+  };
 }
 
 /** 工具返回值 -> 喂回模型的字符串。 */

@@ -14,8 +14,14 @@
 
 import { registerToolRenderer } from "./renderers.ts";
 import { renderTodoTool } from "./render-todo.ts";
-import { renderBashTool, renderDiffTool, renderReadFileTool } from "./render-tools.ts";
+import {
+  renderApplyPatchTool,
+  renderBashTool,
+  renderDiffTool,
+  renderReadFileTool,
+} from "./render-tools.ts";
 import { TODO_TOOL_NAME } from "../tools/todo.ts";
+import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
 
 let registered = false;
 
@@ -28,4 +34,5 @@ export function registerBuiltinToolRenderers(): void {
   registerToolRenderer("read_file", renderReadFileTool);
   registerToolRenderer("write_file", renderDiffTool);
   registerToolRenderer("edit_file", renderDiffTool);
+  registerToolRenderer(APPLY_PATCH_TOOL_NAME, renderApplyPatchTool);
 }

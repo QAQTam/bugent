@@ -57,10 +57,18 @@ export interface JSONSchema {
   [key: string]: unknown;
 }
 
+export type ToolInputFormat = "json" | "freeform";
+
 export interface ToolSchema {
   name: string;
   description: string;
+  /**
+   * OpenAI Chat Completions 只支持 JSON function arguments，因此 freeform
+   * 工具仍必须携带一个兼容 schema；支持 custom tools 的 adapter 可以读取
+   * `format` 并发送真正的自由文本格式。
+   */
   parameters: JSONSchema;
+  format?: ToolInputFormat;
 }
 
 export interface ChatRequest {

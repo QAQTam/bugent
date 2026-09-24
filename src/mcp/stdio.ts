@@ -12,10 +12,11 @@
 
 import { assertBugentBunRuntime, spawnMcpServer } from "../../runtime/bun/src/index.ts";
 import { assertNativeSandboxLibrary, compileMcpSandbox } from "../sandbox/policy.ts";
+import { BUGENT_VERSION } from "../version.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 export const MCP_CLIENT_NAME = "bugent";
-export const MCP_CLIENT_VERSION = "0.0.0";
+export const MCP_CLIENT_VERSION = BUGENT_VERSION;
 
 /** The native MCP sandbox is Linux-only until an equivalent backend exists. */
 export function isMcpSandboxSupported(platform = process.platform): boolean {

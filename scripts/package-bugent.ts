@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Build the standalone Bugent 0.0.0 executable.
+ * Build the standalone Bugent executable.
  *
  * The output embeds the system prompt and native sandbox provider. At runtime
  * the provider is materialized into ~/.bugent/runtime/<version>/lib because
@@ -19,7 +19,7 @@ const packageJson = (await Bun.file(join(repoRoot, "package.json")).json()) as {
 const version =
   typeof packageJson.version === "string" && packageJson.version.length > 0
     ? packageJson.version
-    : "0.0.0";
+    : "0.1.0";
 const platform = process.platform;
 const arch = process.arch;
 const artifactName = `bugent-${version}-${platform}-${arch}`;

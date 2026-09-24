@@ -57,6 +57,34 @@ describe("P5 · Transcript 显示块归并", () => {
     expect(assistantsOf(t)).toHaveLength(0);
   });
 
+  test("工具参数增量复用同一张 provisional 卡片", () => {
+    const t = new Transcript();
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "apply_patch",
+      argsDelta: '{"patch":"',
+      rawArgs: '{"patch":"',
+      args: { _raw: '{"patch":"', _parseError: true },
+    });
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "apply_patch",
+      argsDelta: "*** Begin Patch",
+      rawArgs: '{"patch":"*** Begin Patch',
+      args: { patch: "*** Begin Patch" },
+    });
+
+    expect(toolsOf(t)).toHaveLength(1);
+    expect(toolsOf(t)[0]?.streaming).toBe(true);
+
+    t.startTool({ id: "c1", name: "apply_patch", args: { patch: "*** Begin Patch\n*** End Patch" } });
+    expect(toolsOf(t)).toHaveLength(1);
+    expect(toolsOf(t)[0]?.streaming).toBe(false);
+
+    t.finishTool("c1", "Success. Updated the following files:", true);
+    expect(toolsOf(t)[0]?.done).toBe(true);
+  });
+
   test("空增量被忽略", () => {
     const t = new Transcript();
     t.appendAssistantText("");
