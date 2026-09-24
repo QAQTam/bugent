@@ -11,6 +11,8 @@ import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
+import type { ResourceClaim } from "./locks.ts";
+import { ResourceLockManager } from "./locks.ts";
 import {
   denialMessage,
   type PermissionDecision,
@@ -99,6 +101,14 @@ export interface Tool<I = unknown, O = unknown> {
    * 内核会把 `sed -i`、`python -c "open(...,'w')"`、`>` 重定向一起挡住。
    */
   requires?: ModeRequirement;
+  /**
+   * 并发执行时需要占用的资源。
+   *
+   * 只读工具声明 read；会修改工作区的工具声明 write。路径型资源用
+   * `workspace/<relative-path>`，无法静态判断修改目标的命令用 `workspace`。
+   * 未声明时，写工具 / 沙箱工具会保守地拿整个 workspace 写锁。
+   */
+  resources?(input: unknown, ctx: ToolCtx): readonly ResourceClaim[];
   run(input: I, ctx: ToolCtx): Promise<O>;
   /**
    * 告诉权限系统"这次调用动的是什么资源"。
@@ -148,6 +158,7 @@ export function describeCall(tool: Tool, call: ToolCall): PermissionRequest {
 export class ToolRegistry {
   #tools = new Map<string, Tool>();
   #gate: ToolGate | undefined;
+  #locks = new ResourceLockManager();
 
   constructor(gate?: ToolGate) {
     this.#gate = gate;
@@ -196,9 +207,22 @@ export class ToolRegistry {
     );
   }
 
+  /** 工具未声明资源时的保守兜底：写工具 / 沙箱工具独占整个 workspace。 */
+  #resourceClaims(tool: Tool, input: unknown, ctx: ToolCtx): readonly ResourceClaim[] {
+    const declared = tool.resources?.(input, ctx);
+    if (declared !== undefined && declared.length > 0) return declared;
+    if (tool.requires?.write === true || tool.needsSandbox === true) {
+      return [{ key: "workspace", access: "write" }];
+    }
+    return [];
+  }
+
   /**
    * 执行一次工具调用；任何异常都被转成 ok:false，绝不让 loop 崩掉。
    * 权限检查发生在这里，所以绕过 registry 直接调 tool.run 才会跳过权限 —— 不要那么做。
+   *
+   * 资源锁覆盖 `tool.run`：权限确认不占文件锁，避免一个等待用户确认的弹窗
+   * 卡住所有同文件工具。
    */
   async execute(call: ToolCall, ctx: ToolCtx): Promise<ToolExecution> {
     const tool = this.#tools.get(call.name);
@@ -207,15 +231,35 @@ export class ToolRegistry {
       return { ok: false, output: `未知工具 "${call.name}"，可用：${known}` };
     }
 
-    if (this.#gate !== undefined) {
-      const request = describeCall(tool, call);
-      const verdict = await this.#gate.check(request);
-      if (!verdict.allowed) {
-        return { ok: false, output: denialMessage(request, verdict.reason) };
-      }
+    let claims: readonly ResourceClaim[];
+    try {
+      claims = this.#resourceClaims(tool, call.args, ctx);
+    } catch (error) {
+      return { ok: false, output: errorMessage(error) };
+    }
+
+    // 锁必须在权限确认前、且按调用顺序申请：
+    //   1. 同一文件的工具即使弹窗耗时不同，也保持确定的执行顺序；
+    //   2. 后续 undo 按 call 顺序回滚时，与实际写入顺序一致。
+    let release: () => void;
+    try {
+      release = await this.#locks.acquire(claims, ctx.signal);
+    } catch (error) {
+      return { ok: false, output: errorMessage(error) };
     }
 
     try {
+      if (this.#gate !== undefined) {
+        const request = describeCall(tool, call);
+        const verdict = await this.#gate.check(request);
+        if (!verdict.allowed) {
+          return { ok: false, output: denialMessage(request, verdict.reason) };
+        }
+      }
+
+      if (ctx.signal.aborted) {
+        return { ok: false, output: "工具执行已取消" };
+      }
       const workspace: WorkspaceFileEdit[] = [];
       let presentation: ToolPresentation | undefined;
       const previousWorkspaceChange = ctx.onWorkspaceChange;
@@ -240,6 +284,8 @@ export class ToolRegistry {
       };
     } catch (error) {
       return { ok: false, output: errorMessage(error) };
+    } finally {
+      release();
     }
   }
 }

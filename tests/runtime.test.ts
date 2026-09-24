@@ -39,6 +39,54 @@ function makeRuntime(store: SessionStore, mode: "read-only" | "workspace-write" 
 }
 
 describe("SessionRuntime 隔离", () => {
+  test("session 级 sandbox_mode 会持久化并在重建 runtime 时恢复", () => {
+    const store = makeStore();
+    const first = makeRuntime(store, "read-only");
+    expect(store.getSession(first.id)?.sandboxMode).toBe("read-only");
+
+    const restored = createSessionRuntime({
+      sessionId: first.id,
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      providerId: "test",
+      systemPrompt: "SYS",
+      cwd: "/tmp",
+      store,
+      policy: new PermissionPolicy({ default: "allow" }),
+      interaction,
+    });
+
+    expect(restored.mode).toBe("read-only");
+  });
+
+  test("session 级 provider/model 会写回 session 记录", () => {
+    const store = makeStore();
+    const first = makeRuntime(store, "workspace-write");
+    expect(store.getSession(first.id)?.providerId).toBe("test");
+    expect(store.getSession(first.id)?.model).toBe("test-model");
+
+    createSessionRuntime({
+      sessionId: first.id,
+      client: createMockClient({ script: [] }),
+      model: "new-model",
+      providerId: "new-provider",
+      providerConfig: {
+        id: "new-provider",
+        endpoint: "openai-chat",
+        baseUrl: "http://127.0.0.1:9999/v1",
+      },
+      systemPrompt: "SYS",
+      cwd: "/tmp",
+      store,
+      policy: new PermissionPolicy({ default: "allow" }),
+      interaction,
+    });
+
+    expect(store.getSession(first.id)?.providerId).toBe("new-provider");
+    expect(store.getSession(first.id)?.model).toBe("new-model");
+    expect(store.getSession(first.id)?.providerConfig?.baseUrl).toBe("http://127.0.0.1:9999/v1");
+  });
+
   test("每个 session 有独立 UUID、tools、gate、sandbox 和 audit", () => {
     const store = makeStore();
     const a = makeRuntime(store, "read-only");

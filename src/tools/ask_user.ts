@@ -136,6 +136,11 @@ export function createAskUserTool(): Tool<AskUserInput, string> {
     // 它本身就是"问用户"，不需要再被权限系统拦一道
     defaultPermission: "allow",
 
+    resources() {
+      // 交互式问答必须独占；并发工具里同时弹两个 ask_user 会互相覆盖状态。
+      return [{ key: "interaction", access: "write" }];
+    },
+
     describe(input: unknown) {
       const raw = (input as AskUserInput | null)?.questions;
       const count = Array.isArray(raw) ? raw.length : 0;

@@ -9,7 +9,7 @@ function make(msgid: number, role: Role, text: string): StoredMessage {
   return makeMessage({
     msgid,
     role,
-    origin: role === "system" ? "system" : role,
+    origin: role === "system" || role === "developer" ? "system" : role,
     parts: [textPart(text)],
     createdAt: 0,
   });
@@ -26,6 +26,34 @@ function newSession(system = "SYS"): AgentSession {
 }
 
 describe("P2 · msgid 与上下文顺序", () => {
+  test("Context Layout v2 固定 msgid0/1/2，并默认渲染 developer role", () => {
+    const session = newSession("SYS");
+    expect(session.messages.map((message) => message.msgid)).toEqual([0, 1, 2]);
+    expect(session.messages.map((message) => message.role)).toEqual([
+      "system",
+      "system",
+      "system",
+    ]);
+    expect(session.messages.map((message) => message.injectionSource)).toEqual([
+      undefined,
+      "mcp",
+      "skill",
+    ]);
+
+    expect(session.buildContext().map((message) => message.role)).toEqual([
+      "system",
+      "developer",
+      "developer",
+    ]);
+
+    session.setExtensionRole("system");
+    expect(session.buildContext().map((message) => message.role)).toEqual([
+      "system",
+      "system",
+      "system",
+    ]);
+  });
+
   test("msgid 0 必须是 system", () => {
     expect(() => sortForContext([make(0, "user", "nope")])).toThrow(/必须是 system/);
   });
@@ -55,8 +83,9 @@ describe("P2 · msgid 与上下文顺序", () => {
     session.appendUser("一");
     session.appendInjection("注入");
     session.appendUser("二");
-    expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3]);
-    expect(session.messages[2]?.origin).toBe("inject");
+    expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(session.messages[4]?.origin).toBe("inject");
+    expect(session.messages[4]?.role).toBe("system");
   });
 
   test("assistant reasoning 进入上下文，供 provider replay", () => {

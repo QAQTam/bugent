@@ -12,6 +12,7 @@ import type { SandboxMode } from "../permission/mode.ts";
 import type { ToolRegistry } from "../tools/types.ts";
 import type { AuditTrail } from "../store/audit.ts";
 import type { ModelClient } from "../provider/types.ts";
+import type { PersistedProviderConfig } from "../provider/registry.ts";
 import type { SessionStore } from "../store/repository.ts";
 import { PermissionGate as Gate } from "../permission/gate.ts";
 import { AuditTrail as Audit } from "../store/audit.ts";
@@ -25,6 +26,7 @@ export class SessionRuntime {
   readonly gate: PermissionGate;
   readonly sandboxNote: string;
   readonly audit: AuditTrail | undefined;
+  readonly providerId: string;
 
   constructor(options: {
     session: AgentSession;
@@ -32,6 +34,7 @@ export class SessionRuntime {
     gate: PermissionGate;
     sandboxNote: string;
     audit: AuditTrail | undefined;
+    providerId: string;
   }) {
     this.id = options.session.id;
     this.session = options.session;
@@ -39,6 +42,7 @@ export class SessionRuntime {
     this.gate = options.gate;
     this.sandboxNote = options.sandboxNote;
     this.audit = options.audit;
+    this.providerId = options.providerId;
   }
 
   /** 当前权限档位；直接跟随 gate，避免 runtime.mode 与 gate.mode 分叉。 */
@@ -60,10 +64,15 @@ export interface CreateSessionRuntimeOptions {
   client: ModelClient;
   model: string;
   providerId: string;
+  /** 非敏感 provider 配置覆盖；API key 不在这里。 */
+  providerConfig?: PersistedProviderConfig;
   systemPrompt: string;
+  mcpManifest?: string;
+  skillsManifest?: string;
   cwd: string;
   store: SessionStore | undefined;
-  mode: SandboxMode;
+  /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
+  mode?: SandboxMode;
   writablePaths?: readonly string[];
   passEnv?: readonly string[];
   policy: import("../permission/policy.ts").PermissionPolicy;
@@ -77,6 +86,11 @@ export interface CreateSessionRuntimeOptions {
  * 这是避免 `/new` 或多 session daemon 互相污染的关键。
  */
 export function createSessionRuntime(options: CreateSessionRuntimeOptions): SessionRuntime {
+  const mode =
+    options.mode ??
+    options.store?.getSession(options.sessionId)?.sandboxMode ??
+    "workspace-write";
+
   const session = openSession({
     store: options.store,
     sessionId: options.sessionId,
@@ -85,11 +99,20 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     model: options.model,
     providerId: options.providerId,
     systemPrompt: options.systemPrompt,
+    ...(options.mcpManifest !== undefined ? { mcpManifest: options.mcpManifest } : {}),
+    ...(options.skillsManifest !== undefined ? { skillsManifest: options.skillsManifest } : {}),
     cwd: options.cwd,
   });
 
+  // 第一次创建或用户主动切换后，都把 effective mode 写回 session 记录。
+  options.store?.setSandboxMode(options.sessionId, mode);
+  options.store?.setModelProvider(options.sessionId, options.model, options.providerId);
+  if (options.providerConfig !== undefined) {
+    options.store?.setProviderConfig(options.sessionId, options.providerConfig);
+  }
+
   const setup = createDefaultTools({
-    mode: options.mode,
+    mode,
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
   });
@@ -119,5 +142,6 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     gate,
     sandboxNote: setup.sandbox.note,
     audit,
+    providerId: options.providerId,
   });
 }

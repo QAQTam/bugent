@@ -13,6 +13,7 @@
 
 import type { JSONSchema } from "../provider/types.ts";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
+import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { createOutputSpool, type OutputSpool, type OutputStreamName } from "./spill.ts";
 import { sanitizeEnv } from "../sandbox/env.ts";
@@ -343,6 +344,117 @@ export const BASH_PARAMETERS: JSONSchema = {
   required: ["command"],
 };
 
+/**
+ * 能明确证明只读的命令。列表刻意保持保守：不确定的一律按写处理。
+ *
+ * bash 是不透明执行层，无法可靠知道 python / sed -i / 重定向会改哪些文件，
+ * 因此非只读命令统一拿整个 workspace 写锁。这样 `edit_file` 与
+ * `python -c "open(...)"` 也会因为资源键重叠而串行。
+ */
+const READ_ONLY_COMMANDS = new Set([
+  "ls",
+  "pwd",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "rg",
+  "grep",
+  "egrep",
+  "fgrep",
+  "file",
+  "stat",
+  "du",
+  "df",
+  "tree",
+  "jq",
+  "sort",
+  "uniq",
+  "cut",
+  "tr",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "test",
+  "true",
+  "false",
+  "date",
+  "printenv",
+  "id",
+  "whoami",
+  "uname",
+]);
+
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  "status",
+  "diff",
+  "log",
+  "show",
+  "rev-parse",
+  "ls-files",
+  "grep",
+  "blame",
+  "describe",
+]);
+
+function commandHead(segment: string): { head: string | undefined; rest: string[] } {
+  const words = segment.trim().split(/\s+/).filter((word) => word.length > 0);
+  let index = 0;
+  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]!)) index += 1;
+  return { head: words[index], rest: words.slice(index + 1) };
+}
+
+function isReadOnlySegment(segment: string): boolean {
+  const trimmed = segment.trim();
+  if (trimmed.length === 0) return true;
+  if (trimmed.includes(">")) return false;
+
+  const { head, rest } = commandHead(trimmed);
+  if (head === undefined) return true;
+
+  if (head === "sed") {
+    return !rest.some(
+      (word) =>
+        word === "--in-place" ||
+        word.startsWith("--in-place=") ||
+        (word.startsWith("-") && !word.startsWith("--") && word.includes("i")),
+    );
+  }
+  if (head === "find") {
+    const mutatingFlags = ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf"];
+    return !rest.some((word) => mutatingFlags.some((flag) => word === flag || word.startsWith(`${flag}=`)));
+  }
+  if (head === "git") {
+    const subcommand = rest[0];
+    if (subcommand === undefined || !READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return false;
+    return !rest.some((word) => word.startsWith("--output"));
+  }
+
+  return READ_ONLY_COMMANDS.has(head);
+}
+
+/** bash 的资源声明；只读命令拿 workspace 读锁，其余拿 workspace 写锁。 */
+export function bashResourceClaims(command: string): readonly ResourceClaim[] {
+  const trimmed = command.trim();
+  if (trimmed.length === 0) return [{ key: "workspace", access: "write" }];
+
+  // 命令替换、进程替换与重定向都可能写文件或执行任意代码。
+  if (
+    trimmed.includes("$(") ||
+    trimmed.includes("`") ||
+    trimmed.includes("<(") ||
+    trimmed.includes(">(") ||
+    trimmed.includes(">")
+  ) {
+    return [{ key: "workspace", access: "write" }];
+  }
+
+  const segments = trimmed.split(/\|\||&&|;|\|/);
+  if (segments.every(isReadOnlySegment)) return [{ key: "workspace", access: "read" }];
+  return [{ key: "workspace", access: "write" }];
+}
+
 export interface BashToolOptions {
   maxOutputBytes?: number;
   defaultTimeoutMs?: number;
@@ -472,6 +584,14 @@ export function createBashTool(
     ].join(" "),
     parameters: BASH_PARAMETERS,
     needsSandbox: true,
+
+    resources(input): readonly ResourceClaim[] {
+      const command =
+        typeof (input as BashInput | null)?.command === "string"
+          ? ((input as BashInput).command as string)
+          : "";
+      return bashResourceClaims(command);
+    },
 
     describe(input: unknown): { resource: string; summary: string } {
       const command =

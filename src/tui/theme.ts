@@ -17,6 +17,10 @@ export const COLOR = {
   inputEdge: "#22d3ee",
   inputText: "#e2e8f0",
 
+  /** 弹窗底色：比输入面板略亮，形成独立层级。 */
+  dialogBg: "#283142",
+  dialogBorder: "#fbbf24",
+
   // 待办三态
   todoPending: "#64748b",
   todoActive: "#fbbf24",
@@ -42,6 +46,14 @@ export const COLOR = {
   bashUrl: "#67e8f9",
 
   // 按钮交互
+  buttonNeutralBg: "#334155",
+  buttonNeutralFg: "#e2e8f0",
+  buttonOkBg: "#166534",
+  buttonOkFg: "#dcfce7",
+  buttonWarnBg: "#92400e",
+  buttonWarnFg: "#fef3c7",
+  buttonErrorBg: "#991b1b",
+  buttonErrorFg: "#fee2e2",
   buttonHoverBg: "#1e3a5f",
   buttonHoverFg: "#e0f2fe",
   buttonPressedBg: "#2563eb",

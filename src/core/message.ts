@@ -18,6 +18,7 @@ export type MsgId = number;
 
 /** 消息从哪来。用于调试、审计，以及区分"人说的"和"系统注入的"。 */
 export type MessageOrigin = "system" | "user" | "assistant" | "tool" | "inject";
+export type InjectionSource = "mcp" | "skill" | "system" | "snapshot";
 
 export const SYSTEM_MSGID: MsgId = 0;
 
@@ -28,6 +29,8 @@ export interface StoredMessage {
   readonly role: Role;
   readonly parts: readonly ContentPart[];
   readonly origin: MessageOrigin;
+  /** origin === "inject" 时的来源；用于 MCP/skills 的协议 role 渲染。 */
+  readonly injectionSource?: InjectionSource;
   /** assistant 的思考链路；用于 provider reasoning replay，不作为正文展示。 */
   readonly reasoning?: string;
   readonly toolCallId?: string;
@@ -81,8 +84,14 @@ export function freezeMessage(msg: StoredMessage): StoredMessage {
 }
 
 /** 存储态 -> 归一化协议态。 */
-export function toChatMessage(msg: StoredMessage): ChatMessage {
-  const out: ChatMessage = { role: msg.role, parts: [...msg.parts] };
+export function toChatMessage(
+  msg: StoredMessage,
+  options: { extensionRole?: "developer" | "system" } = {},
+): ChatMessage {
+  const extension =
+    msg.injectionSource === "mcp" || msg.injectionSource === "skill";
+  const role: Role = extension ? (options.extensionRole ?? "developer") : msg.role;
+  const out: ChatMessage = { role, parts: [...msg.parts] };
   if (msg.reasoning !== undefined) out.reasoning = msg.reasoning;
   if (msg.toolCallId !== undefined) out.toolCallId = msg.toolCallId;
   if (msg.toolCalls !== undefined && msg.toolCalls.length > 0) out.toolCalls = [...msg.toolCalls];
@@ -95,6 +104,7 @@ export function makeMessage(input: {
   parentMsgId?: MsgId;
   role: Role;
   origin: MessageOrigin;
+  injectionSource?: InjectionSource;
   parts: readonly ContentPart[];
   createdAt: number;
   reasoning?: string;
@@ -108,6 +118,7 @@ export function makeMessage(input: {
     role: input.role,
     parts: input.parts,
     origin: input.origin,
+    ...(input.injectionSource !== undefined ? { injectionSource: input.injectionSource } : {}),
     createdAt: input.createdAt,
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
     ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),

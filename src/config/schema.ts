@@ -10,7 +10,8 @@ import type { PermissionDecision, PermissionRule } from "../permission/policy.ts
 import type { SandboxMode } from "../permission/mode.ts";
 
 export interface AgentConfig {
-  systemPrompt?: string;
+  /** system prompt Markdown 文件；相对路径按 cwd 解析，支持 ~。 */
+  systemPromptFile?: string;
   /** 单轮最大模型-工具往返次数；默认 800。 */
   maxSteps?: number;
   cwd?: string;
@@ -48,9 +49,3 @@ export interface BugentConfig {
 export function defineConfig(config: BugentConfig): BugentConfig {
   return config;
 }
-
-export const DEFAULT_SYSTEM_PROMPT = [
-  "You are bugent, a terminal-native coding agent.",
-  "Be concise and direct. Prefer acting over explaining.",
-  "When you need to inspect or change the workspace, use the provided tools.",
-].join("\n");

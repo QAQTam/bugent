@@ -12,9 +12,10 @@
 
 import { createInterface } from "node:readline/promises";
 import { combineHooks, runUserTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
-import { ProviderRegistry, parseModelRef } from "./provider/registry.ts";
+import { ProviderRegistry, parseModelRef, type PersistedProviderConfig } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
-import { DEFAULT_SYSTEM_PROMPT, loadConfig } from "./config/load.ts";
+import { loadConfig } from "./config/load.ts";
+import { loadSystemPrompt } from "./config/system-prompt.ts";
 import type { BugentConfig } from "./config/schema.ts";
 import { TuiApp, type RuntimeRequest, type TuiInteraction } from "./tui/app.ts";
 import { openSession } from "./core/open-session.ts";
@@ -32,6 +33,7 @@ import {
 } from "./permission/policy.ts";
 import { AuditTrail } from "./store/audit.ts";
 import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
+import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
 
 interface CliOptions {
@@ -78,6 +80,13 @@ const HELP = `bugent — 终端里的 AI agent
       --cwd <dir>            工作目录
       --max-steps <n>        单轮最大工具往返次数（默认 800）
   -h, --help                 显示帮助
+
+TUI 内斜杠命令：
+  /                 打开命令菜单
+  /context          查看当前 session 的 provider / model / sandbox
+  /mode <mode>      切换当前 session 的沙箱档位
+  /new              新建会话
+  /exit             退出
 `;
 
 export function parseArgs(argv: string[]): CliOptions {
@@ -247,8 +256,13 @@ async function main(): Promise<void> {
 
   const { registry, model } = await buildRegistry(options, config);
   const ref = parseModelRef(model);
-  const client = registry.resolve(ref);
-  const systemPrompt = config.agent?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+  const loadedSystemPrompt = await loadSystemPrompt({
+    cwd: options.cwd,
+    ...(config.agent?.systemPromptFile !== undefined
+      ? { file: config.agent.systemPromptFile }
+      : {}),
+  });
+  const systemPrompt = loadedSystemPrompt.text;
 
   /* ----------------------- 持久化（Phase 10） ----------------------- */
 
@@ -273,12 +287,27 @@ async function main(): Promise<void> {
     );
   }
 
+  // 恢复已有 session 时，provider/model/providerConfig 以 session 记录为准。
+  const storedSession = store?.getSession(sessionId);
+  const effectiveProviderId = storedSession?.providerId ?? ref.provider;
+  const effectiveModel = storedSession?.model ?? ref.model;
+  const effectiveProviderConfig = storedSession?.providerConfig;
+  const credentials = createCredentialStore();
+  const storedApiKey = await credentials.get(sessionId, effectiveProviderId);
+  const client = registry.resolve(
+    { provider: effectiveProviderId, model: effectiveModel },
+    {
+      ...(effectiveProviderConfig ?? {}),
+      ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
+    },
+  );
+
   const session = openSession({
     store,
     sessionId,
     client,
-    model: ref.model,
-    providerId: ref.provider,
+    model: effectiveModel,
+    providerId: effectiveProviderId,
     systemPrompt,
     cwd: options.cwd,
   });
@@ -361,6 +390,16 @@ async function main(): Promise<void> {
         session,
         tools: tools.registry,
         cwd: options.cwd,
+        providerId: effectiveProviderId,
+        providers: registry.list().map((provider) => provider.id),
+        providerConfigs: store?.listProviderConfigs(sessionId) ?? [],
+        ...(effectiveProviderConfig !== undefined ? { providerConfig: effectiveProviderConfig } : {}),
+        ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
+        loadApiKey: (sessionId: string, providerId: string) => credentials.get(sessionId, providerId),
+        saveApiKey: (sessionId: string, providerId: string, secret: string) =>
+          credentials.set(sessionId, providerId, secret),
+        deleteApiKey: (sessionId: string, providerId: string) =>
+          credentials.delete(sessionId, providerId),
         mode: tools.mode,
         banner: [
           `**bugent** 已就绪 · \`${client.id}\``,
@@ -373,7 +412,7 @@ async function main(): Promise<void> {
               : `${policy.ruleCount} 条规则${policy.ruleCount === 0 ? "（放行交给档位判断）" : ""}`
           }`,
           "",
-          "输入消息开始对话；`/new` 开新对话；`/exit` 退出；运行中按 `ESC` 中断。",
+          "输入消息开始对话；输入 / 查看命令；`/context` 查看当前 session 配置；运行中按 `ESC` 中断。",
           "右键消息可撤回 / 分叉 / 重试（原分支会保留）。",
         ].join("\n"),
         ...(audit !== undefined ? { audit } : {}),
@@ -381,20 +420,43 @@ async function main(): Promise<void> {
           ? {}
           : {
               branchService: new BranchService(store),
+              saveProviderConfig: (sessionId: string, config: PersistedProviderConfig) =>
+                store.setProviderConfig(sessionId, config),
+              deleteProviderConfig: (sessionId: string, providerId: string) =>
+                store.deleteProviderConfig(sessionId, providerId),
               createRuntime: (
                 interaction: TuiInteraction,
                 request?: RuntimeRequest,
               ): SessionRuntime => {
+                const targetSessionId = request?.sessionId ?? newSessionId();
+                const existing = store.getSession(targetSessionId);
+                const runtimeMode = request?.mode ?? existing?.sandboxMode ?? mode;
+                const fallbackProviderId = request?.sessionId === undefined ? ref.provider : effectiveProviderId;
+                const fallbackModel = request?.sessionId === undefined ? ref.model : effectiveModel;
+                const fallbackProviderConfig =
+                  request?.sessionId === undefined ? undefined : effectiveProviderConfig;
+                const providerId = request?.providerId ?? existing?.providerId ?? fallbackProviderId;
+                const model = request?.model ?? existing?.model ?? fallbackModel;
+                const providerConfig =
+                  request?.providerConfig ?? existing?.providerConfig ?? fallbackProviderConfig;
+                const client = registry.resolve(
+                  { provider: providerId, model },
+                  {
+                    ...(providerConfig ?? {}),
+                    ...(request?.apiKey !== undefined ? { apiKey: request.apiKey } : {}),
+                  },
+                );
                 const runtime = createSessionRuntime({
-                  sessionId: request?.sessionId ?? newSessionId(),
+                  sessionId: targetSessionId,
                   ...(request?.branchId !== undefined ? { branchId: request.branchId } : {}),
-                  client: registry.resolve(ref),
-                  model: ref.model,
-                  providerId: ref.provider,
+                  client,
+                  model,
+                  providerId,
+                  ...(providerConfig !== undefined ? { providerConfig } : {}),
                   systemPrompt,
                   cwd: options.cwd,
                   store,
-                  mode: request?.mode ?? mode,
+                  mode: runtimeMode,
                   ...(config.sandbox?.writablePaths !== undefined
                     ? { writablePaths: config.sandbox.writablePaths }
                     : {}),

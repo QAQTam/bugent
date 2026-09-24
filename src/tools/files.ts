@@ -12,6 +12,7 @@ import { statSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { JSONSchema } from "../provider/types.ts";
+import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { relativeTo, resolveWithin } from "./paths.ts";
 import { compactDiff, diffLines, formatDiff, type DiffLine } from "./diff.ts";
@@ -132,6 +133,19 @@ export const MAX_READ_CHARS = 9000;
 export const MAX_READ_SCAN_BYTES = 8 * 1024 * 1024;
 export const MAX_WRITE_BYTES = 8 * 1024 * 1024;
 
+/** 文件工具的锁粒度：解析到工作区内的相对路径，避免同一文件被不同写法绕过。 */
+function fileResource(
+  input: unknown,
+  ctx: ToolCtx,
+  access: "read" | "write",
+): readonly ResourceClaim[] {
+  const rawPath = (input as { path?: unknown } | null)?.path;
+  if (typeof rawPath !== "string") return [];
+  const absolute = resolveWithin(ctx.cwd, rawPath);
+  const relative = relativeTo(ctx.cwd, absolute).replaceAll("\\", "/");
+  return [{ key: `workspace/${relative}`, access }];
+}
+
 /* ------------------------------------------------------------------ */
 /* read_file                                                           */
 /* ------------------------------------------------------------------ */
@@ -177,6 +191,10 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
       "大文件用 offset / limit 分段读取。",
     ].join(" "),
     parameters: READ_FILE_PARAMETERS,
+
+    resources(input, ctx) {
+      return fileResource(input, ctx, "read");
+    },
 
     describe(input: unknown) {
       const path = typeof (input as ReadFileInput | null)?.path === "string" ? (input as ReadFileInput).path : "";
@@ -287,6 +305,10 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
     // read-only 档位下闸门会据此拦下（或弹窗请求升档）
     requires: { write: true },
 
+    resources(input, ctx) {
+      return fileResource(input, ctx, "write");
+    },
+
     describe(input: unknown) {
       const path = typeof (input as WriteFileInput | null)?.path === "string" ? (input as WriteFileInput).path : "";
       return { resource: String(path), summary: `写入文件 ${path}` };
@@ -388,6 +410,10 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
     ].join(" "),
     parameters: EDIT_FILE_PARAMETERS,
     requires: { write: true },
+
+    resources(input, ctx) {
+      return fileResource(input, ctx, "write");
+    },
 
     describe(input: unknown) {
       const path = typeof (input as EditFileInput | null)?.path === "string" ? (input as EditFileInput).path : "";

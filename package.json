@@ -14,7 +14,8 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "test": "bun test",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsgo --noEmit",
+    "package:bun-runtime": "bun run runtime/bun/scripts/package.ts"
   },
   "type": "module",
   "dependencies": {

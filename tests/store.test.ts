@@ -116,8 +116,61 @@ describe("P10 · 数据库", () => {
 
     const upgraded = openDatabase({ path });
     const columns = upgraded.query("PRAGMA table_info(messages)").all() as { name: string }[];
+    const sessionColumns = upgraded.query("PRAGMA table_info(sessions)").all() as { name: string }[];
+    const tables = upgraded
+      .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all() as { name: string }[];
     expect(columns.map((column) => column.name)).toContain("workspace");
     expect(columns.map((column) => column.name)).toContain("reasoning");
+    expect(sessionColumns.map((column) => column.name)).toContain("sandbox_mode");
+    expect(sessionColumns.map((column) => column.name)).toContain("provider_config");
+    expect(tables.map((table) => table.name)).toContain("session_providers");
+    expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
+    upgraded.close();
+  });
+
+  test("v6 数据库会把 sessions.provider_config 回填到 session_providers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bugent-store-migrate-v6-"));
+    dirs.push(dir);
+    const path = join(dir, "v6.db");
+
+    const legacy = new Database(path, { create: true });
+    legacy.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        provider_id TEXT,
+        system_prompt TEXT NOT NULL,
+        title TEXT,
+        cwd TEXT,
+        active_branch_id TEXT,
+        sandbox_mode TEXT,
+        provider_config TEXT
+      );
+      INSERT INTO sessions
+        (id, created_at, updated_at, model, provider_id, system_prompt, sandbox_mode, provider_config)
+      VALUES
+        ('s1', 1, 1, 'm', 'local', 'SYS', 'workspace-write',
+         '{"id":"local","endpoint":"openai-chat","baseUrl":"http://127.0.0.1:8787/v1"}');
+      INSERT INTO meta (key, value) VALUES ('schema_version', '6');
+    `);
+    legacy.close();
+
+    const upgraded = openDatabase({ path });
+    const row = upgraded
+      .query("SELECT provider_id, config FROM session_providers WHERE session_id = 's1'")
+      .get();
+    expect(row).toEqual({
+      provider_id: "local",
+      config: JSON.stringify({
+        id: "local",
+        endpoint: "openai-chat",
+        baseUrl: "http://127.0.0.1:8787/v1",
+      }),
+    });
     expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
     upgraded.close();
   });
@@ -146,6 +199,64 @@ describe("P10 · 会话与消息持久化", () => {
     expect(store.listSessions().map((s) => s.id)).toEqual(["s2", "s1"]); // 按 updatedAt 倒序
   });
 
+  test("session 级 sandbox_mode 可以持久化和更新", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1", { sandboxMode: "read-only" }));
+    expect(store.getSession("s1")?.sandboxMode).toBe("read-only");
+
+    store.setSandboxMode("s1", "no-sandbox");
+    expect(store.getSession("s1")?.sandboxMode).toBe("no-sandbox");
+  });
+
+  test("session 级 provider profiles 持久化，并强制剔除 apiKey", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1"));
+    store.setProviderConfig("s1", {
+      id: "local",
+      endpoint: "openai-chat",
+      baseUrl: "http://127.0.0.1:8787/v1",
+      headers: { "x-test": "1" },
+      extraBody: { reasoning_effort: "high" },
+      reasoningReplay: "both",
+      proxy: false,
+    });
+    store.setProviderConfig("s1", {
+      id: "backup",
+      endpoint: "mock",
+    });
+
+    expect(store.getProviderConfig("s1", "local")).toEqual({
+      id: "local",
+      endpoint: "openai-chat",
+      baseUrl: "http://127.0.0.1:8787/v1",
+      headers: { "x-test": "1" },
+      extraBody: { reasoning_effort: "high" },
+      reasoningReplay: "both",
+      proxy: false,
+    });
+    expect(store.listProviderConfigs("s1").map((config) => config.id)).toEqual(["backup", "local"]);
+
+    store.deleteProviderConfig("s1", "backup");
+    expect(store.listProviderConfigs("s1").map((config) => config.id)).toEqual(["local"]);
+
+    store.setModelProvider("s1", "test-model", "local");
+    expect(store.getSession("s1")?.providerConfig?.baseUrl).toBe("http://127.0.0.1:8787/v1");
+
+    store.setProviderConfig("s1", {
+      id: "local",
+      endpoint: "openai-chat",
+      apiKey: "must-not-persist",
+    } as never);
+    expect(store.getProviderConfig("s1", "local")).not.toHaveProperty("apiKey");
+    expect(
+      store.db
+        .query("SELECT config FROM session_providers WHERE session_id = 's1' AND provider_id = 'local'")
+        .get(),
+    ).toEqual({
+      config: JSON.stringify({ id: "local", endpoint: "openai-chat" }),
+    });
+  });
+
   test("消息按 msgid 顺序读回，且内容完整", async () => {
     const store = await makeStore();
     store.createSession(makeSessionRecord("s1"));
@@ -165,11 +276,18 @@ describe("P10 · 会话与消息持久化", () => {
 
     const restored = store.loadMessages("s1");
 
-    expect(restored.map((m) => m.msgid)).toEqual([0, 1, 2, 3]);
-    expect(restored.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
-    expect(restored[2]?.toolCalls).toEqual([{ id: "c1", name: "bash", args: { command: "ls" } }]);
-    expect(restored[3]?.toolCallId).toBe("c1");
-    expect(store.countMessages("s1")).toBe(4);
+    expect(restored.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(restored.map((m) => m.role)).toEqual([
+      "system",
+      "system",
+      "system",
+      "user",
+      "assistant",
+      "tool",
+    ]);
+    expect(restored[4]?.toolCalls).toEqual([{ id: "c1", name: "bash", args: { command: "ls" } }]);
+    expect(restored[5]?.toolCallId).toBe("c1");
+    expect(store.countMessages("s1")).toBe(6);
   });
 
   test("tool result 的工作区 patch 元数据可以落盘并恢复", async () => {
@@ -252,12 +370,12 @@ describe("P10 · 会话与消息持久化", () => {
       onMessage: (m) => store.appendMessage("s1", m),
     });
 
-    expect(restored.messages.map((m) => m.msgid)).toEqual([0, 1, 2]);
+    expect(restored.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
 
     restored.appendUser("第二句");
-    expect(restored.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3]);
-    expect(store.countMessages("s1")).toBe(4);
-    expect(store.loadMessages("s1")[3]?.msgid).toBe(3);
+    expect(restored.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(store.countMessages("s1")).toBe(6);
+    expect(store.loadMessages("s1")[5]?.msgid).toBe(5);
   });
 
   test("恢复的消息仍然是冻结的（只追加铁律不被破坏）", async () => {
@@ -360,13 +478,28 @@ describe("P10 · 审计流水", () => {
       mode: "workspace-write",
       at: 42,
     });
+    audit.sessionConfig({
+      action: "provider_model_mode",
+      providerId: "local",
+      model: "m",
+      mode: "read-only",
+    });
     audit.turnEnd({ steps: 2, reason: "stop" });
 
     const kinds = store.listEvents("s1").map((e) => e.kind);
-    expect(kinds).toEqual(["turn_start", "tool_call", "tool_result", "permission", "turn_end"]);
+    expect(kinds).toEqual([
+      "turn_start",
+      "tool_call",
+      "tool_result",
+      "permission",
+      "session_config",
+      "turn_end",
+    ]);
 
     const permission = store.listEvents("s1").find((e) => e.kind === "permission");
     expect(permission?.payload).toMatchObject({ tool: "bash", decision: "ask", allowed: true });
+    const config = store.listEvents("s1").find((e) => e.kind === "session_config");
+    expect(config?.payload).toMatchObject({ providerId: "local", model: "m", mode: "read-only" });
   });
 
   test("端到端：跑一轮后审计流水里能看到工具调用与权限决策", async () => {

@@ -57,9 +57,17 @@ export function sortForContext(messages: readonly StoredMessage[]): StoredMessag
   return [system, ...rest];
 }
 
+export interface BuildContextOptions {
+  /** MCP/skills manifest 的协议 role；默认 developer，兼容性回退时用 system。 */
+  extensionRole?: "developer" | "system";
+}
+
 /** 存储态 -> 归一化协议态（按上下文顺序）。 */
-export function buildContext(messages: readonly StoredMessage[]): ChatMessage[] {
-  return sortForContext(messages).map(toChatMessage);
+export function buildContext(
+  messages: readonly StoredMessage[],
+  options: BuildContextOptions = {},
+): ChatMessage[] {
+  return sortForContext(messages).map((message) => toChatMessage(message, options));
 }
 
 /**
@@ -76,8 +84,12 @@ export function stablePrefix(
 }
 
 /** 前缀指纹：前缀的规范序列化的 sha256。用于断言缓存前缀没被改动。 */
-export function prefixHash(messages: readonly StoredMessage[], uptoMsgId?: MsgId): string {
-  const payload = canonicalize(buildContext(stablePrefix(messages, uptoMsgId)));
+export function prefixHash(
+  messages: readonly StoredMessage[],
+  uptoMsgId?: MsgId,
+  options: BuildContextOptions = {},
+): string {
+  const payload = canonicalize(buildContext(stablePrefix(messages, uptoMsgId), options));
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(payload);
   return hasher.digest("hex");

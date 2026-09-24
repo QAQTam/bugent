@@ -10,16 +10,17 @@ export type MessageAction = "undo" | "fork" | "retry" | "copy" | "inspect" | "ca
 export interface MessageActionItem {
   action: MessageAction;
   label: string;
-  tone?: "ok" | "warn" | "error";
+  tone?: "ok" | "warn" | "error" | "neutral";
+  shortcut?: string;
 }
 
 export const MESSAGE_ACTIONS: readonly MessageActionItem[] = [
-  { action: "undo", label: "撤回到这里", tone: "warn" },
-  { action: "fork", label: "从这里分叉", tone: "ok" },
-  { action: "retry", label: "重试此轮" },
-  { action: "copy", label: "复制" },
-  { action: "inspect", label: "检查" },
-  { action: "cancel", label: "取消", tone: "error" },
+  { action: "undo", label: "撤回到这里", tone: "warn", shortcut: "u" },
+  { action: "fork", label: "从这里分叉", tone: "ok", shortcut: "f" },
+  { action: "retry", label: "重试此轮", tone: "neutral", shortcut: "r" },
+  { action: "copy", label: "复制", tone: "neutral", shortcut: "c" },
+  { action: "inspect", label: "检查", tone: "neutral", shortcut: "i" },
+  { action: "cancel", label: "取消", tone: "neutral", shortcut: "Esc" },
 ];
 
 export function messageActionFromKey(key: string): MessageAction | undefined {

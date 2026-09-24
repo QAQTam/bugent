@@ -27,6 +27,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "tests", "*.ts", "*.tsx"],
+  "include": ["src", "tests", "runtime", "*.ts", "*.tsx"],
   "exclude": ["node_modules"]
 }

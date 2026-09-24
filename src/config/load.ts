@@ -9,7 +9,7 @@
 
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_SYSTEM_PROMPT, type BugentConfig } from "./schema.ts";
+import type { BugentConfig } from "./schema.ts";
 import { configFilePath, ensureConfigFile, parseConfigToml } from "./toml.ts";
 
 const PROJECT_CONFIG_FILENAMES = ["bugent.config.ts", "bugent.config.js", "bugent.config.mjs"];
@@ -29,7 +29,6 @@ function configFromEnv(): BugentConfig {
         ...(apiKey !== undefined && apiKey.length > 0 ? { apiKey } : {}),
       },
     ],
-    agent: { systemPrompt: DEFAULT_SYSTEM_PROMPT },
   };
 }
 
@@ -95,5 +94,4 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   return { config: configFromEnv(), source: "环境变量", created: false };
 }
 
-export { DEFAULT_SYSTEM_PROMPT };
 export type { BugentConfig };

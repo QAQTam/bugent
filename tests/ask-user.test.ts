@@ -175,6 +175,23 @@ describe("ask_user · 自定义回答", () => {
     expect(flow.answers[0]?.custom).toBe("用 Rust 风格");
   });
 
+  test("secret 问题自动进入输入态，渲染和汇总都不回显明文", () => {
+    const { flow } = makeFlow([{ question: "API key", options: [], secret: true }]);
+    expect(flow.isTyping).toBe(true);
+
+    for (const ch of "sk-secret") flow.handleKey(text(ch));
+    const typingView = flow.render(60).join("\n");
+    expect(typingView).toContain("•••••••••");
+    expect(typingView).not.toContain("sk-secret");
+
+    flow.handleKey(key("enter"));
+    flow.handleKey(key("right")); // 进入汇总页
+    const summaryView = flow.render(60).join("\n");
+    expect(summaryView).toContain("已隐藏");
+    expect(summaryView).not.toContain("sk-secret");
+    expect(flow.answers[0]?.custom).toBe("sk-secret");
+  });
+
   test("自定义回答与选项选择并存", () => {
     const { flow } = makeFlow();
     flow.handleKey(key("down")); // 选 B

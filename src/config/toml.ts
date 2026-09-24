@@ -222,9 +222,9 @@ export function parseConfigToml(text: string): BugentConfig {
   const passEnv = asStringArray(pick(sandboxTable, "pass_env", "passEnv"), "sandbox.pass_env");
   if (passEnv !== undefined) sandbox.passEnv = passEnv;
 
-  const systemPrompt = asString(
-    pick(agentTable, "system_prompt", "systemPrompt"),
-    "agent.system_prompt",
+  const systemPromptFile = asString(
+    pick(agentTable, "system_prompt_file", "systemPromptFile"),
+    "agent.system_prompt_file",
   );
   const maxSteps = pick(agentTable, "max_steps", "maxSteps");
 
@@ -232,7 +232,7 @@ export function parseConfigToml(text: string): BugentConfig {
     defaultModel,
     providers: rawProviders.map(parseProvider),
     agent: {
-      ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+      ...(systemPromptFile !== undefined ? { systemPromptFile } : {}),
       ...(typeof maxSteps === "number" ? { maxSteps } : {}),
     },
     permissions: {
@@ -254,7 +254,7 @@ export const DEFAULT_CONFIG_TOML = `# bugent 配置
 default_model = "openai/deepseek-v4.1-flash"
 
 [agent]
-# system_prompt = "You are bugent..."
+# system_prompt_file = "~/.bugent/SYSTEM.md"
 max_steps = 800
 
 # ---- 权限 ----

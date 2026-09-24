@@ -37,6 +37,9 @@ export interface ProviderConfig {
   reasoningReplay?: ReasoningReplay | undefined;
 }
 
+/** 可以安全写入 session 记录的 provider 配置；API key 永远不在其中。 */
+export type PersistedProviderConfig = Omit<ProviderConfig, "apiKey">;
+
 export interface ModelRef {
   provider: string;
   model: string;
@@ -107,13 +110,22 @@ export class ProviderRegistry {
     return [...this.#providers.values()];
   }
 
-  /** 核心方法：`{provider, model}` -> ModelClient。 */
-  resolve(ref: ModelRef): ModelClient {
-    const config = this.#providers.get(ref.provider);
-    if (config === undefined) {
+  /**
+   * 核心方法：`{provider, model}` -> ModelClient。
+   *
+   * `overrides` 用于 session 级覆盖（例如当前会话临时换 API key），
+   * 不修改 registry 里的共享 provider 配置。
+   */
+  resolve(ref: ModelRef, overrides: Partial<ProviderConfig> = {}): ModelClient {
+    const base = this.#providers.get(ref.provider);
+    if (base === undefined && overrides.endpoint === undefined) {
       const known = this.list().map((p) => p.id).join(", ") || "(空)";
       throw new Error(`未知 provider "${ref.provider}"，已注册：${known}`);
     }
+    const config: ProviderConfig =
+      base === undefined
+        ? { ...overrides, id: ref.provider, endpoint: overrides.endpoint! }
+        : { ...base, ...overrides, id: base.id };
     return FACTORIES[config.endpoint](config, ref.model);
   }
 

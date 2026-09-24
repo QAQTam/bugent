@@ -10,7 +10,7 @@
  * 完全无感，这是 Phase 1 的验收标准。
  */
 
-export type Role = "system" | "user" | "assistant" | "tool";
+export type Role = "system" | "developer" | "user" | "assistant" | "tool";
 
 /** 消息内容的原子单元。多模态以后加 `audio` / `file` 只需扩展这个 union。 */
 export type ContentPart =

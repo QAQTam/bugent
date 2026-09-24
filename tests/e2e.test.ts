@@ -189,6 +189,8 @@ describe("P1+P4 · 端到端（HTTP + SSE）", () => {
     expect(result.usage).toEqual({ input: 42, output: 7 });
     expect(session.messages.map((m) => m.role)).toEqual([
       "system",
+      "system",
+      "system",
       "user",
       "assistant",
       "tool",

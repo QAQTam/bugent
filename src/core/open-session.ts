@@ -18,6 +18,8 @@ export interface OpenSessionOptions {
   model: string;
   providerId: string;
   systemPrompt: string;
+  mcpManifest?: string;
+  skillsManifest?: string;
   cwd: string;
 }
 
@@ -29,6 +31,8 @@ export function openSession(options: OpenSessionOptions): AgentSession {
       id: sessionId,
       ...(options.branchId !== undefined ? { branchId: options.branchId } : {}),
       system: options.systemPrompt,
+      ...(options.mcpManifest !== undefined ? { mcpManifest: options.mcpManifest } : {}),
+      ...(options.skillsManifest !== undefined ? { skillsManifest: options.skillsManifest } : {}),
       client: options.client,
       model: options.model,
     });
@@ -73,6 +77,8 @@ export function openSession(options: OpenSessionOptions): AgentSession {
     id: sessionId,
     branchId,
     system: options.systemPrompt,
+    ...(options.mcpManifest !== undefined ? { mcpManifest: options.mcpManifest } : {}),
+    ...(options.skillsManifest !== undefined ? { skillsManifest: options.skillsManifest } : {}),
     client: options.client,
     model: options.model,
     onMessage: (message) => {

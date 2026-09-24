@@ -5,7 +5,7 @@ import { ProviderRegistry } from "../src/provider/registry.ts";
 import { createMockClient, type MockTurn } from "../src/provider/adapters/mock.ts";
 import { ToolRegistry, type Tool } from "../src/tools/types.ts";
 import { storedText } from "../src/core/message.ts";
-import type { ChatChunk } from "../src/provider/types.ts";
+import type { ChatChunk, ModelClient } from "../src/provider/types.ts";
 
 function echoTool(sink: string[]): Tool<{ text: string }> {
   return {
@@ -58,12 +58,14 @@ describe("P4 · agent loop", () => {
 
     expect(session.messages.map((m) => `${m.msgid}:${m.role}`)).toEqual([
       "0:system",
-      "1:user",
-      "2:assistant",
-      "3:tool",
+      "1:system",
+      "2:system",
+      "3:user",
       "4:assistant",
+      "5:tool",
+      "6:assistant",
     ]);
-    const toolMessage = session.messages[3];
+    const toolMessage = session.messages[5];
     expect(toolMessage?.toolCallId).toBe("c1");
     expect(storedText(toolMessage!)).toBe("echo:hi");
   });
@@ -182,7 +184,7 @@ describe("P4 · agent loop", () => {
 
     expect(seen).toEqual(["one", "two"]);
     expect(result.steps).toBe(3);
-    expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(session.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
   });
 });
 
@@ -192,8 +194,8 @@ describe("P4 · runUserTurn 契约", () => {
 
     await runUserTurn(session, "你好", { cwd: "/tmp" });
 
-    expect(session.messages.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
-    expect(storedText(session.messages[1]!)).toBe("你好");
+    expect(session.messages.map((m) => m.role)).toEqual(["system", "system", "system", "user", "assistant"]);
+    expect(storedText(session.messages[3]!)).toBe("你好");
   });
 
   test("回归：模型必须能读到用户输入（TUI 曾因漏写 session 只回显空串）", async () => {
@@ -204,5 +206,41 @@ describe("P4 · runUserTurn 契约", () => {
     const result = await runUserTurn(session, "你好 bugent", { cwd: "/tmp" });
 
     expect(result.text).toContain("你好 bugent");
+  });
+});
+
+describe("P4 · developer role fallback", () => {
+  test("provider 拒绝 developer 时，经用户确认后只用 system role 重发", async () => {
+    const seenRoles: string[][] = [];
+    let attempts = 0;
+    const client: ModelClient = {
+      id: "test/developer-fallback",
+      async *chat(req) {
+        attempts += 1;
+        seenRoles.push(req.messages.map((message) => message.role));
+        if (req.messages.some((message) => message.role === "developer")) {
+          throw new Error("developer role is not supported by this endpoint");
+        }
+        yield { type: "text", delta: "ok" };
+        yield { type: "done", reason: "stop" };
+      },
+    };
+    const session = new AgentSession({
+      id: "fallback",
+      system: "SYS",
+      client,
+      model: "test-model",
+    });
+    session.appendUser("hi");
+
+    const result = await runTurn(session, {
+      hooks: { onExtensionRoleFallback: async () => true },
+    });
+
+    expect(result.text).toBe("ok");
+    expect(attempts).toBe(2);
+    expect(seenRoles[0]).toContain("developer");
+    expect(seenRoles[1]).not.toContain("developer");
+    expect(session.extensionRole).toBe("system");
   });
 });

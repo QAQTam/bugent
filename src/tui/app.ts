@@ -22,6 +22,8 @@ import { applyWorkspaceUndo, planWorkspaceUndo } from "../core/workspace-undo.ts
 import type { MsgId, StoredMessage } from "../core/message.ts";
 import { storedText } from "../core/message.ts";
 import type { ToolRegistry } from "../tools/types.ts";
+import { parseModelRef } from "../provider/registry.ts";
+import type { PersistedProviderConfig } from "../provider/registry.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
@@ -57,7 +59,7 @@ import {
 import { currentTodoList, type TodoList } from "../tools/todo.ts";
 import { createWorkspaceFs } from "../tools/workspace-fs.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
-import { describeCapability, MODES, type SandboxMode } from "../permission/mode.ts";
+import { describeCapability, isSandboxMode, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
 import type { AuditTrail } from "../store/audit.ts";
 import {
@@ -118,12 +120,25 @@ export interface RuntimeRequest {
   sessionId?: string;
   branchId?: string;
   mode?: SandboxMode;
+  /** session 级 provider/model/API key 覆盖。 */
+  providerId?: string;
+  model?: string;
+  apiKey?: string;
+  /** 非敏感 provider 配置覆盖（endpoint/baseUrl 等）。 */
+  providerConfig?: PersistedProviderConfig;
 }
 
 function oneLine(text: string, max = 64): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= max) return normalized;
   return `${normalized.slice(0, Math.max(1, max - 1))}…`;
+}
+
+/** 把带 ANSI 的弹窗行水平居中；右侧留白由 Screen 清行时补齐。 */
+function centerLine(line: string, width: number): string {
+  const clipped = truncateAnsi(line, width);
+  const padding = Math.max(0, Math.floor((width - visibleWidth(clipped)) / 2));
+  return " ".repeat(padding) + clipped;
 }
 
 function todoImpact(before: TodoList, after: TodoList): string {
@@ -151,6 +166,22 @@ export interface TuiOptions {
   session: AgentSession;
   tools: ToolRegistry;
   cwd: string;
+  /** 当前 session 的 provider id，用于 /context 展示。 */
+  providerId?: string;
+  /** 可切换的 provider id 列表。 */
+  providers?: readonly string[];
+  /** 当前 session 的非敏感 provider 配置。 */
+  providerConfig?: PersistedProviderConfig;
+  /** 当前 session 已保存的多个 provider profile。 */
+  providerConfigs?: readonly PersistedProviderConfig[];
+  /** 持久化/删除当前 session 的 provider profile。 */
+  saveProviderConfig?: (sessionId: string, config: PersistedProviderConfig) => void;
+  deleteProviderConfig?: (sessionId: string, providerId: string) => void;
+  /** 系统 keychain 中的 API key（按 session + provider 隔离）。 */
+  apiKey?: string;
+  loadApiKey?: (sessionId: string, providerId: string) => Promise<string | undefined>;
+  saveApiKey?: (sessionId: string, providerId: string, secret: string) => Promise<void>;
+  deleteApiKey?: (sessionId: string, providerId: string) => Promise<void>;
   /** 启动时的欢迎语。 */
   banner?: string;
   /** 沙箱档位，用于状态栏与升档提示。 */
@@ -179,6 +210,20 @@ export class TuiApp implements TuiInteraction {
   #session: AgentSession;
   #tools: ToolRegistry;
   #cwd: string;
+  #providerId: string;
+  #providerIds: readonly string[];
+  #registeredProviderIds: ReadonlySet<string>;
+  /** 当前 provider 的非敏感配置；API key 不在其中。 */
+  #providerConfig: PersistedProviderConfig | undefined;
+  /** 本进程内新增/切换过的 provider 配置，便于切回来。 */
+  #providerConfigs = new Map<string, PersistedProviderConfig>();
+  #saveProviderConfig: ((sessionId: string, config: PersistedProviderConfig) => void) | undefined;
+  #deleteProviderConfig: ((sessionId: string, providerId: string) => void) | undefined;
+  #loadApiKey: ((sessionId: string, providerId: string) => Promise<string | undefined>) | undefined;
+  #saveApiKey: ((sessionId: string, providerId: string, secret: string) => Promise<void>) | undefined;
+  #deleteApiKey: ((sessionId: string, providerId: string) => Promise<void>) | undefined;
+  /** 当前进程内、当前 session 的 API key 覆盖；不落盘。 */
+  #apiKeyOverride: string | undefined;
   #createRuntime:
     | ((interaction: TuiInteraction, request?: RuntimeRequest) => SessionRuntime)
     | undefined;
@@ -213,6 +258,8 @@ export class TuiApp implements TuiInteraction {
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
   #abort: AbortController | undefined;
+  /** 串行化所有工具触发的交互弹窗，避免并发工具互相覆盖对话框状态。 */
+  #interactionTail: Promise<void> = Promise.resolve();
   #renderScheduled = false;
   #resolveExit: (() => void) | undefined;
   #mode: SandboxMode = "workspace-write";
@@ -224,8 +271,10 @@ export class TuiApp implements TuiInteraction {
   /** 进行中的 ask_user 问答流程。 */
   #askFlow: AskUserFlow | undefined;
   #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
-  /** 对话框覆盖层在 body 里的起始行（-1 表示当前没有对话框）。鼠标命中要用。 */
+  /** 对话框在屏幕上的起始行（0-based；-1 表示当前没有对话框）。鼠标命中要用。 */
   #dialogTopRow = -1;
+  /** 对话框占用的行数；用于把鼠标事件限制在弹窗区域。 */
+  #dialogHeight = 0;
   /** 当前权限弹窗按钮的鼠标命中区间（行号相对覆盖层顶部）。 */
   #dialogButtonHits: DialogButtonRowHit[] = [];
   /** 当前消息操作菜单按钮的鼠标命中区间。 */
@@ -260,6 +309,26 @@ export class TuiApp implements TuiInteraction {
     this.#session = options.session;
     this.#tools = options.tools;
     this.#cwd = options.cwd;
+    this.#providerId = options.providerId ?? options.session.client.id.split("/")[0] ?? "unknown";
+    const savedProviderConfigs = options.providerConfigs ?? [];
+    for (const config of savedProviderConfigs) this.#providerConfigs.set(config.id, config);
+    if (options.providerConfig !== undefined) {
+      this.#providerConfigs.set(options.providerConfig.id, options.providerConfig);
+    }
+    this.#registeredProviderIds = new Set(options.providers ?? []);
+    const providerIds = new Set<string>([
+      ...(options.providers ?? [this.#providerId]),
+      ...savedProviderConfigs.map((config) => config.id),
+      this.#providerId,
+    ]);
+    this.#providerIds = [...providerIds];
+    this.#providerConfig = options.providerConfig ?? this.#providerConfigs.get(this.#providerId);
+    this.#saveProviderConfig = options.saveProviderConfig;
+    this.#deleteProviderConfig = options.deleteProviderConfig;
+    this.#loadApiKey = options.loadApiKey;
+    this.#saveApiKey = options.saveApiKey;
+    this.#deleteApiKey = options.deleteApiKey;
+    this.#apiKeyOverride = options.apiKey;
     this.#createRuntime = options.createRuntime;
     this.#createSession = options.createSession;
     this.#branchService = options.branchService;
@@ -277,15 +346,17 @@ export class TuiApp implements TuiInteraction {
    * 会挂起当前 turn，直到用户按下 y / n。
    */
   askPermission(request: PermissionRequest): Promise<boolean> {
-    return this.#openDialog({
-      title: `权限确认 · ${request.tool}`,
-      body: [request.summary],
-      hint: `[y] 允许    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
-      actions: [
-        { label: "允许", value: true, tone: "ok" },
-        { label: "拒绝", value: false, tone: "error" },
-      ],
-    });
+    return this.#serializeInteraction(() =>
+      this.#openDialog({
+        title: `权限确认 · ${request.tool}`,
+        body: [request.summary],
+        hint: `${DIM}Esc / Enter 取消${RESET}`,
+        actions: [
+          { label: "同意", value: true, tone: "ok", shortcut: "y" },
+          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+        ],
+      }),
+    );
   }
 
   /**
@@ -295,15 +366,17 @@ export class TuiApp implements TuiInteraction {
    * 否则用户看到的是一句没有上下文的"是否允许联网"，根本不知道在批准什么。
    */
   requestCapability(escalation: CapabilityEscalation): Promise<boolean> {
-    return this.#openDialog({
-      title: `需要授权 · ${describeCapability(escalation.capability)}`,
-      body: [escalation.reason, ...(escalation.details ?? [])],
-      hint: `[y] 允许这一次    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
-      actions: [
-        { label: "允许这一次", value: true, tone: "ok" },
-        { label: "拒绝", value: false, tone: "error" },
-      ],
-    });
+    return this.#serializeInteraction(() =>
+      this.#openDialog({
+        title: `需要授权 · ${describeCapability(escalation.capability)}`,
+        body: [escalation.reason, ...(escalation.details ?? [])],
+        hint: `${DIM}Esc / Enter 取消${RESET}`,
+        actions: [
+          { label: "允许这一次", value: true, tone: "warn", shortcut: "y" },
+          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+        ],
+      }),
+    );
   }
 
   /**
@@ -312,21 +385,23 @@ export class TuiApp implements TuiInteraction {
    * 和权限确认共用同一个对话框 —— 将来 `ask_user` 也接这里。
    */
   confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean> {
-    return this.#openDialog({
-      title: `需要更高档位 · ${needed}`,
-      body: [
-        `${request.tool} 想${request.summary}`,
-        `当前档位（${this.#mode}）不允许，需要升到 ${needed}`,
-      ],
-      hint: `[y] 升到 ${needed}（本次会话）    [n] 拒绝    ${DIM}Esc / Enter 拒绝${RESET}`,
-      actions: [
-        { label: "允许升档", value: true, tone: "ok" },
-        { label: "拒绝", value: false, tone: "error" },
-      ],
-    }).then((approved) => {
-      if (approved) this.#mode = needed;
-      return approved;
-    });
+    return this.#serializeInteraction(() =>
+      this.#openDialog({
+        title: `需要更高档位 · ${needed}`,
+        body: [
+          `${request.tool} 想${request.summary}`,
+          `当前档位（${this.#mode}）不允许，需要升到 ${needed}`,
+        ],
+        hint: `${DIM}Esc / Enter 取消${RESET}`,
+        actions: [
+          { label: `升到 ${needed}`, value: true, tone: "warn", shortcut: "y" },
+          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+        ],
+      }).then((approved) => {
+        if (approved) this.#mode = needed;
+        return approved;
+      }),
+    );
   }
 
   /**
@@ -336,14 +411,27 @@ export class TuiApp implements TuiInteraction {
    * 按键路由到 AskUserFlow。返回 undefined 表示用户中止。
    */
   askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined> {
-    return new Promise<AskUserAnswer[] | undefined>((resolve) => {
-      this.#askResolve = resolve;
-      this.#askFlow = new AskUserFlow({
-        questions,
-        onChange: () => this.#render(true),
-      });
-      this.#render(true);
-    });
+    return this.#serializeInteraction(
+      () =>
+        new Promise<AskUserAnswer[] | undefined>((resolve) => {
+          this.#askResolve = resolve;
+          this.#askFlow = new AskUserFlow({
+            questions,
+            onChange: () => this.#render(true),
+          });
+          this.#render(true);
+        }),
+    );
+  }
+
+  /** 工具触发的交互弹窗按到达顺序串行；同一时刻只能有一个可见对话框。 */
+  #serializeInteraction<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.#interactionTail.then(task, task);
+    this.#interactionTail = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
   }
 
   #finishAsk(answers: AskUserAnswer[] | undefined): void {
@@ -597,14 +685,21 @@ export class TuiApp implements TuiInteraction {
     if (!key.pressed) return;
 
     // ask_user：点到选项就选中/勾选，点到汇总里的题就跳回去。
-    // 覆盖层第 0 行是上边框，所以 flow 行号要再减 1。
+    // #dialogTopRow 现在是 0-based 屏幕行号；覆盖层第 0 行是上边框。
     if (key.button === "left" && this.#askFlow !== undefined && this.#dialogTopRow >= 0) {
-      const flowLine = bodyRow - this.#dialogTopRow - 1;
-      if (flowLine >= 0 && this.#askFlow.clickLine(flowLine)) {
+      const dialogRow = key.y - 1 - this.#dialogTopRow;
+      const flowLine = dialogRow - 1;
+      if (
+        dialogRow >= 0 &&
+        dialogRow < this.#dialogHeight &&
+        flowLine >= 0 &&
+        this.#askFlow.clickLine(flowLine)
+      ) {
         this.#render(true);
         return;
       }
-      return;
+      // 点击弹窗其它区域时吞掉事件，不能穿透到下面的消息列表。
+      if (dialogRow >= 0 && dialogRow < this.#dialogHeight) return;
     }
 
     if (key.button === "left" && hitTest(this.#returnToLatestHit, key.x, key.y)) {
@@ -655,13 +750,14 @@ export class TuiApp implements TuiInteraction {
   }
 
   #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
-    const bodyRow = y - 2;
     if (this.#dialogTopRow < 0) return undefined;
+    const dialogRow = y - 1 - this.#dialogTopRow;
+    if (dialogRow < 0 || dialogRow >= this.#dialogHeight) return undefined;
 
     if (this.#pendingMessageMenu !== undefined) {
       const action = hitDialogActionAtLine(
         this.#messageButtonHits,
-        bodyRow - this.#dialogTopRow,
+        dialogRow,
         x - 1,
       );
       return action === undefined ? undefined : { kind: "message", value: action };
@@ -670,7 +766,7 @@ export class TuiApp implements TuiInteraction {
     if (this.#pendingDialog !== undefined) {
       const answer = hitDialogActionAtLine(
         this.#dialogButtonHits,
-        bodyRow - this.#dialogTopRow,
+        dialogRow,
         x - 1,
       );
       return answer === undefined ? undefined : { kind: "dialog", value: answer };
@@ -728,7 +824,11 @@ export class TuiApp implements TuiInteraction {
 
   #submit(): void {
     const text = this.#input.trim();
-    if (text.length === 0) return;
+    if (text.length === 0) {
+      // abort 后队列会保留；空 Enter 是用户明确表示“继续跑排队消息”。
+      if (!this.#busy && this.#session.queuedUserCount > 0) this.#drainQueuedUser();
+      return;
+    }
     if (text === "/exit" || text === "/quit") {
       this.#requestExit();
       return;
@@ -737,12 +837,641 @@ export class TuiApp implements TuiInteraction {
       this.#startNewSession();
       return;
     }
+    if (text === "/") {
+      this.#clearInput();
+      void this.#openCommandPalette();
+      return;
+    }
+    if (text === "/context") {
+      this.#clearInput();
+      void this.#openContextDialog();
+      return;
+    }
+    if (text === "/mode") {
+      this.#clearInput();
+      void this.#chooseSandboxMode();
+      return;
+    }
+    if (text.startsWith("/mode ")) {
+      const mode = text.slice("/mode ".length).trim();
+      this.#clearInput();
+      if (!isSandboxMode(mode)) {
+        this.#transcript.pushError("未知档位，可选：read-only / workspace-write / no-sandbox");
+        this.#render();
+        return;
+      }
+      this.#reconfigureRuntime({ mode });
+      return;
+    }
+    if (text === "/provider") {
+      this.#clearInput();
+      void this.#chooseProvider();
+      return;
+    }
+    if (text.startsWith("/provider ")) {
+      const providerId = text.slice("/provider ".length).trim();
+      this.#clearInput();
+      if (!this.#providerIds.includes(providerId)) {
+        this.#transcript.pushError(`未知 provider：${providerId}`);
+        this.#render();
+        return;
+      }
+      this.#reconfigureRuntime({ providerId });
+      return;
+    }
+    if (text === "/model") {
+      this.#clearInput();
+      void this.#promptModel();
+      return;
+    }
+    if (text.startsWith("/model ")) {
+      const model = text.slice("/model ".length).trim();
+      this.#clearInput();
+      if (model.length === 0) {
+        this.#transcript.pushError("model 不能为空");
+        this.#render();
+        return;
+      }
+      this.#reconfigureRuntime({ model });
+      return;
+    }
+    if (text === "/key") {
+      this.#clearInput();
+      void this.#promptApiKey();
+      return;
+    }
+    if (text.startsWith("/")) {
+      this.#clearInput();
+      this.#transcript.pushError(`未知命令：${text}。输入 / 查看命令菜单`);
+      this.#render();
+      return;
+    }
 
     this.#input = "";
     this.#cursor = 0;
     this.#viewState = initialHistoryView();
+
+    // busy 时绝不启动第二个 runTurn：先排队，等当前 turn 正常结束后自动 drain。
+    if (this.#busy || this.#session.hasOpenToolBatch()) {
+      const result = this.#session.submitUser(text);
+      if (result.status === "queued") {
+        this.#transcript.pushNotice(`[已排队 ${this.#session.queuedUserCount}]`);
+      }
+      this.#render();
+      return;
+    }
+
+    // abort 后队列可能仍有内容；新输入排在队尾，并立即从队首继续，保持 FIFO。
+    if (this.#session.queuedUserCount > 0) {
+      this.#session.enqueueUser(text);
+      this.#drainQueuedUser();
+      return;
+    }
+
     this.#render();
     void this.#runTurn(text);
+  }
+
+  #clearInput(): void {
+    this.#input = "";
+    this.#cursor = 0;
+    this.#viewState = initialHistoryView();
+    this.#render();
+  }
+
+  /** `/`：用现有 ask_user 选择器承载命令面板。 */
+  async #openCommandPalette(): Promise<void> {
+    const commands = [
+      { label: "/context   查看当前 session 上下文", run: () => this.#openContextDialog() },
+      { label: "/provider  切换 provider", run: () => this.#chooseProvider() },
+      { label: "/model     切换模型", run: () => this.#promptModel() },
+      { label: "/key       设置 API key（系统 keychain）", run: () => this.#promptApiKey() },
+      { label: "/mode      调整沙箱档位", run: () => this.#chooseSandboxMode() },
+      { label: "/new       新建会话", run: () => this.#startNewSession() },
+      { label: "/exit      退出", run: () => this.#requestExit() },
+    ] as const;
+
+    const answers = await this.askUser([
+      {
+        question: "选择命令",
+        options: commands.map((command) => command.label),
+      },
+    ]);
+    const selected = answers?.[0]?.selected[0];
+    if (selected === undefined) return;
+    await commands[selected]?.run();
+  }
+
+  /** `/context`：展示当前 session 的 effective config，并提供配置入口。 */
+  async #openContextDialog(): Promise<void> {
+    const openMenu = await this.#openDialog({
+      title: "会话上下文",
+      body: [
+        `session   ${this.#session.id}`,
+        `branch    ${this.#session.branchId ?? "(未启用分支)"}`,
+        `provider  ${this.#providerId}`,
+        `model     ${this.#session.model}`,
+        `client    ${this.#session.client.id}`,
+        `endpoint  ${this.#providerConfig?.endpoint ?? "(registry)"}`,
+        `baseUrl   ${this.#providerConfig?.baseUrl ?? "(registry)"}`,
+        `sandbox   ${this.#mode}`,
+        `API key   ${this.#apiKeyOverride !== undefined ? "已设置（keychain / 内存）" : "使用 provider 配置"}`,
+        `持久化    ${this.#createRuntime === undefined ? "关闭" : "开启"}`,
+      ],
+      hint: `${DIM}Esc / Enter 关闭${RESET}`,
+      actions: [
+        { label: "打开配置菜单", value: true, tone: "warn", shortcut: "m" },
+        { label: "关闭", value: false, tone: "neutral", shortcut: "Esc" },
+      ],
+    });
+    if (openMenu) await this.#openContextActions();
+  }
+
+  /** `/context` 的二级菜单。 */
+  async #openContextActions(): Promise<void> {
+    const actions = [
+      { label: "调整沙箱档位", run: () => this.#chooseSandboxMode() },
+      { label: "切换 provider", run: () => this.#chooseProvider() },
+      { label: "切换模型", run: () => this.#promptModel() },
+      { label: "设置 API key", run: () => this.#promptApiKey() },
+    ] as const;
+
+    const answers = await this.askUser([
+      {
+        question: "选择要调整的配置",
+        options: actions.map((action) => action.label),
+      },
+    ]);
+    const selected = answers?.[0]?.selected[0];
+    if (selected === undefined) return;
+    await actions[selected]?.run();
+  }
+
+  /** 用单选表单切换当前 session 的沙箱档位。 */
+  async #chooseSandboxMode(): Promise<void> {
+    const modes: readonly SandboxMode[] = ["read-only", "workspace-write", "no-sandbox"];
+    const answers = await this.askUser([
+      {
+        question: "选择当前 session 的沙箱档位",
+        options: [
+          "read-only — 根只读、工作区只读、断网",
+          "workspace-write — 工作区可写、根只读、断网",
+          "no-sandbox — 不隔离（危险）",
+        ],
+      },
+    ]);
+    const selected = answers?.[0]?.selected[0];
+    if (selected === undefined) return;
+    const mode = modes[selected];
+    if (mode !== undefined) this.#reconfigureRuntime({ mode });
+  }
+
+  /** `/provider`：从已注册 provider 里选一个，或新增/管理 session provider。 */
+  async #chooseProvider(): Promise<void> {
+    const addLabel = "＋ 新增 provider…";
+    const manageLabel = "⚙ 管理 session provider profiles…";
+    const options = [...this.#providerIds, addLabel, manageLabel];
+    const answers = await this.askUser([
+      {
+        question: "选择当前 session 的 provider",
+        options,
+      },
+    ]);
+    const selected = answers?.[0]?.selected[0];
+    if (selected === undefined) return;
+    if (selected === this.#providerIds.length) {
+      await this.#addProvider();
+      return;
+    }
+    if (selected === this.#providerIds.length + 1) {
+      await this.#openProviderManager();
+      return;
+    }
+    const providerId = this.#providerIds[selected];
+    if (providerId === undefined) return;
+    const providerConfig = this.#providerConfigs.get(providerId);
+    const apiKey = await this.#loadApiKey?.(this.#session.id, providerId);
+    this.#reconfigureRuntime({
+      providerId,
+      ...(providerConfig !== undefined ? { providerConfig } : {}),
+      ...(apiKey !== undefined ? { apiKey } : {}),
+    });
+  }
+
+  /** 管理当前 session 的 provider profiles。 */
+  async #openProviderManager(): Promise<void> {
+    const profiles = [...this.#providerConfigs.values()];
+    if (profiles.length === 0) {
+      this.#transcript.pushError("当前 session 还没有自定义 provider profile");
+      this.#render(true);
+      return;
+    }
+    const answers = await this.askUser([
+      {
+        question: "选择要管理的 provider profile",
+        options: [...profiles.map((profile) => profile.id), "返回"],
+      },
+    ]);
+    const selected = answers?.[0]?.selected[0];
+    if (selected === undefined || selected >= profiles.length) return;
+    await this.#manageProviderProfile(profiles[selected]!.id);
+  }
+
+  async #manageProviderProfile(providerId: string): Promise<void> {
+    const config = this.#providerConfigs.get(providerId);
+    if (config === undefined) return;
+    const answers = await this.askUser([
+      {
+        question: `管理 provider profile：${providerId}`,
+        options: ["切换到这个 provider", "重命名", "复制", "删除", "清除 API key", "返回"],
+      },
+    ]);
+    const action = answers?.[0]?.selected[0];
+    if (action === undefined || action === 5) return;
+
+    if (action === 0) {
+      const apiKey = await this.#loadApiKey?.(this.#session.id, providerId);
+      this.#reconfigureRuntime({
+        providerId,
+        providerConfig: config,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+      });
+      return;
+    }
+
+    if (action === 1) {
+      const newId = await this.#promptText("输入新的 provider id");
+      if (newId === undefined) return;
+      if (this.#providerConfigs.has(newId)) {
+        this.#transcript.pushError(`provider profile 已存在：${newId}`);
+        this.#render(true);
+        return;
+      }
+      const oldKey =
+        (await this.#loadApiKey?.(this.#session.id, providerId)) ??
+        (providerId === this.#providerId ? this.#apiKeyOverride : undefined);
+      const renamed: PersistedProviderConfig = { ...config, id: newId };
+      if (providerId === this.#providerId) {
+        if (
+          !this.#reconfigureRuntime({
+            providerId: newId,
+            providerConfig: renamed,
+            ...(oldKey !== undefined ? { apiKey: oldKey } : {}),
+          })
+        ) {
+          return;
+        }
+      } else {
+        if (this.#saveProviderConfig === undefined) {
+          this.#transcript.pushError("当前未启用持久化，无法重命名 provider profile");
+          this.#render(true);
+          return;
+        }
+        this.#saveProviderConfig(this.#session.id, renamed);
+      }
+      this.#deleteProviderConfig?.(this.#session.id, providerId);
+      if (oldKey !== undefined) {
+        await this.#saveApiKey?.(this.#session.id, newId, oldKey);
+        await this.#deleteApiKey?.(this.#session.id, providerId);
+      }
+      this.#providerConfigs.delete(providerId);
+      this.#providerConfigs.set(newId, renamed);
+      this.#refreshProviderIds();
+      this.#audit?.sessionConfig({
+        action: "provider_profile_rename",
+        fromProviderId: providerId,
+        toProviderId: newId,
+      });
+      this.#transcript.pushNotice(`已重命名 provider profile：${providerId} -> ${newId}`);
+      this.#render(true);
+      return;
+    }
+
+    if (action === 2) {
+      const newId = await this.#promptText("输入复制后的 provider id");
+      if (newId === undefined) return;
+      if (this.#providerConfigs.has(newId)) {
+        this.#transcript.pushError(`provider profile 已存在：${newId}`);
+        this.#render(true);
+        return;
+      }
+      if (this.#saveProviderConfig === undefined) {
+        this.#transcript.pushError("当前未启用持久化，无法复制 provider profile");
+        this.#render(true);
+        return;
+      }
+      const copied: PersistedProviderConfig = { ...config, id: newId };
+      this.#saveProviderConfig(this.#session.id, copied);
+      const oldKey = await this.#loadApiKey?.(this.#session.id, providerId);
+      if (oldKey !== undefined) await this.#saveApiKey?.(this.#session.id, newId, oldKey);
+      this.#providerConfigs.set(newId, copied);
+      this.#refreshProviderIds();
+      this.#audit?.sessionConfig({
+        action: "provider_profile_copy",
+        fromProviderId: providerId,
+        toProviderId: newId,
+      });
+      this.#transcript.pushNotice(`已复制 provider profile：${providerId} -> ${newId}`);
+      this.#render(true);
+      return;
+    }
+
+    if (action === 3) {
+      if (providerId === this.#providerId) {
+        this.#transcript.pushError("不能删除当前 active provider，先切换到其它 provider");
+        this.#render(true);
+        return;
+      }
+      if (this.#deleteProviderConfig === undefined) {
+        this.#transcript.pushError("当前未启用持久化，无法删除 provider profile");
+        this.#render(true);
+        return;
+      }
+      this.#deleteProviderConfig(this.#session.id, providerId);
+      await this.#deleteApiKey?.(this.#session.id, providerId);
+      this.#providerConfigs.delete(providerId);
+      this.#refreshProviderIds();
+      this.#audit?.sessionConfig({
+        action: "provider_profile_delete",
+        providerId,
+      });
+      this.#transcript.pushNotice(`已删除 provider profile：${providerId}`);
+      this.#render(true);
+      return;
+    }
+
+    if (action === 4) {
+      await this.#deleteApiKey?.(this.#session.id, providerId);
+      this.#reconfigureRuntime({ clearApiKey: true });
+      this.#audit?.sessionConfig({ action: "api_key_clear", providerId });
+      this.#transcript.pushNotice(`已清除 API key：${providerId}`);
+      this.#render(true);
+    }
+  }
+
+  #refreshProviderIds(): void {
+    this.#providerIds = [
+      ...new Set<string>([
+        ...this.#registeredProviderIds,
+        ...this.#providerConfigs.keys(),
+        this.#providerId,
+      ]),
+    ];
+  }
+
+  /** 新增 session 级 provider：非敏感字段持久化，API key 只留内存。 */
+  async #addProvider(): Promise<void> {
+    const id = await this.#promptText("输入 provider id（例如 local）");
+    if (id === undefined) return;
+
+    const endpointAnswers = await this.askUser([
+      {
+        question: "选择 provider endpoint",
+        options: ["openai-chat", "mock"],
+      },
+    ]);
+    const endpointIndex = endpointAnswers?.[0]?.selected[0];
+    if (endpointIndex === undefined) return;
+    const endpoint = endpointIndex === 0 ? "openai-chat" : "mock";
+
+    const baseUrl = await this.#promptText("输入 base URL（mock 可留空）");
+
+    const advancedAnswers = await this.askUser([
+      {
+        question: "配置高级字段？",
+        options: ["跳过", "配置 headers / extraBody / reasoningReplay / proxy"],
+      },
+    ]);
+    const advancedIndex = advancedAnswers?.[0]?.selected[0];
+    if (advancedIndex === undefined) return;
+    const advanced = advancedIndex === 1;
+
+    const headersText = advanced
+      ? await this.#promptText("输入 headers JSON（可留空，例如 {\"x-a\":\"b\"}）")
+      : undefined;
+    const extraBodyText = advanced
+      ? await this.#promptText("输入 extraBody JSON（可留空）")
+      : undefined;
+
+    let reasoningReplay: PersistedProviderConfig["reasoningReplay"];
+    if (advanced) {
+      const reasoningAnswers = await this.askUser([
+        {
+          question: "选择 reasoningReplay",
+          options: ["不覆盖（默认）", "none", "reasoning", "reasoning_content", "both"],
+        },
+      ]);
+      const reasoningIndex = reasoningAnswers?.[0]?.selected[0];
+      if (reasoningIndex === undefined) return;
+      reasoningReplay =
+        reasoningIndex === 0
+          ? undefined
+          : (["none", "reasoning", "reasoning_content", "both"] as const)[reasoningIndex - 1];
+    }
+
+    const proxyText = advanced
+      ? await this.#promptText("输入 proxy（留空=默认，false=直连）")
+      : undefined;
+    const apiKey = await this.#promptSecret("输入 API key（可留空，仅当前进程）");
+
+    try {
+      const headers =
+        headersText === undefined
+          ? undefined
+          : this.#parseJsonObject(headersText, "headers", "string");
+      const extraBody =
+        extraBodyText === undefined ? undefined : this.#parseJsonObject(extraBodyText, "extraBody");
+      const providerConfig: PersistedProviderConfig = {
+        id,
+        endpoint,
+        ...(baseUrl !== undefined ? { baseUrl } : {}),
+        ...(headers !== undefined ? { headers: headers as Record<string, string> } : {}),
+        ...(extraBody !== undefined ? { extraBody } : {}),
+        ...(reasoningReplay !== undefined ? { reasoningReplay } : {}),
+        ...(proxyText !== undefined ? { proxy: proxyText === "false" ? false : proxyText } : {}),
+      };
+      this.#providerConfigs.set(id, providerConfig);
+      this.#saveProviderConfig?.(this.#session.id, providerConfig);
+      this.#refreshProviderIds();
+      const ok = this.#reconfigureRuntime({
+        providerId: id,
+        providerConfig,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+      });
+      if (ok) {
+        if (apiKey !== undefined) await this.#saveApiKey?.(this.#session.id, id, apiKey);
+        this.#audit?.sessionConfig({
+          action: "provider_profile_create",
+          providerId: id,
+        });
+      }
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render(true);
+    }
+  }
+
+  #parseJsonObject(
+    text: string,
+    label: string,
+    valueType?: "string",
+  ): Record<string, unknown> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(`${label} 不是合法 JSON`);
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${label} 必须是 JSON object`);
+    }
+    const record = parsed as Record<string, unknown>;
+    if (valueType === "string") {
+      for (const [key, value] of Object.entries(record)) {
+        if (typeof value !== "string") throw new Error(`${label}.${key} 必须是字符串`);
+      }
+    }
+    return record;
+  }
+
+  /** 单行文本输入：单个无选项问题会自动进入输入态。 */
+  async #promptText(question: string): Promise<string | undefined> {
+    const answers = await this.askUser([{ question, options: [] }]);
+    const value = answers?.[0]?.custom?.trim();
+    return value !== undefined && value.length > 0 ? value : undefined;
+  }
+
+  /** 掩码输入；返回值只交给调用方，不写 transcript。 */
+  async #promptSecret(question: string): Promise<string | undefined> {
+    const answers = await this.askUser([{ question, options: [], secret: true }]);
+    const value = answers?.[0]?.custom?.trim();
+    return value !== undefined && value.length > 0 ? value : undefined;
+  }
+
+  /** `/model`：输入模型名；也可以输入 provider/model 一次切换两者。 */
+  async #promptModel(): Promise<void> {
+    const input = await this.#promptText("输入模型名（可写 provider/model）");
+    if (input === undefined) return;
+
+    try {
+      if (input.includes("/")) {
+        const ref = parseModelRef(input);
+        const providerConfig = this.#providerConfigs.get(ref.provider);
+        this.#reconfigureRuntime({
+          providerId: ref.provider,
+          model: ref.model,
+          ...(providerConfig !== undefined ? { providerConfig } : {}),
+        });
+      } else {
+        this.#reconfigureRuntime({ model: input });
+      }
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render(true);
+    }
+  }
+
+  /** `/key`：掩码输入；保存到系统 keychain，失败时降级到进程内存。 */
+  async #promptApiKey(): Promise<void> {
+    const key = await this.#promptSecret("输入 API key（保存到系统 keychain；不可用则仅当前进程）");
+    if (key === undefined) return;
+    const providerId = this.#providerId;
+    if (this.#reconfigureRuntime({ apiKey: key })) {
+      await this.#saveApiKey?.(this.#session.id, providerId, key);
+      this.#audit?.sessionConfig({ action: "api_key_set", providerId });
+    }
+  }
+
+  /**
+   * 只重建当前 session 的 runtime，不换 session / branch，也不动消息历史。
+   * provider/client 与 sandbox runner 都是构建期对象，所以必须走重建。
+   */
+  #reconfigureRuntime(
+    overrides: {
+      mode?: SandboxMode;
+      providerId?: string;
+      model?: string;
+      apiKey?: string;
+      clearApiKey?: boolean;
+      providerConfig?: PersistedProviderConfig;
+    } = {},
+  ): boolean {
+    const mode = overrides.mode ?? this.#mode;
+    const providerId = overrides.providerId ?? this.#providerId;
+    const model = overrides.model ?? this.#session.model;
+    const providerChanged = providerId !== this.#providerId;
+    const providerConfig =
+      overrides.providerConfig ?? (providerChanged ? undefined : this.#providerConfig);
+    const apiKey = overrides.clearApiKey
+      ? undefined
+      : overrides.apiKey ?? (providerChanged ? undefined : this.#apiKeyOverride);
+
+    if (
+      mode === this.#mode &&
+      providerId === this.#providerId &&
+      model === this.#session.model &&
+      overrides.apiKey === undefined &&
+      overrides.clearApiKey !== true &&
+      overrides.providerConfig === undefined
+    ) {
+      this.#transcript.pushNotice("当前 session 配置没有变化");
+      this.#render(true);
+      return true;
+    }
+    if (this.#busy) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再切换配置");
+      this.#render(true);
+      return false;
+    }
+    if (this.#createRuntime === undefined) {
+      this.#transcript.pushError("当前未启用 runtime 切换，无法调整 session 配置");
+      this.#render(true);
+      return false;
+    }
+    if (this.#session.queuedUserCount > 0) {
+      this.#transcript.pushError("当前 session 还有排队消息，先处理完再切换配置");
+      this.#render(true);
+      return false;
+    }
+
+    try {
+      const runtime = this.#createRuntime(this, {
+        sessionId: this.#session.id,
+        ...(this.#session.branchId !== undefined ? { branchId: this.#session.branchId } : {}),
+        mode,
+        providerId,
+        model,
+        ...(providerConfig !== undefined ? { providerConfig } : {}),
+        ...(apiKey !== undefined ? { apiKey } : {}),
+      });
+      this.#adoptRuntime(runtime);
+      if (overrides.clearApiKey === true) this.#apiKeyOverride = undefined;
+      else if (overrides.apiKey !== undefined) this.#apiKeyOverride = overrides.apiKey;
+      else if (providerChanged) this.#apiKeyOverride = undefined;
+      if (providerConfig !== undefined) {
+        this.#providerConfig = providerConfig;
+        this.#providerConfigs.set(providerId, providerConfig);
+      } else if (providerChanged) {
+        this.#providerConfig = undefined;
+      }
+      this.#audit?.sessionConfig({
+        action: "provider_model_mode",
+        providerId,
+        model,
+        mode,
+      });
+      this.#transcript.pushNotice(
+        `当前 session 配置已更新：${providerId}/${model} · ${mode}${
+          this.#apiKeyOverride !== undefined ? " · API key 仅当前进程生效" : ""
+        }`,
+      );
+      this.#render(true);
+      return true;
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render(true);
+      return false;
+    }
   }
 
   /** `/new`：换一个全新会话，显示历史一并清空。 */
@@ -771,9 +1500,14 @@ export class TuiApp implements TuiInteraction {
     this.#toolHits = [];
 
     if (this.#createRuntime !== undefined) {
-      this.#adoptRuntime(this.#createRuntime(this, { mode: this.#mode }));
+      const runtime = this.#createRuntime(this, { mode: this.#mode });
+      this.#session.clearQueues();
+      this.#adoptRuntime(runtime);
     } else {
-      this.#session = this.#createSession!();
+      const next = this.#createSession!();
+      this.#session.clearQueues();
+      this.#session = next;
+      this.#apiKeyOverride = undefined;
       this.#lastAssistantMsgid = undefined;
     }
 
@@ -798,7 +1532,11 @@ export class TuiApp implements TuiInteraction {
 
     if (key.type === "text") {
       const value = key.value.trim().toLowerCase();
-      if (value === "y" || value === "yes") answer = true;
+      const shortcut = dialog.actions.find(
+        (action) => action.shortcut !== undefined && action.shortcut.toLowerCase() === value,
+      );
+      if (shortcut !== undefined) answer = shortcut.value;
+      else if (value === "y" || value === "yes") answer = true;
       else if (value === "n" || value === "no") answer = false;
     } else if (key.type === "enter" || key.type === "escape") {
       answer = false;
@@ -840,7 +1578,6 @@ export class TuiApp implements TuiInteraction {
       `${message.role} / ${message.origin} · msgid ${message.msgid}`,
       oneLine(storedText(message)) || (toolCount > 0 ? `${toolCount} 个工具调用` : "(无文本)"),
       "",
-      "快捷键：u 撤回 · f 分叉 · r 重试 · c 复制 · i 检查 · Esc 取消",
     ];
 
     this.#clearButtonInteraction();
@@ -854,6 +1591,7 @@ export class TuiApp implements TuiInteraction {
         label: item.label,
         value: item.action,
         ...(item.tone !== undefined ? { tone: item.tone } : {}),
+        ...(item.shortcut !== undefined ? { shortcut: item.shortcut } : {}),
       })),
     };
     this.#render(true);
@@ -938,7 +1676,7 @@ export class TuiApp implements TuiInteraction {
               ...storedText(message).split("\n").slice(0, 6),
             ],
             hint: `${DIM}Esc / Enter 关闭${RESET}`,
-            actions: [{ label: "关闭", value: false, tone: "error" }],
+            actions: [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
           });
           return;
         }
@@ -975,7 +1713,7 @@ export class TuiApp implements TuiInteraction {
             "请先处理这些文件，再重新发起撤回。",
           ],
           hint: `${DIM}Esc / Enter 关闭${RESET}`,
-          actions: [{ label: "关闭", value: false, tone: "error" }],
+          actions: [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
         });
         return;
       }
@@ -998,10 +1736,10 @@ export class TuiApp implements TuiInteraction {
           todoImpact(before, after),
           workspaceNote,
         ],
-        hint: `[y] 确认撤回    [n] 取消    ${DIM}Esc / Enter 取消${RESET}`,
+        hint: `${DIM}Esc / Enter 取消${RESET}`,
         actions: [
-          { label: "确认撤回", value: true, tone: "warn" },
-          { label: "取消", value: false, tone: "error" },
+          { label: "确认撤回", value: true, tone: "warn", shortcut: "y" },
+          { label: "取消", value: false, tone: "neutral", shortcut: "n" },
         ],
       });
       if (!confirmed) return;
@@ -1028,10 +1766,12 @@ export class TuiApp implements TuiInteraction {
   }
 
   #adoptRuntime(runtime: SessionRuntime): void {
+    if (runtime.session.id !== this.#session.id) this.#apiKeyOverride = undefined;
     this.#session = runtime.session;
     this.#tools = runtime.tools;
     this.#mode = runtime.mode;
     this.#audit = runtime.audit;
+    this.#providerId = runtime.providerId;
     this.#lastAssistantMsgid = undefined;
   }
 
@@ -1047,6 +1787,8 @@ export class TuiApp implements TuiInteraction {
       branchId,
       mode: this.#mode,
     });
+    // 旧分支的排队消息不能带入新分支；retry 也只重发原 user message 一次。
+    this.#session.clearQueues();
     this.#adoptRuntime(runtime);
     this.#transcript = new Transcript();
     this.#transcript.restore(runtime.session.messages);
@@ -1070,8 +1812,9 @@ export class TuiApp implements TuiInteraction {
   /* --------------------------- 对话推进 --------------------------- */
 
   async #runTurn(input: string): Promise<void> {
+    const controller = new AbortController();
     this.#busy = true;
-    this.#abort = new AbortController();
+    this.#abort = controller;
     this.#thinking.reset();
     this.#stopThinkingAnimation();
     this.#render();
@@ -1128,28 +1871,68 @@ export class TuiApp implements TuiInteraction {
         this.#usage = Transcript.mergeUsage(this.#usage, usage);
         this.#scheduleRender();
       },
+      onExtensionRoleFallback: (error) => this.#confirmExtensionRoleFallback(error),
     };
     const hooks = combineHooks(uiHooks, this.#audit?.hooks());
 
+    let completed = false;
     try {
       // runUserTurn 负责把用户消息写进 session —— 不要绕过它直接调 runTurn
-      await runUserTurn(this.#session, input, {
+      const result = await runUserTurn(this.#session, input, {
         tools: this.#tools,
         cwd: this.#cwd,
         hooks,
-        signal: this.#abort.signal,
+        signal: controller.signal,
       });
+      completed = result.reason !== "error";
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     } finally {
+      const aborted = controller.signal.aborted;
       this.#transcript.endAssistant();
       this.#thinking.reset();
       this.#stopThinkingAnimation();
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
+
+      const queued = this.#session.queuedUserCount;
+      if (aborted && queued > 0) {
+        this.#transcript.pushNotice(`已中断；[已排队 ${queued}] 保留，按 Enter 继续`);
+      }
       this.#render();
+
+      // 正常结束才自动 drain；abort / 错误后保留队列，由用户决定何时继续。
+      if (completed && !aborted) this.#drainQueuedUser();
     }
+  }
+
+  /** 取队首用户消息，开始下一 turn；队列为空则 no-op。 */
+  #drainQueuedUser(): void {
+    if (this.#busy || this.#session.hasOpenToolBatch()) return;
+    const next = this.#session.dequeueUserAfterTurn();
+    if (next === undefined) return;
+    void this.#runTurn(next);
+  }
+
+  /** developer role 不被端点接受时，询问是否用 system role 重发扩展清单。 */
+  #confirmExtensionRoleFallback(error: unknown): Promise<boolean> {
+    const message = error instanceof Error ? error.message : String(error);
+    return this.#openDialog({
+      title: "兼容性回退 · developer role",
+      body: [
+        "当前 provider 可能不支持 developer role。",
+        "MCP / skills 清单仍在 msgid1/msgid2，历史不会被改写。",
+        "是否改用 system role 重新发送这两条清单？",
+        "",
+        oneLine(message, 72),
+      ],
+      hint: `${DIM}Esc / Enter 取消${RESET}`,
+      actions: [
+        { label: "改用 system role", value: true, tone: "warn", shortcut: "y" },
+        { label: "取消", value: false, tone: "neutral", shortcut: "n" },
+      ],
+    });
   }
 
   /** 思考中的菊花动画；没有 reasoning 时不常驻定时器。 */
@@ -1239,18 +2022,40 @@ export class TuiApp implements TuiInteraction {
   }
 
   #compose(width: number, height: number): string[] {
-    // 思考区固定预留（默认 5 行，小终端自动收缩），不思考时是全空白 ——
-    // 这块空间同时充当输入框上方的呼吸留白
-    const thinkingRows = Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
-    const thinkingBlock = composeThinkingBlock(this.#thinking, width, {
-      rows: thinkingRows,
-      frame: this.#thinkingFrame,
-    });
+    const overlayOpen =
+      this.#pendingDialog !== undefined ||
+      this.#pendingMessageMenu !== undefined ||
+      this.#askFlow !== undefined;
+    const dialogLines = overlayOpen ? this.#paintDialog(this.#renderDialog(width)) : [];
+    // 弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
+    const maxDialogRows = Math.max(0, height - 2);
+    const dialogBlock = dialogLines
+      .slice(0, maxDialogRows)
+      .map((line) => centerLine(line, width));
+    const dialogRows = dialogBlock.length;
 
-    // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置
+    // 思考区固定预留（默认 3 行，小终端自动收缩），不思考时是全空白 ——
+    // 这块空间同时充当输入框上方的呼吸留白。
+    // 有弹窗时隐藏思考区，把空间让给正文与弹窗。
+    const thinkingRows =
+      dialogRows > 0 ? 0 : Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
+    const thinkingBlock =
+      dialogRows > 0
+        ? []
+        : composeThinkingBlock(this.#thinking, width, {
+            rows: thinkingRows,
+            frame: this.#thinkingFrame,
+          });
+
+    // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置。
     const panelBudget = Math.max(
       0,
-      Math.min(Math.floor(height * 0.4), height - 3 - thinkingBlock.length),
+      Math.min(
+        Math.floor(height * 0.4),
+        dialogRows > 0
+          ? height - 2 - dialogRows
+          : height - 3 - thinkingBlock.length,
+      ),
     );
     const todoList = this.#todos();
     const todoPanel =
@@ -1262,27 +2067,22 @@ export class TuiApp implements TuiInteraction {
           })
         : [];
 
-    // 2 = 状态栏 + 输入面板第一行；INPUT_ROWS - 1 = 面板其余留白行
-    const bodyHeight = Math.max(
-      1,
-      height - 2 - (INPUT_ROWS - 1) - todoPanel.length - thinkingBlock.length,
-    );
+    const bodyHeight =
+      dialogRows > 0
+        ? Math.max(1, height - 1 - todoPanel.length - dialogRows)
+        : Math.max(
+            1,
+            height - 2 - (INPUT_ROWS - 1) - todoPanel.length - thinkingBlock.length,
+          );
     const body = this.#composeBody(width, bodyHeight);
 
-    // 对话框 / 问答 / 消息操作以覆盖层形式压在消息区底部
-    if (
-      this.#pendingDialog !== undefined ||
-      this.#pendingMessageMenu !== undefined ||
-      this.#askFlow !== undefined
-    ) {
-      const overlay = this.#renderDialog(width);
-      const start = Math.max(0, bodyHeight - overlay.length);
-      this.#dialogTopRow = start;
-      for (let i = 0; i < overlay.length && start + i < bodyHeight; i += 1) {
-        body[start + i] = overlay[i]!;
-      }
+    if (dialogRows > 0) {
+      // 0-based 屏幕行号；鼠标命中与 ask_user 点击都用它换算。
+      this.#dialogTopRow = 1 + bodyHeight + todoPanel.length;
+      this.#dialogHeight = dialogRows;
     } else {
       this.#dialogTopRow = -1;
+      this.#dialogHeight = 0;
       this.#dialogButtonHits = [];
       this.#messageButtonHits = [];
     }
@@ -1298,6 +2098,11 @@ export class TuiApp implements TuiInteraction {
       this.#returnToLatestHit = button.hit;
     } else {
       this.#returnToLatestHit = undefined;
+    }
+
+    if (dialogRows > 0) {
+      // 弹窗直接取代输入面板；弹窗打开期间按键都路由给弹窗，输入框本来也不可用。
+      return [this.#composeStatus(width), ...body, ...todoPanel, ...dialogBlock];
     }
 
     return [
@@ -1327,11 +2132,25 @@ export class TuiApp implements TuiInteraction {
     return this.#todoCache.list;
   }
 
+  /**
+   * 给弹窗整体铺独立底色。
+   *
+   * 每个 RESET 后面都要重新贴一次背景色，否则按钮/标题内部一旦 RESET，
+   * 后面的 padding 就会掉回终端默认底色，出现断裂的色带。
+   */
+  #paintDialog(lines: readonly string[]): string[] {
+    const background = bg(COLOR.dialogBg);
+    return lines.map((line) => {
+      const painted = line.replaceAll(RESET, `${RESET}${background}`);
+      return `${background}${painted}${RESET}`;
+    });
+  }
+
   #renderDialog(width: number): string[] {
     this.#dialogButtonHits = [];
     this.#messageButtonHits = [];
     const inner = Math.max(16, Math.min(width - 2, 74));
-    const color = fg(COLOR.warn);
+    const color = fg(COLOR.dialogBorder);
     const bar = `${color}│${RESET}`;
     const row = (text: string): string =>
       `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
@@ -1412,11 +2231,13 @@ export class TuiApp implements TuiInteraction {
     const modeColor = this.#mode === "no-sandbox" ? COLOR.warn : COLOR.ok;
     const badge = `${fg(modeColor)}${this.#mode}${RESET}`;
     const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}`;
+    const queued = this.#session.queuedUserCount;
+    const queueTag = queued > 0 ? ` ${fg(COLOR.warn)}[已排队 ${queued}]${RESET}` : "";
     const right = this.#busy
-      ? `${fg(COLOR.busy)}● 运行中${RESET}`
+      ? `${fg(COLOR.busy)}● 运行中${RESET}${queueTag}`
       : `${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${
           this.#usage.cached !== undefined ? ` ⚡${this.#usage.cached}` : ""
-        }${RESET}`;
+        }${RESET}${queueTag}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     return truncateAnsi(left + " ".repeat(gap) + right, width);
   }

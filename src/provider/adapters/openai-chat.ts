@@ -14,6 +14,7 @@ import type {
   ToolSchema,
 } from "../types.ts";
 import { messageText } from "../types.ts";
+import { readFileSync } from "node:fs";
 
 export type ProviderProxy = string | false;
 
@@ -24,6 +25,12 @@ export interface ProviderTlsConfig {
   key?: string;
   passphrase?: string;
   serverName?: string;
+  /** 从文件读取 CA；用于 session profile 的可导出配置。 */
+  caFile?: string;
+  /** 从文件读取客户端证书。 */
+  certFile?: string;
+  /** 从文件读取客户端私钥。 */
+  keyFile?: string;
 }
 
 export type ReasoningReplay = "none" | "reasoning" | "reasoning_content" | "both";
@@ -281,11 +288,27 @@ export function mapStreamEvent(
 /* ModelClient 实现                                                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 把可导出的 *File 字段解析成 Bun.fetch 需要的 PEM 字符串。
+ * 私钥/CA 内容不会进入 session profile，只保留文件路径。
+ */
+function resolveTlsConfig(tls: ProviderTlsConfig | undefined): ProviderTlsConfig | undefined {
+  if (tls === undefined) return undefined;
+  const { caFile, certFile, keyFile, ...rest } = tls;
+  return {
+    ...rest,
+    ...(caFile !== undefined ? { ca: readFileSync(caFile, "utf8") } : {}),
+    ...(certFile !== undefined ? { cert: readFileSync(certFile, "utf8") } : {}),
+    ...(keyFile !== undefined ? { key: readFileSync(keyFile, "utf8") } : {}),
+  };
+}
+
 export function createOpenAIChatClient(model: string, options: OpenAIChatOptions = {}): ModelClient {
   const baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
   const url = `${baseUrl}/chat/completions`;
   const target = new URL(url);
   const loopback = isLoopbackHost(target.hostname);
+  const tls = resolveTlsConfig(options.tls);
 
   // 只有“没显式指定代理”或“显式要求直连”时，才帮本地 endpoint 绕过
   // 环境代理；用户明确给了代理地址就尊重用户。
@@ -319,7 +342,7 @@ export function createOpenAIChatClient(model: string, options: OpenAIChatOptions
         body: JSON.stringify(body),
         ...(req.signal !== undefined ? { signal: req.signal } : {}),
         ...(options.proxy !== undefined ? { proxy: options.proxy } : {}),
-        ...(options.tls !== undefined ? { tls: options.tls } : {}),
+        ...(tls !== undefined ? { tls } : {}),
       };
       const res = await fetch(url, init);
 

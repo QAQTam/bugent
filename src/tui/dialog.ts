@@ -10,12 +10,14 @@ import { visibleWidth } from "./ansi.ts";
 import { BOLD, bg, fg, RESET } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 
-export type DialogActionTone = "ok" | "warn" | "error";
+export type DialogActionTone = "ok" | "warn" | "error" | "neutral";
 
 export interface DialogAction<T = boolean> {
   label: string;
   value: T;
   tone?: DialogActionTone;
+  /** 显示在按钮里的键盘快捷键，例如“同意（y）”。 */
+  shortcut?: string;
 }
 
 export interface DialogButtonHit<T = boolean> {
@@ -42,23 +44,25 @@ export interface DialogActionRenderState<T = boolean> {
   pressed?: T;
 }
 
-function toneColor(tone: DialogActionTone | undefined): string {
+function tonePalette(tone: DialogActionTone | undefined): { background: string; foreground: string } {
   switch (tone) {
     case "ok":
-      return COLOR.ok;
-    case "error":
-      return COLOR.error;
+      return { background: COLOR.buttonOkBg, foreground: COLOR.buttonOkFg };
     case "warn":
+      return { background: COLOR.buttonWarnBg, foreground: COLOR.buttonWarnFg };
+    case "error":
+      return { background: COLOR.buttonErrorBg, foreground: COLOR.buttonErrorFg };
+    case "neutral":
     default:
-      return COLOR.warn;
+      return { background: COLOR.buttonNeutralBg, foreground: COLOR.buttonNeutralFg };
   }
 }
 
 /**
- * 生成一行按钮，例如 ` [ 允许 ]   [ 拒绝 ] `。
+ * 生成一行按钮，例如 `▐ 同意（y） ▌   ▐ 拒绝（n） ▌`。
  *
- * 行文本本身不包含对话框左右边框；`start/end` 按包含左边框的整行坐标计算。
- * 这样 TuiApp 可以直接用 `key.x - 1` 做命中，不需要重复知道边框宽度。
+ * 按钮使用填充背景 + 半块字符形成“方框”，不再只是 `[ ]`。
+ * `start/end` 仍按包含左边框的整行坐标计算，鼠标命中逻辑无需改变。
  */
 export function composeDialogActions<T = boolean>(
   actions: readonly DialogAction<T>[],
@@ -66,7 +70,7 @@ export function composeDialogActions<T = boolean>(
 ): ComposedDialogActions<T> {
   const hits: DialogButtonHit<T>[] = [];
   let text = " ";
-  // 第 0 列是对话框左边框；文本从第 1 列开始。
+  // 第 0 列是对话框左边框；文本从第 1 列开始，按钮从第 2 列开始。
   let cursor = 2;
 
   for (let index = 0; index < actions.length; index += 1) {
@@ -76,22 +80,24 @@ export function composeDialogActions<T = boolean>(
       cursor += 3;
     }
 
-    const label = `[ ${action.label} ]`;
+    const label = action.shortcut === undefined ? action.label : `${action.label}（${action.shortcut}）`;
+    const boxed = `▐ ${label} ▌`;
     const start = cursor;
     const pressed = state.pressed !== undefined && state.pressed === action.value;
     const hovered = !pressed && state.hovered !== undefined && state.hovered === action.value;
+    const palette = tonePalette(action.tone);
     const background = pressed
       ? bg(COLOR.buttonPressedBg)
       : hovered
         ? bg(COLOR.buttonHoverBg)
-        : "";
+        : bg(palette.background);
     const foreground = pressed
       ? fg(COLOR.buttonPressedFg)
       : hovered
         ? fg(COLOR.buttonHoverFg)
-        : fg(toneColor(action.tone));
-    text += `${BOLD}${background}${foreground}${label}${RESET}`;
-    cursor += visibleWidth(label);
+        : fg(palette.foreground);
+    text += `${BOLD}${background}${foreground}${boxed}${RESET}`;
+    cursor += visibleWidth(boxed);
 
     hits.push({
       start,

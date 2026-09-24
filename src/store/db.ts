@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 8;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   system_prompt    TEXT NOT NULL,
   title            TEXT,
   cwd              TEXT,
-  active_branch_id TEXT
+  active_branch_id TEXT,
+  sandbox_mode     TEXT,
+  provider_config  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   tool_calls   TEXT,
   workspace    TEXT,
   reasoning    TEXT,
+  injection_source TEXT,
   PRIMARY KEY (session_id, msgid),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -61,6 +64,15 @@ CREATE TABLE IF NOT EXISTS branches (
   FOREIGN KEY (parent_branch_id) REFERENCES branches(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_providers (
+  session_id  TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  config      TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (session_id, provider_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -74,6 +86,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, msgid);
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_providers_session ON session_providers(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
 `;
 
@@ -171,6 +184,38 @@ function migrate(db: Database): void {
 
   if (version < 4) {
     ensureColumn(db, "messages", "reasoning", "TEXT");
+  }
+
+  if (version < 5) {
+    ensureColumn(db, "sessions", "sandbox_mode", "TEXT");
+  }
+
+  if (version < 6) {
+    ensureColumn(db, "sessions", "provider_config", "TEXT");
+  }
+
+  if (version < 7) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session_providers (
+        session_id  TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        config      TEXT NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (session_id, provider_id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_providers_session ON session_providers(session_id);
+
+      INSERT OR IGNORE INTO session_providers (session_id, provider_id, config, updated_at)
+      SELECT id, provider_id, provider_config, updated_at
+        FROM sessions
+       WHERE provider_config IS NOT NULL
+         AND provider_id IS NOT NULL;
+    `);
+  }
+
+  if (version < 8) {
+    ensureColumn(db, "messages", "injection_source", "TEXT");
   }
 }
 

@@ -7,8 +7,10 @@
 
 import type { Database } from "bun:sqlite";
 import type { ContentPart, Role, ToolCall } from "../provider/types.ts";
-import { makeMessage, type MessageOrigin, type StoredMessage } from "../core/message.ts";
+import type { PersistedProviderConfig } from "../provider/registry.ts";
+import { makeMessage, type InjectionSource, type MessageOrigin, type StoredMessage } from "../core/message.ts";
 import type { WorkspaceChange } from "../core/workspace.ts";
+import type { SandboxMode } from "../permission/mode.ts";
 import { databasePath } from "../config/toml.ts";
 import { openDatabase } from "./db.ts";
 
@@ -22,6 +24,10 @@ export interface SessionRecord {
   title?: string;
   cwd?: string;
   activeBranchId?: string;
+  /** session 级沙箱档位；省略时沿用全局默认。 */
+  sandboxMode?: SandboxMode;
+  /** session 级非敏感 provider 配置（endpoint/baseUrl 等，永不含 apiKey）。 */
+  providerConfig?: PersistedProviderConfig;
 }
 
 export interface BranchRecord {
@@ -40,6 +46,7 @@ export type AuditEventKind =
   | "tool_call"
   | "tool_result"
   | "permission"
+  | "session_config"
   | "error";
 
 export interface AuditEvent {
@@ -65,6 +72,8 @@ interface SessionRow {
   title: string | null;
   cwd: string | null;
   active_branch_id: string | null;
+  sandbox_mode: string | null;
+  provider_config: string | null;
 }
 
 interface MessageRow {
@@ -79,6 +88,7 @@ interface MessageRow {
   tool_calls: string | null;
   workspace: string | null;
   reasoning: string | null;
+  injection_source: string | null;
 }
 
 interface BranchRow {
@@ -91,6 +101,13 @@ interface BranchRow {
   title: string | null;
 }
 
+interface SessionProviderRow {
+  session_id: string;
+  provider_id: string;
+  config: string;
+  updated_at: number;
+}
+
 interface EventRow {
   id: number;
   session_id: string;
@@ -101,7 +118,16 @@ interface EventRow {
   payload: string;
 }
 
+function parseProviderConfig(raw: string): PersistedProviderConfig {
+  const parsed = JSON.parse(raw) as PersistedProviderConfig & { apiKey?: string };
+  const { apiKey: _apiKey, ...safe } = parsed;
+  return safe;
+}
+
 function rowToSession(row: SessionRow): SessionRecord {
+  const providerConfig =
+    row.provider_config === null ? undefined : parseProviderConfig(row.provider_config);
+
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -112,6 +138,8 @@ function rowToSession(row: SessionRow): SessionRecord {
     ...(row.title !== null ? { title: row.title } : {}),
     ...(row.cwd !== null ? { cwd: row.cwd } : {}),
     ...(row.active_branch_id !== null ? { activeBranchId: row.active_branch_id } : {}),
+    ...(row.sandbox_mode !== null ? { sandboxMode: row.sandbox_mode as SandboxMode } : {}),
+    ...(providerConfig !== undefined ? { providerConfig } : {}),
   };
 }
 
@@ -121,6 +149,9 @@ function rowToMessage(row: MessageRow): StoredMessage {
     ...(row.parent_msgid !== null ? { parentMsgId: row.parent_msgid } : {}),
     role: row.role as Role,
     origin: row.origin as MessageOrigin,
+    ...(row.injection_source !== null
+      ? { injectionSource: row.injection_source as InjectionSource }
+      : {}),
     parts: JSON.parse(row.parts) as ContentPart[],
     createdAt: row.created_at,
     ...(row.tool_call_id !== null ? { toolCallId: row.tool_call_id } : {}),
@@ -184,8 +215,8 @@ export class SessionStore {
       this.#db
         .query(
           `INSERT OR REPLACE INTO sessions
-           (id, created_at, updated_at, model, provider_id, system_prompt, title, cwd, active_branch_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, created_at, updated_at, model, provider_id, system_prompt, title, cwd, active_branch_id, sandbox_mode, provider_config)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           record.id,
@@ -197,6 +228,8 @@ export class SessionStore {
           record.title ?? null,
           record.cwd ?? null,
           branchId,
+          record.sandboxMode ?? null,
+          record.providerConfig === undefined ? null : JSON.stringify(record.providerConfig),
         );
 
       this.#db
@@ -212,7 +245,13 @@ export class SessionStore {
 
   getSession(id: string): SessionRecord | undefined {
     const row = this.#db.query("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | null;
-    return row === null ? undefined : rowToSession(row);
+    if (row === null) return undefined;
+    const record = rowToSession(row);
+    if (record.providerId !== undefined) {
+      const config = this.getProviderConfig(id, record.providerId);
+      if (config !== undefined) record.providerConfig = config;
+    }
+    return record;
   }
 
   hasSession(id: string): boolean {
@@ -232,6 +271,51 @@ export class SessionStore {
 
   setTitle(id: string, title: string): void {
     this.#db.query("UPDATE sessions SET title = ? WHERE id = ?").run(title, id);
+  }
+
+  /** 更新 session 级 provider/model；后续 runtime 重建以它为准。 */
+  setModelProvider(id: string, model: string, providerId: string): void {
+    this.#db
+      .query("UPDATE sessions SET model = ?, provider_id = ? WHERE id = ?")
+      .run(model, providerId, id);
+  }
+
+  /** 保存 session 级非敏感 provider 配置；apiKey 会被强制剔除。 */
+  setProviderConfig(sessionId: string, config: PersistedProviderConfig): void {
+    const { apiKey: _apiKey, ...safe } = config as PersistedProviderConfig & { apiKey?: string };
+    this.#db
+      .query(
+        `INSERT INTO session_providers (session_id, provider_id, config, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id, provider_id)
+         DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, config.id, JSON.stringify(safe), Date.now());
+  }
+
+  getProviderConfig(sessionId: string, providerId: string): PersistedProviderConfig | undefined {
+    const row = this.#db
+      .query("SELECT * FROM session_providers WHERE session_id = ? AND provider_id = ?")
+      .get(sessionId, providerId) as SessionProviderRow | null;
+    return row === null ? undefined : parseProviderConfig(row.config);
+  }
+
+  listProviderConfigs(sessionId: string): PersistedProviderConfig[] {
+    const rows = this.#db
+      .query("SELECT * FROM session_providers WHERE session_id = ? ORDER BY provider_id ASC")
+      .all(sessionId) as SessionProviderRow[];
+    return rows.map((row) => parseProviderConfig(row.config));
+  }
+
+  deleteProviderConfig(sessionId: string, providerId: string): void {
+    this.#db
+      .query("DELETE FROM session_providers WHERE session_id = ? AND provider_id = ?")
+      .run(sessionId, providerId);
+  }
+
+  /** 更新 session 级沙箱档位；后续 runtime 重建/恢复都以它为准。 */
+  setSandboxMode(id: string, mode: SandboxMode): void {
+    this.#db.query("UPDATE sessions SET sandbox_mode = ? WHERE id = ?").run(mode, id);
   }
 
   /* --------------------------- branches --------------------------- */
@@ -303,8 +387,8 @@ export class SessionStore {
     this.#db
       .query(
         `INSERT OR REPLACE INTO messages
-         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls, workspace, reasoning)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (session_id, msgid, parent_msgid, role, origin, created_at, tool_call_id, parts, tool_calls, workspace, reasoning, injection_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         sessionId,
@@ -318,6 +402,7 @@ export class SessionStore {
         message.toolCalls === undefined ? null : JSON.stringify(message.toolCalls),
         message.workspace === undefined ? null : JSON.stringify(message.workspace),
         message.reasoning ?? null,
+        message.injectionSource ?? null,
       );
   }
 

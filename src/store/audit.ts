@@ -69,6 +69,18 @@ export class AuditTrail {
     });
   }
 
+  /** session 级配置变更；payload 绝不能包含 API key 明文。 */
+  sessionConfig(payload: {
+    action: "provider_model_mode" | "provider_profile_create" | "provider_profile_rename" | "provider_profile_copy" | "provider_profile_delete" | "api_key_set" | "api_key_clear";
+    providerId?: string;
+    model?: string;
+    mode?: string;
+    fromProviderId?: string;
+    toProviderId?: string;
+  }): void {
+    this.#record("session_config", payload);
+  }
+
   /** 给 loop 用的 hooks：只关心工具调用，不干扰 UI 渲染。 */
   hooks(): LoopHooks {
     return {

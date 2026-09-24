@@ -45,8 +45,8 @@ describe("分支式 msgid", () => {
     expect(session.branchId).toBe(mainBranchId(sessionId));
     expect(store.getSession(sessionId)?.activeBranchId).toBe(mainBranchId(sessionId));
     expect(store.listBranches(sessionId)).toHaveLength(1);
-    expect(store.listBranches(sessionId)[0]?.headMsgid).toBe(0);
-    expect(store.loadBranchPath(sessionId, mainBranchId(sessionId)).map((m) => m.msgid)).toEqual([0]);
+    expect(store.listBranches(sessionId)[0]?.headMsgid).toBe(2);
+    expect(store.loadBranchPath(sessionId, mainBranchId(sessionId)).map((m) => m.msgid)).toEqual([0, 1, 2]);
   });
 
   test("fork 后新分支继续使用 session 全局递增 msgid", () => {
@@ -56,7 +56,7 @@ describe("分支式 msgid", () => {
     first.appendUser("u1");
     first.appendAssistant("a1");
 
-    const fork = store.createBranch(sessionId, 2, {
+    const fork = store.createBranch(sessionId, 4, {
       ...(first.branchId !== undefined ? { parentBranchId: first.branchId } : {}),
       title: "fork",
     });
@@ -64,18 +64,18 @@ describe("分支式 msgid", () => {
 
     const second = open(store, sessionId);
     expect(second.branchId).toBe(fork);
-    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 2]);
+    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
 
     second.appendUser("u2-fork");
     second.appendAssistant("a2-fork");
 
-    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
-    expect(second.messages[3]?.parentMsgId).toBe(2);
+    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(second.messages[5]?.parentMsgId).toBe(4);
     expect(store.loadBranchPath(sessionId, mainBranchId(sessionId)).map((m) => m.msgid)).toEqual([
-      0, 1, 2,
+      0, 1, 2, 3, 4,
     ]);
-    expect(store.loadBranchPath(sessionId, fork).map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
-    expect(store.loadMessages(sessionId).map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
+    expect(store.loadBranchPath(sessionId, fork).map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(store.loadMessages(sessionId).map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 
   test("从旧节点 fork 时，新分支 parent 指向 fork 点而不是旧 head", () => {
@@ -86,7 +86,7 @@ describe("分支式 msgid", () => {
     first.appendAssistant("a1");
     first.appendUser("u2");
 
-    const fork = store.createBranch(sessionId, 1, {
+    const fork = store.createBranch(sessionId, 3, {
       ...(first.branchId !== undefined ? { parentBranchId: first.branchId } : {}),
     });
     store.setActiveBranch(sessionId, fork);
@@ -94,10 +94,10 @@ describe("分支式 msgid", () => {
     const second = open(store, sessionId);
     second.appendAssistant("a1-fork");
 
-    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 4]);
-    expect(second.messages[2]?.parentMsgId).toBe(1);
+    expect(second.messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 6]);
+    expect(second.messages[4]?.parentMsgId).toBe(3);
     expect(store.loadBranchPath(sessionId, mainBranchId(sessionId)).map((m) => m.msgid)).toEqual([
-      0, 1, 2, 3,
+      0, 1, 2, 3, 4, 5,
     ]);
   });
 

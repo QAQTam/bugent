@@ -5,7 +5,7 @@
  *   BUGENT_API_KEY / OPENAI_API_KEY、BUGENT_BASE_URL、BUGENT_MODEL
  */
 
-import { defineConfig, DEFAULT_SYSTEM_PROMPT } from "./src/config/schema.ts";
+import { defineConfig } from "./src/config/schema.ts";
 
 export default defineConfig({
   /** 默认模型，格式 "provider/model"。 */
@@ -33,7 +33,7 @@ export default defineConfig({
   ],
 
   agent: {
-    systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    systemPromptFile: "~/.bugent/SYSTEM.md",
     maxSteps: 16,
   },
 

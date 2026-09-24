@@ -68,10 +68,10 @@ describe("P9 · 多进程并发写同一个库", () => {
           const messages = store.loadMessages(session.id);
           total += messages.length;
           // msgid 必须连续、从 0 开始，且 0 是 system —— 并发下也不能错乱
-          expect(messages.map((m) => m.msgid)).toEqual([0, 1, 2]);
+          expect(messages.map((m) => m.msgid)).toEqual([0, 1, 2, 3, 4]);
           expect(messages[0]?.role).toBe("system");
         }
-        expect(total).toBe(count * 3);
+        expect(total).toBe(count * 5);
       } finally {
         store.close();
       }

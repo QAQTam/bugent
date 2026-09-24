@@ -29,6 +29,8 @@ export interface AskUserQuestion {
   options: string[];
   /** 显式声明多选；否则默认单选。 */
   multiple?: boolean;
+  /** 敏感输入：输入态用 • 遮蔽，汇总页不回显明文。 */
+  secret?: boolean;
 }
 
 export interface AskUserAnswer {
@@ -87,6 +89,10 @@ export class AskUserFlow {
   constructor(options: AskUserOptions) {
     this.questions = options.questions;
     this.#answers = options.questions.map((question) => ({ question: question.question, selected: [] }));
+    // 单个“自由输入”或敏感问题直接进入输入态：
+    // 不需要用户先按 e，再开始输入。
+    const only = options.questions.length === 1 ? options.questions[0] : undefined;
+    this.#typing = only !== undefined && (only.secret === true || only.options.length === 0);
     this.#onChange = options.onChange;
     this.#setTimeout = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
     this.#clearTimeout = options.clearTimeoutFn ?? ((handle) => clearTimeout(handle as number));
@@ -401,7 +407,9 @@ export class AskUserFlow {
     const lines = [this.#pageHeader(question, inner), ""];
     for (const line of renderPlain(question.question, inner - 2)) lines.push(line);
     lines.push("");
-    lines.push(`${fg(COLOR.prompt)}▸${RESET} ${this.#buffer}\x1b[7m \x1b[27m`);
+    const shown =
+      question.secret === true ? "•".repeat(Array.from(this.#buffer).length) : this.#buffer;
+    lines.push(`${fg(COLOR.prompt)}▸${RESET} ${shown}\x1b[7m \x1b[27m`);
     lines.push("");
     lines.push(`${DIM}Enter 确认   Backspace 删除   Esc 取消${RESET}`);
     return lines;
@@ -427,7 +435,9 @@ export class AskUserFlow {
         lines.push(`   ${fg(COLOR.ok)}→${RESET} ${truncateAnsi(picked, inner - 6)}`);
       }
       if (answer.custom !== undefined) {
-        lines.push(`   ${fg(COLOR.tool)}✎${RESET} ${truncateAnsi(answer.custom, inner - 6)}`);
+        const shown =
+          question.secret === true ? "••••••（已隐藏）" : truncateAnsi(answer.custom, inner - 6);
+        lines.push(`   ${fg(COLOR.tool)}✎${RESET} ${shown}`);
       }
       if (picked.length === 0 && answer.custom === undefined) {
         lines.push(`   ${DIM}（未回答）${RESET}`);
