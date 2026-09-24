@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { sanitizeEnv, type SanitizedEnv } from "./env.ts";
+import { isStandaloneBugent } from "../runtime/standalone.ts";
 
 export type SandboxNetworkMode = "none" | "allowlist" | "all";
 
@@ -401,6 +402,7 @@ export function compileMcpSandbox(input: McpSandboxPolicyInput): CompiledMcpSand
 export function nativeSandboxLibraryPath(): string | undefined {
   const override = process.env.BUGENT_SANDBOX_LIBRARY;
   if (override !== undefined && override.length > 0) return override;
+  if (isStandaloneBugent()) return undefined;
   const repoRoot = resolve(import.meta.dir, "..", "..");
   const candidates = [
     join(repoRoot, "native", "sandbox", "build", "libbugent-sandbox.so"),
@@ -417,7 +419,9 @@ export function assertNativeSandboxLibrary(): string {
   const path = nativeSandboxLibraryPath();
   if (path === undefined) {
     fail(
-      "找不到 libbugent-sandbox.so；运行 `bun run build:sandbox` 或设置 BUGENT_SANDBOX_LIBRARY",
+      isStandaloneBugent()
+        ? "standalone runtime 尚未释放 libbugent-sandbox.so；请通过 bugent CLI 启动"
+        : "找不到 libbugent-sandbox.so；运行 `bun run build:sandbox` 或设置 BUGENT_SANDBOX_LIBRARY",
     );
   }
   return path;

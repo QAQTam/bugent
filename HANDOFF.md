@@ -11,7 +11,7 @@
 
 ```bash
 bun test
-# 493 pass / 0 fail
+# 495 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -496,6 +496,35 @@ bugent-bun-runtime/types/bun-spawn-sandbox.d.ts
 bugent-bun-runtime/runtime.json
 ```
 
+### 10.1.1 bugent 0.0.0 standalone binary
+
+打包命令：
+
+```bash
+bun run package:bugent
+```
+
+实现：
+
+- 使用 `runtime/bun/bin/bugent-bun` 执行 `bun build --compile`；
+- 将 `src/prompts/system.md` 和 `libbugent-sandbox.so` 作为 `--asset` 嵌入；
+- 单文件首次启动时把 `.so` 原子解包到
+  `~/.bugent/runtime/0.0.0/lib/libbugent-sandbox.so`；
+- standalone 模式通过嵌入 asset 识别，不再要求 `process.execPath` 等于
+  `runtime/bun/bin/bugent-bun`；
+- 打包脚本会启动一个真实 stdio MCP probe，验证编译后二进制的 fork sandbox
+  hook、原生 provider、JSON-RPC 和 mock 对话链路。
+
+当前产物：
+
+```text
+dist/bugent/bugent-0.0.0-linux-x64/bugent
+sha256: 2e4e68e378a06cbab3e626c1897e5a03293b8dad3744176ed889af71c15a10a4
+
+dist/bugent/bugent-0.0.0-linux-x64.tar.gz
+sha256: f13b7644623a6818f0734265604e589b309ff332a1cb469871473e0ba9811876
+```
+
 构建工具链注意：
 
 - Bun main 要求 LLVM 23.1.x；
@@ -555,7 +584,7 @@ MCP 接线：
 
 ```text
 bun test
-# 493 pass / 0 fail
+# 495 pass / 0 fail
 
 bun run typecheck
 # clean

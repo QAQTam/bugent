@@ -80,13 +80,24 @@ function sameExecutable(left: string, right: string): boolean {
   return hash(left) === hash(right);
 }
 
+function isStandaloneBugentBinary(): boolean {
+  const files = (Bun.embeddedFiles ?? []) as readonly (Blob & { name: string })[];
+  return files.some((file) => file.name === "libbugent-sandbox.so");
+}
+
 /**
  * Fail closed when the process is not the Bugent Bun fork.
  *
  * A standard Bun silently ignoring `sandbox` would turn MCP isolation into a
  * no-op, so stdio MCP must verify the running executable before spawning.
+ * A compiled bugent binary contains the provider asset and was produced by
+ * the fork; the packaging script verifies that build-time invariant.
  */
 export function assertBugentBunRuntime(): string {
+  if (isStandaloneBugentBinary()) {
+    return realpathSync(process.execPath);
+  }
+
   const expected = assertBunRuntimeInstalled();
   let currentPath: string;
   let expectedPath: string;

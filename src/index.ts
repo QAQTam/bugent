@@ -40,6 +40,8 @@ import { AuditTrail } from "./store/audit.ts";
 import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
 import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
+import { BUGENT_VERSION } from "./version.ts";
+import { prepareStandaloneRuntime } from "./runtime/standalone.ts";
 
 interface CliOptions {
   prompt?: string;
@@ -48,6 +50,7 @@ interface CliOptions {
   cwd: string;
   maxSteps?: number;
   help: boolean;
+  version: boolean;
   plain: boolean;
   /** 跳过所有权限确认。 */
   yes: boolean;
@@ -70,6 +73,7 @@ const HELP = `bugent — 终端里的 AI agent
   bugent -p "写个 hello"      一次性执行
 
 选项：
+  -v, --version              显示版本
   -p, --prompt <text>        一次性执行给定提示词
   -m, --model <ref>          指定模型，格式 provider/model
       --mock                 使用内置 mock provider（无需网络与密钥）
@@ -99,6 +103,7 @@ export function parseArgs(argv: string[]): CliOptions {
     mock: false,
     cwd: process.cwd(),
     help: false,
+    version: false,
     plain: false,
     yes: false,
     noSandbox: false,
@@ -173,6 +178,10 @@ export function parseArgs(argv: string[]): CliOptions {
         options.resume = value;
         break;
       }
+      case "-v":
+      case "--version":
+        options.version = true;
+        break;
       case "-h":
       case "--help":
         options.help = true;
@@ -249,10 +258,15 @@ function listSessions(store: SessionStore | undefined): void {
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
+  if (options.version) {
+    process.stdout.write(`bugent ${BUGENT_VERSION}\n`);
+    return;
+  }
   if (options.help) {
     process.stdout.write(HELP);
     return;
   }
+  await prepareStandaloneRuntime();
 
   // 配置只加载一次：loadConfig 在缺失时会生成 ~/.bugent/config.toml，
   // 重复调用会产生"到底建了几次"的困惑
