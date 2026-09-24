@@ -217,7 +217,7 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         kind: agentKind,
         authority: "read-only",
         capabilities,
-        workspace: { root: options.cwd, access: "read", isolation: "snapshot" },
+        workspace: { root: options.cwd, access: "read", isolation: "shared" },
         parent: {
           authority: parent.authority,
           capabilities: parent.capabilities,

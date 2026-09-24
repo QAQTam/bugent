@@ -5,7 +5,7 @@ import { compileAgentSandboxSpec } from "../src/agent/sandbox.ts";
 const ROOT = "/tmp/bugent-agent-workspace";
 
 describe("P7-A · AgentSandboxSpec compiler", () => {
-  test("reviewer defaults to snapshot/read-only with no network", () => {
+  test("reviewer defaults to shared read-only with no network", () => {
     const spec = compileAgentSandboxSpec(
       { agentId: "review-1", kind: "reviewer", workspace: { root: ROOT } },
       "linux",
@@ -13,7 +13,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
 
     expect(spec.authority).toBe("read-only");
     expect(spec.workspace.access).toBe("read");
-    expect(spec.workspace.isolation).toBe("snapshot");
+    expect(spec.workspace.isolation).toBe("shared");
     expect(spec.process.isolation).toBe("bwrap");
     expect(spec.network.mode).toBe("none");
     expect(spec.capabilities).toEqual(["fs.read", "process.exec"]);

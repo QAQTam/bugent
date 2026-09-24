@@ -207,7 +207,6 @@ function defaultWorkspaceAccess(kind: AgentKind): WorkspaceAccess {
 
 function defaultWorkspaceIsolation(kind: AgentKind): WorkspaceIsolation {
   if (kind === "worker") return "worktree";
-  if (kind === "reviewer") return "snapshot";
   return "shared";
 }
 
