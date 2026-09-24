@@ -102,7 +102,9 @@ TUI 内：
   /context          查看当前 session 的 provider / model / sandbox
   /goal <目标>      初始化 Goal Contract
   /goal status      查看当前 Goal
+  /goal checkpoints 查看 Checkpoint 进度
   /goal continue    生成 Handoff snapshot 并切换到新 Context Epoch
+  /goal finalize    执行最终完成审计
   /goal pause       暂停 Goal
   /goal resume      恢复 Goal
   /mode <mode>      切换当前 session 的沙箱档位
@@ -520,7 +522,8 @@ async function main(): Promise<void> {
           credentials.delete(sessionId, providerId),
         mode: tools.mode,
         ...(goalController !== undefined ? { goalController } : {}),
-        goalAutoContinue: config.goals?.autoContinue ?? false,
+        goalAutoContinue:
+          (config.goals?.enabled ?? true) && (config.goals?.autoContinue ?? false),
         ...(config.goals?.maxConsecutiveTurns !== undefined
           ? { maxGoalContinuationTurns: config.goals.maxConsecutiveTurns }
           : {}),

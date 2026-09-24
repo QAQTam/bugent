@@ -94,6 +94,12 @@ export interface GoalTurnRecordInput {
   fingerprintBefore?: string;
 }
 
+export interface FinalAuditResult {
+  approved: boolean;
+  review: GoalReview;
+  errors: string[];
+}
+
 export interface GoalControllerOptions {
   repository: GoalRepository;
   session: AgentSession;
@@ -889,6 +895,98 @@ export class GoalController {
       checkpoint: updatedCheckpoint,
       ...(nextCheckpointId !== undefined ? { nextCheckpointId } : {}),
     };
+  }
+
+  async finalAudit(): Promise<FinalAuditResult> {
+    const goal = this.requireCurrent();
+    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (this.reviewRunner === undefined) throw new Error("当前没有 final reviewer");
+
+    const checkpoints = this.repository.listCheckpoints(goal.id);
+    if (checkpoints.length === 0) throw new Error("Goal 没有 Checkpoint，不能完成最终审计");
+    const incomplete = checkpoints.filter((checkpoint) => checkpoint.status !== "completed");
+    if (incomplete.length > 0) {
+      throw new Error(`仍有未完成 Checkpoint：${incomplete.map((item) => item.id).join(", ")}`);
+    }
+    if (goal.phase !== "checkpoint_audit" && goal.phase !== "executing") {
+      throw new Error(`当前 phase 不能执行 final audit：${goal.phase}`);
+    }
+
+    if (goal.phase === "checkpoint_audit") {
+      this.repository.setGoalPhase(goal.id, "executing");
+    }
+    this.repository.setGoalPhase(goal.id, "final_audit");
+
+    const lastCheckpoint = checkpoints[checkpoints.length - 1]!;
+    const priorReviews = this.repository.listReviews(goal.id, lastCheckpoint.id);
+    const round = priorReviews.length + 1;
+    const revision = captureWorkspaceRevision(this.cwd);
+    const review = this.repository.createReview(goal.id, {
+      checkpointId: lastCheckpoint.id,
+      round,
+      reviewer: "final-auditor",
+      baseRevision: revision.base,
+      headRevision: revision.head,
+      diffHash: revision.diffHash,
+      criteriaCoverage: goal.successCriteria.map((criterion) => ({
+        criterion: criterion.text,
+        status: "missing",
+        evidence: [],
+      })),
+    });
+    this.repository.setReviewStatus(review.id, "running");
+
+    const syntheticCheckpoint: Checkpoint = {
+      id: `final:${goal.id}`,
+      goalId: goal.id,
+      order: checkpoints.length + 1,
+      title: "Final Goal Audit",
+      deliverable: goal.objective,
+      acceptanceCriteria: goal.successCriteria.map((criterion) => criterion.text),
+      evidenceRequired: ["review"],
+      dependsOn: checkpoints.map((checkpoint) => checkpoint.id),
+      status: "reviewing",
+      createdAt: Date.now(),
+    };
+    const latestTodo = this.repository.latestTodoSnapshot(goal.id);
+    let result;
+    try {
+      result = await this.reviewRunner.run({
+        goal,
+        checkpoint: syntheticCheckpoint,
+        todos: latestTodo?.todos ?? [],
+        evidence: this.repository.listEvidence(goal.id),
+        remainingRisk: [],
+        cwd: this.cwd,
+        baseRevision: revision.base,
+        headRevision: revision.head,
+        diffHash: revision.diffHash,
+      });
+    } catch (error) {
+      this.repository.setReviewStatus(review.id, "blocked");
+      this.repository.setGoalPhase(goal.id, "executing");
+      throw new Error(
+        `final reviewer 执行失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const errors = reviewResultRejection(
+      result,
+      goal.successCriteria.map((criterion) => criterion.text),
+    );
+    const completed = this.repository.completeReview(
+      review.id,
+      withForcedRejection(result, errors),
+    );
+    if (completed.status === "approved") {
+      this.repository.setGoalStatus(goal.id, "complete");
+      await this.syncHandoff("reviewer");
+      return { approved: true, review: completed, errors: [] };
+    }
+
+    this.repository.setGoalPhase(goal.id, "executing");
+    await this.syncHandoff("reviewer");
+    return { approved: false, review: completed, errors };
   }
 
   pause(reason?: string): Goal {

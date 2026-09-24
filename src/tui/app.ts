@@ -1192,13 +1192,75 @@ export class TuiApp implements TuiInteraction {
       }
       return;
     }
+    if (argument === "checkpoints") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+        this.#render(true);
+        return;
+      }
+      const checkpoints = controller.repository.listCheckpoints(goal.id);
+      await this.#openDialog({
+        title: "Goal Checkpoints",
+        body:
+          checkpoints.length === 0
+            ? ["尚未建立 Checkpoint"]
+            : checkpoints.map((checkpoint) => {
+                const marker =
+                  checkpoint.status === "completed"
+                    ? "[x]"
+                    : checkpoint.status === "active" ||
+                        checkpoint.status === "verifying" ||
+                        checkpoint.status === "reviewing"
+                      ? "[>]"
+                      : checkpoint.status === "blocked"
+                        ? "[!]"
+                        : "[ ]";
+                return `${marker} ${checkpoint.order}. ${checkpoint.title} · ${checkpoint.status}`;
+              }),
+        hint: `${DIM}Esc / Enter 关闭${RESET}`,
+        actions: [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
+      });
+      return;
+    }
+    if (argument === "finalize") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+        this.#render(true);
+        return;
+      }
+      if (this.#busy || this.#session.hasOpenToolBatch()) {
+        this.#transcript.pushError("当前一轮还在跑，先结束或中断再执行 final audit");
+        this.#render(true);
+        return;
+      }
+      this.#busy = true;
+      this.#activity = { state: "tool", detail: "Goal final audit" };
+      this.#render(true);
+      try {
+        const result = await controller.finalAudit();
+        this.#transcript.pushNotice(
+          result.approved
+            ? "Goal final audit 通过，Goal 已完成。"
+            : `Goal final audit 未通过：${result.errors.join("；")}`,
+        );
+      } catch (error) {
+        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      } finally {
+        this.#busy = false;
+        this.#activity = { state: "idle" };
+        this.#goalContinuationStreak = 0;
+        this.#refreshGoalStatus();
+        this.#render(true);
+      }
+      return;
+    }
     if (argument === "status" || (goal !== undefined && argument.length === 0)) {
       await this.#showGoalStatus();
       return;
     }
     if (goal !== undefined) {
       this.#transcript.pushError(
-        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal continue`、`/goal pause`、`/goal resume`。",
+        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`。",
       );
       this.#render(true);
       return;

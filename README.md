@@ -205,6 +205,14 @@ P5 已接线（实验性，默认 `auto_continue = false`）：
 - 连续 3 个 Goal turn 没有权威状态变化时进入 `blocked`。
 - `max_consecutive_turns` 防止 continuation 无限循环。
 
+P6 已接线：
+
+- `/goal checkpoints` 展示阶段进度与 review 状态。
+- `/goal finalize` 对所有 success criteria 做 goal-level 独立审计。
+- 最后一个 Checkpoint 完成只进入 `checkpoint_audit`，不能直接完成 Goal。
+- final audit 失败会回到 `executing`，不会把未覆盖的目标标记为完成。
+- 恢复 session/runtime 时会幂等补回 goal/plan/todo 上下文。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |

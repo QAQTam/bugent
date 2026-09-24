@@ -723,3 +723,84 @@ describe("Goal P5 · continuation accounting", () => {
     expect(controller.canAutoContinue().allowed).toBe(false);
   });
 });
+
+describe("Goal P6 · final audit", () => {
+  const evidence = [
+    {
+      kind: "test" as const,
+      summary: "tests pass",
+      reference: "bun test",
+      command: "bun test",
+      exitCode: 0,
+    },
+  ];
+
+  function approveRunner(): ReviewRunner {
+    return {
+      async run(): Promise<ReviewResult> {
+        return {
+          verdict: "approve",
+          criteriaCoverage: [
+            { criterion: "测试通过", status: "proven", evidence: ["ev"] },
+          ],
+          findings: [],
+          unresolvedQuestions: [],
+        };
+      },
+    };
+  }
+
+  test("最后一个 Checkpoint 完成后仍需 goal-level audit 才能 complete", async () => {
+    const { controller } = await setup({ reviewRunner: approveRunner() });
+    prepareExecutingCheckpoint(controller);
+    await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "完成",
+      evidence,
+    });
+    expect(controller.currentGoal()?.status).toBe("active");
+    expect(controller.currentGoal()?.phase).toBe("checkpoint_audit");
+
+    const audit = await controller.finalAudit();
+    expect(audit.approved).toBe(true);
+    expect(controller.currentGoal()?.status).toBe("complete");
+    expect(controller.currentGoal()?.phase).toBe("final_audit");
+  });
+
+  test("final audit 未覆盖 success criterion 时回到 executing", async () => {
+    let call = 0;
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          call += 1;
+          return call === 1
+            ? {
+                verdict: "approve",
+                criteriaCoverage: [
+                  { criterion: "测试通过", status: "proven", evidence: ["ev"] },
+                ],
+                findings: [],
+                unresolvedQuestions: [],
+              }
+            : {
+                verdict: "approve",
+                criteriaCoverage: [],
+                findings: [],
+                unresolvedQuestions: [],
+              };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+    await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "完成",
+      evidence,
+    });
+
+    const audit = await controller.finalAudit();
+    expect(audit.approved).toBe(false);
+    expect(controller.currentGoal()?.status).toBe("active");
+    expect(controller.currentGoal()?.phase).toBe("executing");
+  });
+});

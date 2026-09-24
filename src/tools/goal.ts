@@ -23,6 +23,7 @@ export const CREATE_GOAL_TOOL_NAME = "create_goal";
 export const UPDATE_GOAL_TOOL_NAME = "update_goal";
 export const UPDATE_PLAN_TOOL_NAME = "update_plan";
 export const SUBMIT_CHECKPOINT_TOOL_NAME = "submit_checkpoint";
+export const FINAL_AUDIT_TOOL_NAME = "final_audit";
 export const GET_HANDOFF_TOOL_NAME = "get_handoff";
 export const HANDOFF_UPDATE_TOOL_NAME = "handoff_update";
 
@@ -263,6 +264,11 @@ const GET_HANDOFF_PARAMETERS: JSONSchema = {
       description: "省略时读取 canonical 最新 revision；提供时读取不可变 Epoch snapshot",
     },
   },
+};
+
+const FINAL_AUDIT_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {},
 };
 
 const HANDOFF_UPDATE_PARAMETERS: JSONSchema = {
@@ -651,12 +657,39 @@ export function createGoalTools(controller: GoalController): Tool[] {
     },
   };
 
+  const finalAudit: Tool<Record<string, never>, unknown> = {
+    name: FINAL_AUDIT_TOOL_NAME,
+    description: [
+      "所有 Checkpoint 完成后，对原始 Goal 做最终独立审计。",
+      "必须覆盖全部 success criteria；最后一个 checkbox 本身不是完成条件。",
+    ].join("\n"),
+    parameters: FINAL_AUDIT_PARAMETERS,
+    defaultPermission: "allow",
+    resources() {
+      return [{ key: "goal", access: "write" }];
+    },
+    describe() {
+      return { resource: "current goal", summary: "执行 Goal final audit" };
+    },
+    async run(): Promise<unknown> {
+      const result = await controller.finalAudit();
+      return {
+        approved: result.approved,
+        reviewId: result.review.id,
+        status: result.review.status,
+        verdict: result.review.verdict ?? null,
+        errors: result.errors,
+      };
+    },
+  };
+
   return [
     getGoal,
     createGoal,
     updateGoal,
     updatePlan,
     submitCheckpoint,
+    finalAudit,
     getHandoff,
     handoffUpdate,
   ];
