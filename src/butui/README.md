@@ -24,10 +24,10 @@ Minimal working state:
 - real bugent config/provider resolution;
 - `AgentSession` + `runUserTurn`;
 - real `ToolRegistry`;
-- permission and mode-escalation prompts (`y` / `n` / `Esc`);
-- network capability prompts;
-- streamed assistant text;
-- tool call/result messages;
+- ledger-backed `StreamWindow` transcript with file spill/retention;
+- streaming assistant text and tool summaries;
+- live `apply_patch` Diff cards;
+- permission, mode-escalation, and network prompts in a focus-trapped Modal;
 - `Esc` aborts the current turn;
 - `Ctrl+C` restores the terminal and exits.
 
@@ -35,7 +35,6 @@ Not yet wired:
 
 - bugent branch / retry / undo;
 - MCP context panel;
-- rich tool diffs and artifacts;
 - ask_user multi-page forms;
 - session persistence in this experimental entry.
 
@@ -51,6 +50,10 @@ This reduces terminal writes under high-frequency streaming, routes mouse
 selection against the frame the user actually saw, and gives the turn a stable
 paint boundary. Set `BUGENT_BUTUI_V02=0` to compare against the v0.1
 `microtask + logical` behavior.
+
+The transcript is projected through `StreamLedger` + `StreamWindow`; stable
+history can spill to `~/.bugent/butui/<session>/`. The experimental entry keeps
+the sidecars during the process and attempts cleanup on normal disposal.
 
 The sibling checkout is anchored to `QAQTam/buTUI@v0.2.0-exp`
 (`7896dab`, `fix(layout): isolate stream tail cache from committed lines`). It

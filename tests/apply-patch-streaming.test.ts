@@ -36,6 +36,7 @@ describe("apply_patch streaming progress", () => {
     expect(progress?.added).toBe(3);
     expect(progress?.removed).toBe(1);
     if (progress === undefined) throw new Error("patch progress was not produced");
+    expect(stream.hunks().map(hunk => hunk.type)).toEqual(["add", "update"]);
     expect(stream.finish()).toEqual({ ...progress, complete: true });
   });
 

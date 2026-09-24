@@ -152,6 +152,10 @@ export class PatchStreamProgress {
     return this.#patchText;
   }
 
+  hunks(): Hunk[] {
+    return this.#parser.hunks();
+  }
+
   push(rawArgs: string): PatchProgress | undefined {
     const patchText = extractPatchText(rawArgs);
     if (patchText === undefined || patchText.length === 0) return undefined;
