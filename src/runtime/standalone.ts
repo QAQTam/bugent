@@ -14,6 +14,17 @@ import { BUGENT_VERSION } from "../version.ts";
 export const SANDBOX_LIBRARY_ASSET = "libbugent-sandbox.so";
 export const SYSTEM_PROMPT_ASSET = "system.md";
 
+/**
+ * 这个平台的原生沙箱 provider 叫什么名字。
+ *
+ * 只有 Linux 有 provider（fork 的 spawn 钩子是 POSIX/Linux 向的，实现用
+ * Landlock + seccomp）。其他平台返回 undefined —— 于是 standalone 启动时
+ * 不会去找一个根本不存在的资产、更不会因此抛错。
+ */
+export function sandboxLibraryAsset(platform: NodeJS.Platform = process.platform): string | undefined {
+  return platform === "linux" ? SANDBOX_LIBRARY_ASSET : undefined;
+}
+
 type EmbeddedFile = Blob & { name: string };
 
 export function embeddedFiles(): readonly EmbeddedFile[] {
@@ -39,9 +50,12 @@ export interface StandaloneRuntime {
 /** Extract embedded native assets and expose them through stable env overrides. */
 export async function prepareStandaloneRuntime(): Promise<StandaloneRuntime> {
   if (!isStandaloneBugent()) return {};
-  const embedded = embeddedFile(SANDBOX_LIBRARY_ASSET);
+  // 非 Linux 不嵌 provider：没有可加载的实现，缺它也不该拦住启动
+  const assetName = sandboxLibraryAsset();
+  if (assetName === undefined) return {};
+  const embedded = embeddedFile(assetName);
   if (embedded === undefined) {
-    throw new Error(`standalone bugent 缺少嵌入资产 ${SANDBOX_LIBRARY_ASSET}`);
+    throw new Error(`standalone bugent 缺少嵌入资产 ${assetName}`);
   }
 
   const bytes = new Uint8Array(await embedded.arrayBuffer());
@@ -52,7 +66,7 @@ export async function prepareStandaloneRuntime(): Promise<StandaloneRuntime> {
     "runtime",
     BUGENT_VERSION,
     "lib",
-    SANDBOX_LIBRARY_ASSET,
+    assetName,
   );
   let current: string | undefined;
   try {

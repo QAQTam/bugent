@@ -14,6 +14,7 @@
 
 import {
   createProcessRunner,
+  resolveShell,
   type ProcessRunnerOptions,
   type ShellRunner,
   type ShellRunOptions,
@@ -38,8 +39,9 @@ export interface SandboxOptions {
   binary?: string;
 }
 
+/** 沙箱内的 shell 与本地 runner 用同一套解析（含 `BUGENT_SHELL` 覆盖）。 */
 function defaultShell(): string {
-  return Bun.which("bash") ?? Bun.which("sh") ?? "/bin/sh";
+  return resolveShell().command;
 }
 
 export function isSandboxAvailable(binary = SANDBOX_BINARY): boolean {

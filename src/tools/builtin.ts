@@ -5,7 +5,7 @@
  * 都只改这个文件，CLI / TUI 不需要知道细节。
  */
 
-import { createBashTool, createShellRunner, type ShellRunner } from "./bash.ts";
+import { createBashTool, createShellRunner, resolveShell, type ShellRunner } from "./bash.ts";
 import {
   createEditFileTool,
   createReadFileTool,
@@ -95,7 +95,9 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
   } else if (!isSandboxAvailable()) {
     runner = createShellRunner();
     enabled = false;
-    note = "未找到 bwrap，已降级为无沙箱执行（档位门控仍然生效）";
+    // 说清楚"档位还在、但只是工具层门控"：没有 bwrap 时子进程没有内核级隔离，
+    // read-only 档挡得住 write_file，挡不住 bash 里的一条 `echo > file`。
+    note = "未找到 bwrap：子进程没有内核级隔离，档位只约束工具调用（bash 仍可写）";
   } else {
     runner = createSandboxedShellRunner(
       {
@@ -112,6 +114,11 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
   }
 
   registry.register(createBashTool(runner, { networkBlocked }));
+
+  // shell 解析的说明（缺 bash 时给出装什么、或 BUGENT_SHELL 指到哪）拼进沙箱说明，
+  // 免得用户只看到每条命令都 ENOENT
+  const shell = resolveShell();
+  if (shell.note !== undefined) note += `；${shell.note}`;
 
   let agentTools: string[] = [];
   if (options.agentTools !== undefined) {

@@ -12,6 +12,7 @@
  */
 
 import type { JSONSchema } from "../provider/types.ts";
+import { win32 } from "node:path";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
@@ -177,8 +178,58 @@ async function readCapped(
   return { text, truncated };
 }
 
+export interface ShellResolution {
+  /** 起进程用的 shell 可执行文件。 */
+  command: string;
+  /** 为什么用它、缺什么 —— 会拼进启动横幅里的沙箱说明。 */
+  note?: string;
+}
+
+/**
+ * Windows 自带的 `System32\bash.exe` 是 WSL 的入口，不是普通 POSIX shell：
+ * `bash -lc "ls"` 会跑进 WSL，工作目录是 `C:\...`，在那边根本不存在 ——
+ * 命令"成功"了但看的是另一套文件系统，错得莫名其妙。这里把它认出来并跳过。
+ *
+ * 用 `path.win32` 而不是 `path.resolve`：后者绑定运行平台，在 Linux 上测
+ * Windows 路径时会把 `C:\...` 当成相对路径拼到 cwd 上，判定必然失败。
+ */
+function isWslLauncher(path: string, env: Record<string, string | undefined>): boolean {
+  const root = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+  const stub = win32.resolve(root, "System32", "bash.exe");
+  return win32.normalize(path).toLowerCase() === stub.toLowerCase();
+}
+
+/**
+ * 解析本地 shell。
+ *
+ * 顺序：`BUGENT_SHELL` 覆盖 → PATH 上的 bash → sh。都没有时**不抛错**，
+ * 而是返回一个必然失败的命令并带上说明 —— 抛错会让 bugent 在没有 POSIX
+ * shell 的机器上直接起不来，而 read_file / write_file 这些根本不需要 shell。
+ */
+export function resolveShell(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (name) => Bun.which(name),
+): ShellResolution {
+  const override = env.BUGENT_SHELL;
+  if (override !== undefined && override.trim().length > 0) {
+    return { command: override.trim(), note: "shell 来自 BUGENT_SHELL" };
+  }
+  for (const name of ["bash", "sh"]) {
+    const found = which(name);
+    if (found === null) continue;
+    if (platform === "win32" && isWslLauncher(found, env)) continue;
+    return { command: found };
+  }
+  const hint =
+    platform === "win32"
+      ? "未找到 bash/sh：请安装 Git for Windows，或用 BUGENT_SHELL 指向 bash.exe"
+      : "未找到 bash/sh：请安装 bash，或用 BUGENT_SHELL 指定路径";
+  return { command: platform === "win32" ? "bash" : "/bin/sh", note: hint };
+}
+
 function defaultShell(): string {
-  return Bun.which("bash") ?? Bun.which("sh") ?? "/bin/sh";
+  return resolveShell().command;
 }
 
 /** 由调用方决定实际启动什么进程（本地 shell / bwrap 沙箱 / …）。 */

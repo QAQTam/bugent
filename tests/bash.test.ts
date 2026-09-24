@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createBashTool, createShellRunner } from "../src/tools/bash.ts";
+import { createBashTool, createShellRunner, resolveShell } from "../src/tools/bash.ts";
 import { ToolRegistry, type ToolCtx } from "../src/tools/types.ts";
 
 function ctx(overrides: Partial<ToolCtx> = {}): ToolCtx {
@@ -134,5 +134,44 @@ describe("P3 · bash 工具", () => {
     expect(result.aborted).toBe(true);
     expect(result.exitCode).toBeNull();
     expect(result.durationMs).toBe(0);
+  });
+});
+
+describe("shell 解析（跨平台）", () => {
+  const none = (): null => null;
+
+  test("优先用 PATH 上的 bash", () => {
+    const shell = resolveShell("linux", {}, (name) => (name === "bash" ? "/usr/bin/bash" : null));
+    expect(shell).toEqual({ command: "/usr/bin/bash" });
+  });
+
+  test("BUGENT_SHELL 覆盖一切", () => {
+    const shell = resolveShell(
+      "win32",
+      { BUGENT_SHELL: "D:\\Git\\bin\\bash.exe" },
+      () => "C:\\Windows\\System32\\bash.exe",
+    );
+    expect(shell.command).toBe("D:\\Git\\bin\\bash.exe");
+    expect(shell.note).toContain("BUGENT_SHELL");
+  });
+
+  test("Windows 上跳过 WSL 的 bash 桩，改用真正的 POSIX shell", () => {
+    const found: Record<string, string> = {
+      bash: "C:\\Windows\\System32\\bash.exe",
+      sh: "C:\\Program Files\\Git\\usr\\bin\\sh.exe",
+    };
+    const shell = resolveShell("win32", { SystemRoot: "C:\\Windows" }, (name) => found[name] ?? null);
+    expect(shell.command).toBe("C:\\Program Files\\Git\\usr\\bin\\sh.exe");
+  });
+
+  test("没有 POSIX shell 时不抛错，只给出装什么的提示", () => {
+    // 抛错会让 bugent 在没有 bash 的机器上直接起不来 —— 而文件工具根本不需要 shell
+    const windows = resolveShell("win32", { SystemRoot: "C:\\Windows" }, none);
+    expect(windows.command).toBe("bash");
+    expect(windows.note).toContain("Git for Windows");
+
+    const posix = resolveShell("linux", {}, none);
+    expect(posix.command).toBe("/bin/sh");
+    expect(posix.note).toContain("BUGENT_SHELL");
   });
 });

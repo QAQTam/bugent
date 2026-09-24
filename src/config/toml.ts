@@ -11,6 +11,7 @@
  */
 
 import { mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import { isSandboxMode } from "../permission/mode.ts";
@@ -23,7 +24,13 @@ export const CONFIG_FILE_NAME = "config.toml";
 export const DATABASE_FILE_NAME = "sessions.db";
 
 function homeDir(home?: string): string {
-  return (home ?? process.env.HOME ?? "~").replace(/\/+$/, "");
+  if (home !== undefined) return home.replace(/\/+$/, "");
+  // POSIX 认 $HOME（调用方随时可以覆盖它，测试也依赖这一点）；
+  // Windows 上 HOME 可能是 Git Bash 塞进来的 POSIX 路径（`/c/Users/...`），
+  // 那种路径 Windows 的文件 API 解析不了，所以那边一律用 os.homedir()。
+  // 注意 Bun 的 homedir() 是启动时算好并缓存的，不能靠它读运行期改过的 HOME。
+  const fromEnv = process.platform === "win32" ? undefined : process.env.HOME;
+  return (fromEnv ?? homedir()).replace(/\/+$/, "");
 }
 
 export function configDir(home?: string): string {

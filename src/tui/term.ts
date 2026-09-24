@@ -25,6 +25,8 @@ export class Terminal {
   #entered = false;
   #boundData: ((chunk: Buffer | string) => void) | undefined;
   #boundResize: (() => void) | undefined;
+  #resizePoll: ReturnType<typeof setInterval> | undefined;
+  #polledSize: TerminalSize | undefined;
 
   get size(): TerminalSize {
     // 注意用 `||` 而不是 `??`：部分 PTY/终端会返回 0 而不是 undefined，
@@ -77,6 +79,18 @@ export class Terminal {
       for (const handler of this.#resizeHandlers) handler();
     };
     process.on("SIGWINCH", this.#boundResize);
+    // Windows 不产生 SIGWINCH，只能自己轮询尺寸；这个定时器只在那边开，
+    // 其他平台继续走信号。
+    if (process.platform === "win32") {
+      this.#polledSize = this.size;
+      this.#resizePoll = setInterval(() => {
+        const size = this.size;
+        const last = this.#polledSize;
+        if (last !== undefined && size.width === last.width && size.height === last.height) return;
+        this.#polledSize = size;
+        this.#boundResize?.();
+      }, 250);
+    }
   }
 
   /** 退出备用屏，恢复终端状态。必须保证异常路径也能调用。 */
@@ -87,6 +101,10 @@ export class Terminal {
     const stdin = process.stdin as unknown as StdinLike;
     if (this.#boundData !== undefined) stdin.off("data", this.#boundData);
     if (this.#boundResize !== undefined) process.off("SIGWINCH", this.#boundResize);
+    if (this.#resizePoll !== undefined) {
+      clearInterval(this.#resizePoll);
+      this.#resizePoll = undefined;
+    }
 
     stdin.setRawMode?.(false);
     stdin.pause?.();
