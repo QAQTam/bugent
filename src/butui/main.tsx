@@ -422,7 +422,6 @@ const createdApp = createTuiApp({
             follow
             revision={transcript.revision}
             scrollbar
-            smooth
             onController={controller => {
               transcriptController = controller;
             }}

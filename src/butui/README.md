@@ -49,15 +49,17 @@ The validation entry now opts into a conservative v0.2 experimental slice:
 
 This reduces terminal writes under high-frequency streaming, routes mouse
 selection against the frame the user actually saw, and gives the turn a stable
-paint boundary. Set `BUGENT_BUTUI_V02=0` to compare against the v0.1
-`microtask + logical` behavior.
+paint boundary. The transcript deliberately does not stack `smooth` on top of
+`frame` mode; buTUI documents that combination as swallowing reveal frames.
+Set `BUGENT_BUTUI_V02=0` to compare against the v0.1 `microtask + logical`
+behavior.
 
 The transcript is projected through `StreamLedger` + `StreamWindow`; stable
 history can spill to `~/.bugent/butui/<session>/`. The experimental entry keeps
 the sidecars during the process and attempts cleanup on normal disposal.
 
-The sibling checkout is anchored to `QAQTam/buTUI@v0.2.1-exp`
-(`2be2a14`, `fix(stream): preserve follow across revisions and resize`). It is
+The sibling checkout is anchored to `QAQTam/buTUI@v0.2.2-exp`
+(`7d83210`, `fix(stream): reset smooth when window lines are replaced`). It is
 not referenced through a GitHub package URL because `@butui/*` packages are
 still private workspace packages inside a monorepo; a repository-level git
 dependency cannot resolve those subpackages reliably.
