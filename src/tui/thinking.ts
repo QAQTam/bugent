@@ -39,9 +39,16 @@ export type AgentActivity =
   | { state: "thinking"; detail?: string }
   | { state: "responding"; detail?: string }
   | { state: "tool"; detail?: string }
+  | { state: "goal_init"; detail?: string }
+  | { state: "goal_plan"; detail?: string }
+  | { state: "goal_checkpoint"; detail?: string }
+  | { state: "goal_review"; detail?: string }
+  | { state: "goal_handoff"; detail?: string }
+  | { state: "goal_audit"; detail?: string }
+  | { state: "waiting_user"; detail?: string }
   | { state: "retrying"; detail?: string }
-  | { state: "disconnected"; detail?: string }
-  | { state: "aborted"; detail?: string };
+   | { state: "disconnected"; detail?: string }
+   | { state: "aborted"; detail?: string };
 
 export function isSpinningActivity(activity: AgentActivity): boolean {
   return (
@@ -49,6 +56,13 @@ export function isSpinningActivity(activity: AgentActivity): boolean {
     activity.state === "thinking" ||
     activity.state === "responding" ||
     activity.state === "tool" ||
+    activity.state === "goal_init" ||
+    activity.state === "goal_plan" ||
+    activity.state === "goal_checkpoint" ||
+    activity.state === "goal_review" ||
+    activity.state === "goal_handoff" ||
+    activity.state === "goal_audit" ||
+    activity.state === "waiting_user" ||
     activity.state === "retrying"
   );
 }
@@ -166,9 +180,23 @@ export function composeThinkingBlock(
         ? "生成回复"
         : activity.state === "tool"
           ? "执行工具"
-          : activity.state === "retrying"
-            ? "重试"
-            : "思考";
+          : activity.state === "goal_init"
+            ? "初始化 Goal"
+            : activity.state === "goal_plan"
+              ? "规划 Goal"
+              : activity.state === "goal_checkpoint"
+                ? "执行 Checkpoint"
+                : activity.state === "goal_review"
+                  ? "审查 Checkpoint"
+                  : activity.state === "goal_handoff"
+                    ? "更新 Handoff"
+                    : activity.state === "goal_audit"
+                      ? "最终审计"
+                      : activity.state === "waiting_user"
+                        ? "等待用户"
+                        : activity.state === "retrying"
+                          ? "重试"
+                          : "思考";
   const text =
     activity.state === "thinking"
       ? activity.detail ?? buffer.current
@@ -179,7 +207,18 @@ export function composeThinkingBlock(
     frameIndex,
     label,
     text,
-    tone: activity.state === "tool" ? "tool" : activity.state === "retrying" ? "warn" : "reasoning",
+    tone:
+      activity.state === "tool" ||
+      activity.state === "goal_init" ||
+      activity.state === "goal_plan" ||
+      activity.state === "goal_checkpoint" ||
+      activity.state === "goal_review" ||
+      activity.state === "goal_handoff" ||
+      activity.state === "goal_audit"
+        ? "tool"
+        : activity.state === "retrying" || activity.state === "waiting_user"
+          ? "warn"
+          : "reasoning",
   });
   return lines;
 }

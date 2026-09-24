@@ -2454,7 +2454,21 @@ export class TuiApp implements TuiInteraction {
       },
       onToolCall: (call) => {
         this.#transcript.startTool(call, this.#lastAssistantMsgid);
-        this.#setActivity({ state: "tool", detail: call.name });
+        const activity: AgentActivity =
+          call.name === "create_goal" || call.name === "update_goal"
+            ? { state: "goal_init", detail: call.name }
+            : call.name === "update_plan"
+              ? { state: "goal_plan", detail: "更新 Plan" }
+              : call.name === "todo_write" && this.#goalController?.currentGoal() !== undefined
+                ? { state: "goal_checkpoint", detail: "更新 Todo" }
+                : call.name === "submit_checkpoint"
+                  ? { state: "goal_review", detail: "验证与审查" }
+                  : call.name === "get_handoff" || call.name === "handoff_update"
+                    ? { state: "goal_handoff", detail: call.name }
+                    : call.name === "final_audit"
+                      ? { state: "goal_audit", detail: "最终审计" }
+                      : { state: "tool", detail: call.name };
+        this.#setActivity(activity);
       },
       // 运行中的流式输出：只保留末尾若干行，内存有界
       onToolProgress: (call, chunk, stream) => {
@@ -2465,9 +2479,11 @@ export class TuiApp implements TuiInteraction {
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
       // ask_user：多页问答表单；用户中止时暂停自动 continuation，直到下一条输入。
       onAskUser: async (_call, questions) => {
+        this.#setActivity({ state: "waiting_user", detail: "等待回答" });
         const answers = await this.askUser(questions);
         if (answers === undefined) this.#goalController?.deferForUser();
         else this.#goalController?.clearUserDeferral();
+        this.#setActivity({ state: "waiting", detail: "处理回答" });
         return answers;
       },
       onToolResult: (call, result, message) => {

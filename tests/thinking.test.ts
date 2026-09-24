@@ -136,6 +136,13 @@ describe("思考链路 · 区块渲染", () => {
       [{ state: "waiting", detail: "连接模型" }, "等待模型"],
       [{ state: "responding", detail: "生成回复" }, "生成回复"],
       [{ state: "tool", detail: "bash" }, "执行工具"],
+      [{ state: "goal_init", detail: "create_goal" }, "初始化 Goal"],
+      [{ state: "goal_plan", detail: "update_plan" }, "规划 Goal"],
+      [{ state: "goal_checkpoint", detail: "todo_write" }, "执行 Checkpoint"],
+      [{ state: "goal_review", detail: "submit_checkpoint" }, "审查 Checkpoint"],
+      [{ state: "goal_handoff", detail: "handoff_update" }, "更新 Handoff"],
+      [{ state: "goal_audit", detail: "final_audit" }, "最终审计"],
+      [{ state: "waiting_user", detail: "等待回答" }, "等待用户"],
       [{ state: "retrying", detail: "重新请求" }, "重试"],
     ];
 
