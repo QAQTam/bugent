@@ -13,7 +13,187 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
+
+const GOAL_SCHEMA = `
+CREATE TABLE IF NOT EXISTS session_goals (
+  goal_id              TEXT PRIMARY KEY,
+  session_id           TEXT NOT NULL,
+  raw_intent           TEXT NOT NULL,
+  objective            TEXT NOT NULL,
+  success_criteria     TEXT NOT NULL,
+  constraints          TEXT NOT NULL,
+  non_goals            TEXT NOT NULL,
+  risk_policy          TEXT NOT NULL,
+  status               TEXT NOT NULL,
+  phase                TEXT NOT NULL,
+  token_budget         INTEGER,
+  tokens_used          INTEGER NOT NULL,
+  time_used_seconds    INTEGER NOT NULL,
+  continuation_count   INTEGER NOT NULL,
+  blocked_streak       INTEGER NOT NULL,
+  active_checkpoint_id TEXT,
+  active_epoch_id      TEXT,
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_checkpoints (
+  checkpoint_id       TEXT PRIMARY KEY,
+  goal_id             TEXT NOT NULL,
+  ordinal             INTEGER NOT NULL,
+  title               TEXT NOT NULL,
+  deliverable         TEXT NOT NULL,
+  acceptance_criteria TEXT NOT NULL,
+  evidence_required   TEXT NOT NULL,
+  depends_on          TEXT NOT NULL,
+  status              TEXT NOT NULL,
+  created_at          INTEGER NOT NULL,
+  completed_at        INTEGER,
+  UNIQUE (goal_id, ordinal),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_plan_revisions (
+  plan_id      TEXT PRIMARY KEY,
+  goal_id      TEXT NOT NULL,
+  revision     INTEGER NOT NULL,
+  phases       TEXT NOT NULL,
+  assumptions  TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  UNIQUE (goal_id, revision),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_todo_snapshots (
+  snapshot_id   TEXT PRIMARY KEY,
+  goal_id       TEXT NOT NULL,
+  checkpoint_id TEXT NOT NULL,
+  revision      INTEGER NOT NULL,
+  summary       TEXT,
+  todos         TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  UNIQUE (goal_id, revision),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE,
+  FOREIGN KEY (checkpoint_id) REFERENCES goal_checkpoints(checkpoint_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_evidence (
+  evidence_id   TEXT PRIMARY KEY,
+  goal_id       TEXT NOT NULL,
+  checkpoint_id TEXT,
+  kind          TEXT NOT NULL,
+  summary       TEXT NOT NULL,
+  reference     TEXT NOT NULL,
+  digest        TEXT,
+  command       TEXT,
+  exit_code     INTEGER,
+  created_at    INTEGER NOT NULL,
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE,
+  FOREIGN KEY (checkpoint_id) REFERENCES goal_checkpoints(checkpoint_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS goal_handoffs (
+  handoff_id          TEXT PRIMARY KEY,
+  goal_id             TEXT NOT NULL,
+  revision            INTEGER NOT NULL,
+  status              TEXT NOT NULL,
+  updated_by          TEXT NOT NULL,
+  current_state       TEXT NOT NULL,
+  markdown_path       TEXT NOT NULL,
+  snapshot_hash       TEXT,
+  supersedes_revision INTEGER,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  UNIQUE (goal_id, revision),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_epochs (
+  epoch_id             TEXT PRIMARY KEY,
+  goal_id              TEXT NOT NULL,
+  branch_id            TEXT NOT NULL,
+  parent_epoch_id      TEXT,
+  checkpoint_id        TEXT,
+  handoff_id           TEXT NOT NULL,
+  handoff_revision     INTEGER NOT NULL,
+  handoff_snapshot_hash TEXT NOT NULL,
+  reason               TEXT NOT NULL,
+  created_at           INTEGER NOT NULL,
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_epoch_id) REFERENCES goal_epochs(epoch_id) ON DELETE SET NULL,
+  FOREIGN KEY (checkpoint_id) REFERENCES goal_checkpoints(checkpoint_id) ON DELETE SET NULL,
+  FOREIGN KEY (handoff_id) REFERENCES goal_handoffs(handoff_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS goal_turn_accounting (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  goal_id        TEXT NOT NULL,
+  turn_id        TEXT NOT NULL,
+  input_tokens   INTEGER NOT NULL,
+  output_tokens  INTEGER NOT NULL,
+  cached_tokens  INTEGER NOT NULL,
+  active_seconds INTEGER NOT NULL,
+  outcome        TEXT NOT NULL,
+  started_at     INTEGER NOT NULL,
+  ended_at       INTEGER NOT NULL,
+  UNIQUE (goal_id, turn_id),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_reviews (
+  review_id            TEXT PRIMARY KEY,
+  goal_id              TEXT NOT NULL,
+  checkpoint_id        TEXT NOT NULL,
+  round                INTEGER NOT NULL,
+  status               TEXT NOT NULL,
+  reviewer             TEXT NOT NULL,
+  base_revision        TEXT NOT NULL,
+  head_revision        TEXT NOT NULL,
+  diff_hash            TEXT NOT NULL,
+  verdict              TEXT,
+  criteria_coverage    TEXT NOT NULL,
+  unresolved_questions TEXT NOT NULL,
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL,
+  UNIQUE (goal_id, checkpoint_id, round),
+  FOREIGN KEY (goal_id) REFERENCES session_goals(goal_id) ON DELETE CASCADE,
+  FOREIGN KEY (checkpoint_id) REFERENCES goal_checkpoints(checkpoint_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS goal_review_findings (
+  finding_id      TEXT PRIMARY KEY,
+  review_id       TEXT NOT NULL,
+  severity        TEXT NOT NULL,
+  title           TEXT NOT NULL,
+  evidence        TEXT NOT NULL,
+  requested_change TEXT,
+  FOREIGN KEY (review_id) REFERENCES goal_reviews(review_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_goals_session
+  ON session_goals(session_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_goal_checkpoints_goal
+  ON goal_checkpoints(goal_id, ordinal);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_checkpoint_current
+  ON goal_checkpoints(goal_id)
+  WHERE status IN ('active', 'verifying', 'reviewing');
+CREATE INDEX IF NOT EXISTS idx_goal_plan_revisions_goal
+  ON goal_plan_revisions(goal_id, revision);
+CREATE INDEX IF NOT EXISTS idx_goal_todo_snapshots_goal
+  ON goal_todo_snapshots(goal_id, revision);
+CREATE INDEX IF NOT EXISTS idx_goal_evidence_goal
+  ON goal_evidence(goal_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_goal_handoffs_goal
+  ON goal_handoffs(goal_id, revision);
+CREATE INDEX IF NOT EXISTS idx_goal_epochs_goal
+  ON goal_epochs(goal_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_goal_turn_accounting_goal
+  ON goal_turn_accounting(goal_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_goal_reviews_goal
+  ON goal_reviews(goal_id, checkpoint_id, round);
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -98,6 +278,8 @@ CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_
 CREATE INDEX IF NOT EXISTS idx_session_providers_session ON session_providers(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
+
+${GOAL_SCHEMA}
 `;
 
 export interface OpenDatabaseOptions {
@@ -240,6 +422,10 @@ function migrate(db: Database): void {
       );
       CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp(session_id);
     `);
+  }
+
+  if (version < 10) {
+    db.exec(GOAL_SCHEMA);
   }
 }
 
