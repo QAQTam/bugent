@@ -136,6 +136,38 @@ describe("isolated worker executor", () => {
     await transport.dispose();
   });
 
+  test("missing Git returns actionable install guidance", async () => {
+    const root = await tempDir("bugent-worker-no-git-");
+    const transport = createInProcessTransport({
+      executor: createWorkerAgentExecutor({
+        client: createMockClient({ script: [{ text: "should not run" }] }),
+        model: "mock",
+        worktrees: new GitWorktreeManager({
+          worktreeRoot: await tempDir("bugent-worker-no-git-worktrees-"),
+          artifactRoot: await tempDir("bugent-worker-no-git-artifacts-"),
+        }),
+        probe: async () => ({
+          available: false,
+          workerReady: false,
+          binary: undefined,
+          version: undefined,
+          repoRoot: undefined,
+          head: undefined,
+          dirty: false,
+          reason: "未找到 Git",
+          installHint: "winget install --id Git.Git -e --source winget",
+        }),
+      }),
+    });
+
+    const result = await transport.wait(await transport.start(workerSpec("worker-1", root)));
+    expect(result.status).toBe("error");
+    expect(result.summary).toContain("未找到 Git");
+    expect(result.summary).toContain("隔离修改");
+    expect(result.summary).toContain("winget install");
+    await transport.dispose();
+  });
+
   test("dirty source workspace fails closed before creating a worker", async () => {
     if (Bun.which("git") === null) return;
     const repo = await initRepo();

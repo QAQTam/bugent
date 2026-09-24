@@ -128,8 +128,9 @@ export function createWorkerAgentExecutor(
       const capability = await probe(sourceRoot);
       if (!capability.available || !capability.workerReady) {
         throw new Error(
-          `worker 隔离不可用：${capability.reason ?? "Git capability 缺失"}` +
-            (capability.installHint !== undefined ? `；安装建议：${capability.installHint}` : ""),
+          `worker 隔离不可用：${capability.reason ?? "Git capability 缺失"}。` +
+            "Git worktree 用于隔离修改、导出 patch，并避免子代理污染主工作区。" +
+            (capability.installHint !== undefined ? ` 安装建议：${capability.installHint}` : ""),
         );
       }
 
