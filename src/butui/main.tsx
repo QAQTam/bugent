@@ -44,6 +44,7 @@ const cwd = process.env.BUGENT_BUTUI_CWD ?? resolve(import.meta.dir, "../..");
 const args = process.argv.slice(2);
 const useMock = args.includes("--mock");
 const skipConfirmations = args.includes("--yes");
+const experimentalRuntime = process.env.BUGENT_BUTUI_V02 !== "0";
 
 const [messages, setMessages] = createSignal<UiMessage[]>([
   { kind: "notice", text: "buTUI 实验入口：真实 bugent session / tools / 权限桥接。" },
@@ -170,6 +171,7 @@ async function submit(value: string): Promise<void> {
     currentAbort = undefined;
     setBusy(false);
     syncPaint();
+    await app?.waitUntilFrameFlushed(undefined, "accepted").catch(() => {});
   }
 }
 
@@ -210,7 +212,7 @@ const createdApp = createTuiApp({
             </text>
           </row>
           <text color="muted">
-            {runtimeProviderLabel()} · {status()}
+            {runtimeProviderLabel()} · {runtimeTuningLabel()} · {status()}
           </text>
         </box>
 
@@ -277,6 +279,12 @@ const createdApp = createTuiApp({
     );
   },
   stickyBottom: 4,
+  ...(experimentalRuntime
+    ? {
+        render: { mode: "frame" as const, fps: 120, adaptiveQuality: true },
+        inputRouting: "presented" as const,
+      }
+    : {}),
   mouseMotion: "drag",
   mousePointer: true,
   selection: true,
@@ -304,6 +312,10 @@ const createdApp = createTuiApp({
 
 function runtimeProviderLabel(): string {
   return `${agentRuntime.providerId}/${agentRuntime.model}`;
+}
+
+function runtimeTuningLabel(): string {
+  return experimentalRuntime ? "v0.2 frame+presented" : "v0.1 microtask+logical";
 }
 
 app = createdApp;
