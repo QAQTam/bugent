@@ -418,6 +418,7 @@ send_subagent
 followup_subagent
 interrupt_subagent
 get_subagent_output
+apply_subagent_patch
 ```
 
 职责边界：
@@ -428,6 +429,7 @@ get_subagent_output
 - `get_subagent_output` 按需读取结构化结果或 artifact。
 - `send_subagent` 发送数据消息，不改变权限。
 - `interrupt_subagent` 走 supervisor 的取消路径。
+- `apply_subagent_patch` 只应用当前父 Agent 的 worker patch；必须校验 base revision、digest 和 clean workspace。
 
 ## 11. 父模型通知策略
 

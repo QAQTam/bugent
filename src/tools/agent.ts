@@ -19,8 +19,10 @@ import {
   type AgentKind,
 } from "../agent/model.ts";
 import { compileAgentSandboxSpec } from "../agent/sandbox.ts";
+import { applyWorkerPatch } from "../agent/integrator.ts";
 import type { AgentHandle, AgentSpec } from "../agent/supervisor.ts";
 import type { AgentTransport } from "../agent/transport.ts";
+import type { WorkerAgentOutput } from "../agent/worker-executor.ts";
 
 export const SPAWN_SUBAGENT_TOOL_NAME = "spawn_subagent";
 export const LIST_SUBAGENTS_TOOL_NAME = "list_subagents";
@@ -30,6 +32,7 @@ export const SEND_SUBAGENT_TOOL_NAME = "send_subagent";
 export const FOLLOWUP_SUBAGENT_TOOL_NAME = "followup_subagent";
 export const INTERRUPT_SUBAGENT_TOOL_NAME = "interrupt_subagent";
 export const GET_SUBAGENT_OUTPUT_TOOL_NAME = "get_subagent_output";
+export const APPLY_SUBAGENT_PATCH_TOOL_NAME = "apply_subagent_patch";
 
 const SPAWNABLE_KINDS = ["reviewer", "explorer", "worker"] as const satisfies readonly AgentKind[];
 
@@ -484,5 +487,66 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
     },
   };
 
-  return [spawn, list, get, wait, send, followup, interrupt, output];
+  const applyPatch: Tool<unknown, unknown> = {
+    name: APPLY_SUBAGENT_PATCH_TOOL_NAME,
+    description: [
+      "把当前父 Agent 创建的 worker patch 应用到主工作区。",
+      "只接受 worker 产出的 patch artifact；base revision 漂移、digest 不匹配或工作区 dirty 时拒绝。",
+      "应用前会执行 git apply --check，成功后才真正修改工作区。",
+    ].join("\n"),
+    parameters: AGENT_ID_PARAMETERS,
+    defaultPermission: "ask",
+    requires: { write: true },
+    resources() {
+      return [{ key: "workspace", access: "write" }];
+    },
+    describe(input: unknown) {
+      const source = record(input, "apply_subagent_patch input");
+      const agentId = requiredString(source, "agent_id");
+      return { resource: `workspace via ${agentId}`, summary: `应用子代理 ${agentId} 的 patch` };
+    },
+    async run(input: unknown, ctx: ToolCtx): Promise<unknown> {
+      assertContext(ctx);
+      const source = record(input, "apply_subagent_patch input");
+      const handle = requireOwned(requiredString(source, "agent_id"));
+      if (handle.kind !== "worker") throw new Error("apply_subagent_patch 只能应用 worker 结果");
+      const result = handle.result;
+      if (result === undefined || result.status !== "completed") {
+        throw new Error("worker 尚未成功完成，不能应用 patch");
+      }
+      const workerOutput = result.data as WorkerAgentOutput | undefined;
+      if (
+        workerOutput === undefined ||
+        typeof workerOutput.baseRevision !== "string" ||
+        typeof workerOutput.diffHash !== "string" ||
+        typeof workerOutput.patchArtifact !== "string"
+      ) {
+        throw new Error("worker 没有可应用的 patch metadata");
+      }
+      const artifact = result.artifacts.find(
+        (candidate) =>
+          candidate.kind === "patch" &&
+          candidate.path === workerOutput.patchArtifact &&
+          candidate.digest === workerOutput.diffHash,
+      );
+      if (artifact === undefined) throw new Error("worker patch artifact 不存在或不匹配");
+
+      const applied = await applyWorkerPatch({
+        cwd: options.cwd,
+        baseRevision: workerOutput.baseRevision,
+        patchPath: artifact.path,
+        expectedDigest: artifact.digest,
+      });
+      return {
+        applied: true,
+        agent_id: handle.id,
+        base_revision: applied.baseRevision,
+        patch_digest: applied.patchDigest,
+        changed_files: applied.changedFiles,
+        rollback_patch: applied.rollbackPatch,
+      };
+    },
+  };
+
+  return [spawn, list, get, wait, send, followup, interrupt, output, applyPatch];
 }
