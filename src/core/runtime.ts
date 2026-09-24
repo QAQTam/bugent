@@ -250,6 +250,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     "process.exec",
     "agent.spawn",
   ];
+  let audit: Audit | undefined;
 
   const setup = createDefaultTools({
     mode,
@@ -267,6 +268,10 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
       },
       cwd: options.cwd,
       notifications: session,
+      onIntegration: async (record) => {
+        audit?.agentIntegration(record);
+        goalController?.recordAgentIntegration(record);
+      },
     },
   });
   if (goalController !== undefined) {
@@ -290,7 +295,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     syncSkillManifest(session, options.skillManager, skillsManifest);
   }
 
-  const audit =
+  audit =
     options.store === undefined
       ? undefined
       : new Audit({

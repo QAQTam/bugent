@@ -3,9 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probeGit, runGit } from "../src/agent/git.ts";
-import { applyWorkerPatch } from "../src/agent/integrator.ts";
+import { applyWorkerPatch, type AgentIntegrationRecord } from "../src/agent/integrator.ts";
 import { createInProcessTransport } from "../src/agent/transport.ts";
 import type { AgentExecutor } from "../src/agent/supervisor.ts";
+import { AuditTrail } from "../src/store/audit.ts";
+import { SessionStore } from "../src/store/repository.ts";
 import {
   APPLY_SUBAGENT_PATCH_TOOL_NAME,
   SPAWN_SUBAGENT_TOOL_NAME,
@@ -159,6 +161,54 @@ describe("workspace integrator", () => {
     expect(status.stdout.trim()).toBe("");
   });
 
+  test("audit stores integration metadata without command output", () => {
+    const store = new SessionStore({ path: ":memory:" });
+    store.createSession({
+      id: "s1",
+      createdAt: 1,
+      updatedAt: 1,
+      model: "test",
+      systemPrompt: "SYS",
+    });
+    const audit = new AuditTrail({
+      store,
+      sessionId: () => "s1",
+      turn: () => 3,
+      now: () => 10,
+    });
+    const record: AgentIntegrationRecord = {
+      agentId: "worker-1",
+      applied: true,
+      rolledBack: false,
+      baseRevision: "abc",
+      patchDigest: `sha256:${"a".repeat(64)}`,
+      changedFiles: ["tracked.txt"],
+      rollbackPatch: "/tmp/diff.patch",
+      verifications: [
+        {
+          command: "bun test",
+          exitCode: 0,
+          stdout: "SECRET OUTPUT",
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        },
+      ],
+      failure: undefined,
+    };
+
+    audit.agentIntegration(record);
+    const event = store.listEvents("s1").at(-1)!;
+    expect(event.kind).toBe("agent_integration");
+    expect(JSON.stringify(event.payload)).not.toContain("SECRET OUTPUT");
+    expect(event.payload).toMatchObject({
+      agentId: "worker-1",
+      applied: true,
+      patchDigest: record.patchDigest,
+    });
+    store.close();
+  });
+
   test("rejects digest mismatch, dirty workspace, and revision drift", async () => {
     if (Bun.which("git") === null) return;
     const repo = await initRepo();
@@ -231,6 +281,7 @@ describe("workspace integrator", () => {
         };
       },
     };
+    const integrationRecords: AgentIntegrationRecord[] = [];
     const transport = createInProcessTransport({ executor });
     const tools = new Map(
       createAgentTools({
@@ -249,6 +300,9 @@ describe("workspace integrator", () => {
               durationMs: 0,
             };
           },
+        },
+        onIntegration: async (record) => {
+          integrationRecords.push(record);
         },
         idFactory: (() => {
           const values = ["worker-1", "task-1", "session-1"];
@@ -282,6 +336,8 @@ describe("workspace integrator", () => {
     expect(result.applied).toBe(true);
     expect(result.changed_files).toEqual(["tracked.txt"]);
     expect(result.verifications).toHaveLength(1);
+    expect(integrationRecords).toHaveLength(1);
+    expect(integrationRecords[0]?.agentId).toBe("worker-1");
     expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("integrated\n");
     await transport.dispose();
   });

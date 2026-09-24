@@ -487,6 +487,8 @@ GoalController
 - reviewer 的结果写入 `goal_reviews`。
 - Handoff actor 记录具体 `agentId`，不只写 `"reviewer"`。
 - Agent 完成后生成 Evidence / Artifact 引用。
+- 成功应用的 worker patch 写入 `diff` Evidence；通过的验证命令写入 `test` Evidence。
+- 回滚或失败的应用只进入 audit，不得作为 Goal 完成 Evidence。
 - Goal 的最终完成仍由系统状态机决定，不由子代理自行声明。
 
 ## 13. 持久化模型

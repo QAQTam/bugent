@@ -8,6 +8,7 @@
 
 import type { LoopHooks } from "../core/loop.ts";
 import type { GateDecision } from "../permission/gate.ts";
+import type { AgentIntegrationRecord } from "../agent/integrator.ts";
 import type { SessionStore } from "./repository.ts";
 
 export interface AuditOptions {
@@ -66,6 +67,26 @@ export class AuditTrail {
       decision: decision.decision,
       allowed: decision.allowed,
       reason: decision.reason,
+    });
+  }
+
+  /** Integration outcome; intentionally excludes command stdout/stderr. */
+  agentIntegration(record: AgentIntegrationRecord): void {
+    this.#record("agent_integration", {
+      agentId: record.agentId,
+      applied: record.applied,
+      rolledBack: record.rolledBack,
+      baseRevision: record.baseRevision,
+      patchDigest: record.patchDigest,
+      changedFiles: record.changedFiles,
+      rollbackPatch: record.rollbackPatch,
+      verifications: record.verifications.map((verification) => ({
+        command: verification.command,
+        exitCode: verification.exitCode,
+        timedOut: verification.timedOut,
+        aborted: verification.aborted,
+      })),
+      failure: record.failure,
     });
   }
 

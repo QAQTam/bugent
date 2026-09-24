@@ -44,6 +44,10 @@ export interface ApplyWorkerPatchResult {
   readonly failure: string | undefined;
 }
 
+export interface AgentIntegrationRecord extends ApplyWorkerPatchResult {
+  readonly agentId: string;
+}
+
 const MAX_PATCH_BYTES = 32 * 1024 * 1024;
 
 function patchChangedFiles(numstat: string): string[] {

@@ -20,7 +20,7 @@ import {
   type AgentKind,
 } from "../agent/model.ts";
 import { compileAgentSandboxSpec } from "../agent/sandbox.ts";
-import { applyWorkerPatch } from "../agent/integrator.ts";
+import { applyWorkerPatch, type AgentIntegrationRecord } from "../agent/integrator.ts";
 import type { AgentHandle, AgentSpec } from "../agent/supervisor.ts";
 import type { AgentTransport } from "../agent/transport.ts";
 import type { WorkerAgentOutput } from "../agent/worker-executor.ts";
@@ -57,6 +57,10 @@ export interface AgentToolsOptions {
   readonly notifications?: AgentNotificationSink;
   /** Same sandboxed runner as the parent bash tool, used for post-apply checks. */
   readonly verificationRunner?: ShellRunner;
+  /** Persist integration outcomes to audit and optional Goal Evidence. */
+  readonly onIntegration?: (
+    record: AgentIntegrationRecord,
+  ) => void | Promise<void>;
   readonly idFactory?: (prefix: string) => string;
 }
 
@@ -605,6 +609,17 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
             }
           : {}),
       });
+      const integrationRecord: AgentIntegrationRecord = {
+        ...applied,
+        agentId: handle.id,
+      };
+      try {
+        await options.onIntegration?.(integrationRecord);
+      } catch (error) {
+        throw new Error(
+          `patch 已处理，但集成证据落库失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return {
         applied: applied.applied,
         rolled_back: applied.rolledBack,

@@ -52,6 +52,7 @@ export type AuditEventKind =
   | "tool_result"
   | "permission"
   | "session_config"
+  | "agent_integration"
   | "error";
 
 export interface AuditEvent {

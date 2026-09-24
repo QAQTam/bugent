@@ -18,6 +18,7 @@ import type { SessionStore } from "../store/repository.ts";
 import type {
   Checkpoint,
   Criterion,
+  Evidence,
   Goal,
   GoalReview,
   GoalStatus,
@@ -30,6 +31,7 @@ import type {
   ReviewPolicy,
   TodoSnapshot,
 } from "./types.ts";
+import type { AgentIntegrationRecord } from "../agent/integrator.ts";
 import {
   reviewResultRejection,
   withForcedRejection,
@@ -399,6 +401,52 @@ export class GoalController {
 
   currentGoal(): Goal | undefined {
     return this.repository.getCurrentGoal(this.session.id);
+  }
+
+  /**
+   * Persist deterministic integration evidence. Failed or rolled-back patches
+   * are audit-only and must not become Goal completion evidence.
+   */
+  recordAgentIntegration(record: AgentIntegrationRecord): Evidence[] {
+    const goal = this.currentGoal();
+    if (
+      goal === undefined ||
+      goal.status !== "active" ||
+      !record.applied ||
+      record.rolledBack
+    ) {
+      return [];
+    }
+    const checkpointId = goal.activeCheckpointId;
+    const stored: Evidence[] = [
+      this.repository.addEvidence(goal.id, {
+        ...(checkpointId !== undefined ? { checkpointId } : {}),
+        kind: "diff",
+        summary: `Applied worker patch ${record.agentId}`,
+        reference: `agent://${record.agentId}/patch`,
+        digest: record.patchDigest,
+      }),
+    ];
+    record.verifications.forEach((verification, index) => {
+      if (
+        verification.exitCode !== 0 ||
+        verification.timedOut ||
+        verification.aborted
+      ) {
+        return;
+      }
+      stored.push(
+        this.repository.addEvidence(goal.id, {
+          ...(checkpointId !== undefined ? { checkpointId } : {}),
+          kind: "test",
+          summary: `Integrator verification passed: ${verification.command}`,
+          reference: `agent://${record.agentId}/verify/${index}`,
+          command: verification.command,
+          exitCode: 0,
+        }),
+      );
+    });
+    return stored;
   }
 
   handoffBuilder(goalId: string): LivingHandoffBuilder | undefined {

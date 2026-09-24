@@ -467,6 +467,7 @@ async function main(): Promise<void> {
         });
   goalController?.ensureContext();
 
+  let audit: AuditTrail | undefined;
   const tools = createDefaultTools({
     mode,
     ...(config.sandbox?.writablePaths !== undefined
@@ -485,6 +486,10 @@ async function main(): Promise<void> {
       },
       cwd: options.cwd,
       notifications: session,
+      onIntegration: async (record) => {
+        audit?.agentIntegration(record);
+        goalController?.recordAgentIntegration(record);
+      },
     },
   });
   if (goalController !== undefined) {
@@ -503,7 +508,7 @@ async function main(): Promise<void> {
 
   // 审计流水：工具调用、权限决策、每轮起止，全部落盘可回放
   // 用 activeSession 而非固定 session —— 用户 /new 换会话后审计要跟着切
-  const audit =
+  audit =
     store === undefined
       ? undefined
       : new AuditTrail({

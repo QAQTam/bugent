@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession } from "../src/core/session.ts";
+import type { AgentIntegrationRecord } from "../src/agent/integrator.ts";
 import { GoalController } from "../src/goal/controller.ts";
 import type { ReviewRunner } from "../src/goal/review.ts";
 import type { ReviewResult } from "../src/goal/types.ts";
@@ -152,6 +153,45 @@ describe("Goal P1 · controller", () => {
     expect(session.buildContext().at(-1)?.parts).toEqual([
       { type: "text", text: injected?.parts[0]?.type === "text" ? injected.parts[0].text : "" },
     ]);
+  });
+
+  test("只有成功应用并通过验证的 worker patch 才写入 Goal Evidence", async () => {
+    const { controller } = await setup();
+    prepareExecutingCheckpoint(controller);
+    const goal = controller.currentGoal()!;
+    const base: AgentIntegrationRecord = {
+      agentId: "worker-1",
+      applied: true,
+      rolledBack: false,
+      baseRevision: "abc123",
+      patchDigest: `sha256:${"a".repeat(64)}`,
+      changedFiles: ["src/a.ts"],
+      rollbackPatch: "/tmp/diff.patch",
+      verifications: [
+        {
+          command: "bun test",
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        },
+      ],
+      failure: undefined,
+    };
+
+    const evidence = controller.recordAgentIntegration(base);
+    expect(evidence.map((item) => item.kind)).toEqual(["diff", "test"]);
+    expect(controller.repository.listEvidence(goal.id, "cp1")).toHaveLength(2);
+
+    const rolledBack = controller.recordAgentIntegration({
+      ...base,
+      applied: false,
+      rolledBack: true,
+      failure: "verification failed",
+    });
+    expect(rolledBack).toEqual([]);
+    expect(controller.repository.listEvidence(goal.id, "cp1")).toHaveLength(2);
   });
 
   test("ensureContext 会补回缺失的 Goal Contract，且保持幂等", async () => {
