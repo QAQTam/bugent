@@ -43,7 +43,7 @@ Not yet wired:
 
 The validation entry now opts into a conservative v0.2 experimental slice:
 
-- `render: { mode: "frame", fps: 120, adaptiveQuality: true }`
+- `render: { mode: "frame", fps: 60, adaptiveQuality: true }`
 - `inputRouting: "presented"`
 - `waitUntilFrameFlushed(undefined, "accepted")` after each turn
 
@@ -58,8 +58,8 @@ The transcript is projected through `StreamLedger` + `StreamWindow`; stable
 history can spill to `~/.bugent/butui/<session>/`. The experimental entry keeps
 the sidecars during the process and attempts cleanup on normal disposal.
 
-The sibling checkout is anchored to `QAQTam/buTUI@v0.2.2-exp`
-(`7d83210`, `fix(stream): reset smooth when window lines are replaced`). It is
+The sibling checkout is anchored to `QAQTam/buTUI@v0.2.3-exp`
+(`0919486`, `fix(renderer): align span writes and clear removed tails`). It is
 not referenced through a GitHub package URL because `@butui/*` packages are
 still private workspace packages inside a monorepo; a repository-level git
 dependency cannot resolve those subpackages reliably.

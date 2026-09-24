@@ -543,7 +543,7 @@ const createdApp = createTuiApp({
   stickyBottom: 4,
   ...(experimentalRuntime
     ? {
-        render: { mode: "frame" as const, fps: 120, adaptiveQuality: true },
+        render: { mode: "frame" as const, fps: 60, adaptiveQuality: true },
         inputRouting: "presented" as const,
       }
     : {}),
