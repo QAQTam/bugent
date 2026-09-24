@@ -26,6 +26,20 @@ upstream backup: /home/qaqtamsy/.bun/bin/bun-upstream-1.4.2
 project runtime: runtime/bun/bin/bugent-bun
 ```
 
+下一阶段主线已经形成正式设计：
+
+```text
+docs/goal-mode-spec.md
+```
+
+Goal Mode 2.0 的对象边界：
+
+```text
+Goal -> Checkpoint -> Plan -> Todo -> Evidence -> Review -> Handoff -> Context Epoch
+```
+
+不要把 todo 当作 goal；Todo 完成、Checkpoint 完成、Goal 完成是三套不同门槛。
+
 真实 provider 冒烟已通过（本地 wbproxy，允许的模型）：
 
 ```bash

@@ -144,6 +144,25 @@ msgid2 只包含 `name + description + skill__<name>__load`，正文只在模型
 
 MCP / skills catalog 变化不会改写旧 msgid，只在安全消息边界追加 developer delta。
 
+## Goal Mode
+
+高级 Goal Mode 的可落地方案见 [`docs/goal-mode-spec.md`](docs/goal-mode-spec.md)。
+
+核心边界：
+
+```text
+Goal       最终目标与生命周期
+Checkpoint 可验证的阶段结果
+Plan       策略与阶段划分
+Todo       当前 checkpoint 的执行清单
+Evidence   完成依据
+Review     独立验证
+Handoff    上下文压缩
+Epoch      刷新后的新上下文边界
+```
+
+Goal 完成必须经过最终审计，不能由最后一个 todo checkbox 直接决定。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |
