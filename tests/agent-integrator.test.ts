@@ -93,6 +93,72 @@ describe("workspace integrator", () => {
     expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("integrated\n");
   });
 
+  test("runs verification commands and keeps the patch when they pass", async () => {
+    if (Bun.which("git") === null) return;
+    const repo = await initRepo();
+    const capability = await probeGit(repo);
+    const artifact = await patchArtifact(await tempDir("bugent-patch-verify-"));
+    const seen: string[] = [];
+
+    const result = await applyWorkerPatch({
+      cwd: repo,
+      baseRevision: capability.head!,
+      patchPath: artifact.path,
+      expectedDigest: artifact.digest,
+      verificationCommands: ["check-one", "check-two"],
+      verificationRunner: async (command) => {
+        seen.push(command);
+        return {
+          command,
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        };
+      },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(result.rolledBack).toBe(false);
+    expect(seen).toEqual(["check-one", "check-two"]);
+    expect(result.verifications).toHaveLength(2);
+    expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("integrated\n");
+  });
+
+  test("automatically rolls back when a verification command fails", async () => {
+    if (Bun.which("git") === null) return;
+    const repo = await initRepo();
+    const capability = await probeGit(repo);
+    const artifact = await patchArtifact(await tempDir("bugent-patch-rollback-"));
+
+    const result = await applyWorkerPatch({
+      cwd: repo,
+      baseRevision: capability.head!,
+      patchPath: artifact.path,
+      expectedDigest: artifact.digest,
+      verificationCommands: ["fail-check"],
+      verificationRunner: async (command) => ({
+        command,
+        exitCode: 1,
+        stdout: "",
+        stderr: "verification failed",
+        timedOut: false,
+        aborted: false,
+      }),
+    });
+
+    expect(result.applied).toBe(false);
+    expect(result.rolledBack).toBe(true);
+    expect(result.failure).toContain("verification failed");
+    expect(result.verifications).toHaveLength(1);
+    expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("base\n");
+    const status = await runGit(["status", "--porcelain=v1"], repo, {
+      binary: Bun.which("git")!,
+    });
+    expect(status.stdout.trim()).toBe("");
+  });
+
   test("rejects digest mismatch, dirty workspace, and revision drift", async () => {
     if (Bun.which("git") === null) return;
     const repo = await initRepo();
@@ -171,6 +237,19 @@ describe("workspace integrator", () => {
         transport,
         parent: parent(repo),
         cwd: repo,
+        verificationRunner: {
+          async run() {
+            return {
+              stdout: "ok",
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+              aborted: false,
+              truncated: false,
+              durationMs: 0,
+            };
+          },
+        },
         idFactory: (() => {
           const values = ["worker-1", "task-1", "session-1"];
           return () => values.shift()!;
@@ -191,13 +270,18 @@ describe("workspace integrator", () => {
     await tools.get(WAIT_SUBAGENT_TOOL_NAME)!.run({ agent_id: "worker-1" }, ctx);
     const apply = tools.get(APPLY_SUBAGENT_PATCH_TOOL_NAME)!;
     expect(apply.defaultPermission).toBe("ask");
-    const result = (await apply.run({ agent_id: "worker-1" }, ctx)) as {
+    const result = (await apply.run(
+      { agent_id: "worker-1", verify_commands: ["check"] },
+      ctx,
+    )) as {
       applied: boolean;
       changed_files: string[];
+      verifications: unknown[];
     };
 
     expect(result.applied).toBe(true);
     expect(result.changed_files).toEqual(["tracked.txt"]);
+    expect(result.verifications).toHaveLength(1);
     expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("integrated\n");
     await transport.dispose();
   });

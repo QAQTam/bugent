@@ -9,6 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { JSONSchema } from "../provider/types.ts";
+import type { ShellRunner } from "./bash.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import {
   attenuateCapabilities,
@@ -54,6 +55,8 @@ export interface AgentToolsOptions {
   readonly cwd: string;
   /** Parent session used for safe-boundary completion notifications. */
   readonly notifications?: AgentNotificationSink;
+  /** Same sandboxed runner as the parent bash tool, used for post-apply checks. */
+  readonly verificationRunner?: ShellRunner;
   readonly idFactory?: (prefix: string) => string;
 }
 
@@ -86,6 +89,19 @@ const AGENT_ID_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
     agent_id: { type: "string", description: "spawn_subagent 返回的 agent_id" },
+  },
+  required: ["agent_id"],
+};
+
+const APPLY_PATCH_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {
+    agent_id: { type: "string", description: "worker 的 agent_id" },
+    verify_commands: {
+      type: "array",
+      description: "应用后依次运行的验证命令；任一失败会自动反向应用 patch",
+      items: { type: "string" },
+    },
   },
   required: ["agent_id"],
 };
@@ -149,6 +165,21 @@ function optionalPositiveInteger(
     throw new Error(`${key} 必须是正的安全整数`);
   }
   return value as number;
+}
+
+function optionalStringArray(
+  source: Record<string, unknown>,
+  key: string,
+): string[] | undefined {
+  const value = source[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error(`${key} 必须是字符串数组`);
+  return value.map((item, index) => {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      throw new Error(`${key}[${index}] 必须是非空字符串`);
+    }
+    return item.trim();
+  });
 }
 
 function shortTitle(task: string): string {
@@ -492,9 +523,9 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
     description: [
       "把当前父 Agent 创建的 worker patch 应用到主工作区。",
       "只接受 worker 产出的 patch artifact；base revision 漂移、digest 不匹配或工作区 dirty 时拒绝。",
-      "应用前会执行 git apply --check，成功后才真正修改工作区。",
+      "应用前会执行 git apply --check；应用后可运行验证命令，任一失败会自动回滚。",
     ].join("\n"),
-    parameters: AGENT_ID_PARAMETERS,
+    parameters: APPLY_PATCH_PARAMETERS,
     defaultPermission: "ask",
     requires: { write: true },
     resources() {
@@ -503,7 +534,14 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
     describe(input: unknown) {
       const source = record(input, "apply_subagent_patch input");
       const agentId = requiredString(source, "agent_id");
-      return { resource: `workspace via ${agentId}`, summary: `应用子代理 ${agentId} 的 patch` };
+      const commands = optionalStringArray(source, "verify_commands") ?? [];
+      return {
+        resource: `workspace via ${agentId}`,
+        summary:
+          commands.length === 0
+            ? `应用子代理 ${agentId} 的 patch`
+            : `应用子代理 ${agentId} 的 patch 并运行 ${commands.length} 条验证`,
+      };
     },
     async run(input: unknown, ctx: ToolCtx): Promise<unknown> {
       assertContext(ctx);
@@ -530,20 +568,53 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
           candidate.digest === workerOutput.diffHash,
       );
       if (artifact === undefined) throw new Error("worker patch artifact 不存在或不匹配");
+      const verificationCommands = optionalStringArray(source, "verify_commands") ?? [];
+      if (verificationCommands.length > 5) {
+        throw new Error("verify_commands 最多允许 5 条");
+      }
+      if (verificationCommands.some((command) => command.length > 2000)) {
+        throw new Error("verify_commands 单条不能超过 2000 字符");
+      }
 
       const applied = await applyWorkerPatch({
         cwd: options.cwd,
         baseRevision: workerOutput.baseRevision,
         patchPath: artifact.path,
         expectedDigest: artifact.digest,
+        signal: ctx.signal,
+        verificationCommands,
+        ...(options.verificationRunner !== undefined
+          ? {
+              verificationRunner: async (command: string, signal: AbortSignal) => {
+                const result = await options.verificationRunner!.run({
+                  command,
+                  cwd: options.cwd,
+                  timeoutMs: 120_000,
+                  maxOutputBytes: 64 * 1024,
+                  signal,
+                });
+                return {
+                  command,
+                  exitCode: result.exitCode,
+                  stdout: result.stdout,
+                  stderr: result.stderr,
+                  timedOut: result.timedOut,
+                  aborted: result.aborted,
+                };
+              },
+            }
+          : {}),
       });
       return {
-        applied: true,
+        applied: applied.applied,
+        rolled_back: applied.rolledBack,
         agent_id: handle.id,
         base_revision: applied.baseRevision,
         patch_digest: applied.patchDigest,
         changed_files: applied.changedFiles,
         rollback_patch: applied.rollbackPatch,
+        verifications: applied.verifications,
+        failure: applied.failure ?? null,
       };
     },
   };

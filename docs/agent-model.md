@@ -430,6 +430,7 @@ apply_subagent_patch
 - `send_subagent` 发送数据消息，不改变权限。
 - `interrupt_subagent` 走 supervisor 的取消路径。
 - `apply_subagent_patch` 只应用当前父 Agent 的 worker patch；必须校验 base revision、digest 和 clean workspace。
+- `apply_subagent_patch` 可运行应用后验证；任一验证失败必须自动反向应用 patch 并确认工作区恢复 clean。
 
 ## 11. 父模型通知策略
 

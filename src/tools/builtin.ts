@@ -113,7 +113,10 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
 
   let agentTools: string[] = [];
   if (options.agentTools !== undefined) {
-    const created = createAgentTools(options.agentTools);
+    const created = createAgentTools({
+      ...options.agentTools,
+      verificationRunner: options.agentTools.verificationRunner ?? runner,
+    });
     for (const tool of created) registry.register(tool);
     agentTools = created.map((tool) => tool.name);
   }
