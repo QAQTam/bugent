@@ -25,7 +25,7 @@ import { createReadOnlyReviewRunner } from "../goal/review.ts";
 import { defaultHandoffRoot } from "../goal/handoff.ts";
 import { createGoalTools } from "../tools/goal.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
-import { createReadOnlyAgentExecutor } from "../agent/read-only-executor.ts";
+import { createSubagentExecutor } from "../agent/subagent-executor.ts";
 import { createInProcessTransport } from "../agent/transport.ts";
 import type { AgentAuthority, AgentCapability } from "../agent/model.ts";
 import { openSession } from "./open-session.ts";
@@ -236,7 +236,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
   goalController?.ensureContext();
 
   const agentTransport = createInProcessTransport({
-    executor: createReadOnlyAgentExecutor({
+    executor: createSubagentExecutor({
       client: options.client,
       model: options.model,
     }),
@@ -246,6 +246,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     mode === "read-only" ? "read-only" : mode === "workspace-write" ? "workspace-write" : "full";
   const mainAgentCapabilities: readonly AgentCapability[] = [
     "fs.read",
+    "fs.write",
     "process.exec",
     "agent.spawn",
   ];

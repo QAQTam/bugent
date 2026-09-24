@@ -31,7 +31,7 @@ export const FOLLOWUP_SUBAGENT_TOOL_NAME = "followup_subagent";
 export const INTERRUPT_SUBAGENT_TOOL_NAME = "interrupt_subagent";
 export const GET_SUBAGENT_OUTPUT_TOOL_NAME = "get_subagent_output";
 
-const SPAWNABLE_KINDS = ["reviewer", "explorer"] as const satisfies readonly AgentKind[];
+const SPAWNABLE_KINDS = ["reviewer", "explorer", "worker"] as const satisfies readonly AgentKind[];
 
 export interface AgentToolsParent {
   readonly agentId: string;
@@ -60,7 +60,7 @@ const SPAWN_PARAMETERS: JSONSchema = {
     kind: {
       type: "string",
       enum: [...SPAWNABLE_KINDS],
-      description: "reviewer 用于审查，explorer 用于只读调研",
+      description: "reviewer 用于审查，explorer 用于只读调研，worker 在 Git worktree 中实现修改",
     },
     task: {
       type: "string",
@@ -227,8 +227,8 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
   const spawn: Tool<unknown, unknown> = {
     name: SPAWN_SUBAGENT_TOOL_NAME,
     description: [
-      "创建一个有独立 session 的只读子代理并立即返回 handle，不等待完成。",
-      "支持 reviewer/explorer；子代理不继承父对话或私有 reasoning。",
+      "创建一个有独立 session 的子代理并立即返回 handle，不等待完成。",
+      "reviewer/explorer 只读；worker 只能在 Git worktree 中写，主工作区保持不变。",
       "完成后用 wait_subagent，再按需 get_subagent_output。",
     ].join("\n"),
     parameters: SPAWN_PARAMETERS,
@@ -252,16 +252,21 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
       const agentId = idFactory("agent");
       const taskId = idFactory("task");
       const sessionId = idFactory("agent_session");
+      const childAuthority = agentKind === "worker" ? "workspace-write" : "read-only";
       const capabilities = attenuateCapabilities(
-        defaultCapabilitiesForKind(agentKind, "read-only"),
+        defaultCapabilitiesForKind(agentKind, childAuthority),
         parent.capabilities,
       );
       const sandbox = compileAgentSandboxSpec({
         agentId,
         kind: agentKind,
-        authority: "read-only",
+        authority: childAuthority,
         capabilities,
-        workspace: { root: options.cwd, access: "read", isolation: "shared" },
+        workspace: {
+          root: options.cwd,
+          access: agentKind === "worker" ? "write" : "read",
+          isolation: agentKind === "worker" ? "worktree" : "shared",
+        },
         parent: {
           authority: parent.authority,
           capabilities: parent.capabilities,

@@ -47,7 +47,7 @@ import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
 import { BUGENT_VERSION } from "./version.ts";
 import { prepareStandaloneRuntime } from "./runtime/standalone.ts";
-import { createReadOnlyAgentExecutor } from "./agent/read-only-executor.ts";
+import { createSubagentExecutor } from "./agent/subagent-executor.ts";
 import { createInProcessTransport } from "./agent/transport.ts";
 import type { AgentAuthority, AgentCapability } from "./agent/model.ts";
 
@@ -426,7 +426,7 @@ async function main(): Promise<void> {
   const mode: SandboxMode =
     options.mode ?? (options.noSandbox ? "no-sandbox" : undefined) ?? config.sandbox?.mode ?? "workspace-write";
   const agentTransport = createInProcessTransport({
-    executor: createReadOnlyAgentExecutor({
+    executor: createSubagentExecutor({
       client,
       model: effectiveModel,
     }),
@@ -436,6 +436,7 @@ async function main(): Promise<void> {
     mode === "read-only" ? "read-only" : mode === "workspace-write" ? "workspace-write" : "full";
   const mainAgentCapabilities: readonly AgentCapability[] = [
     "fs.read",
+    "fs.write",
     "process.exec",
     "agent.spawn",
   ];

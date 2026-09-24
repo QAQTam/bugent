@@ -28,7 +28,7 @@ function parent(agentId = "main-1"): AgentToolsOptions["parent"] {
     rootId: agentId,
     sessionId: "session-main-1",
     authority: "full",
-    capabilities: ["fs.read", "process.exec", "agent.spawn"],
+    capabilities: ["fs.read", "fs.write", "process.exec", "agent.spawn"],
   };
 }
 
@@ -150,6 +150,34 @@ describe("agent model tools", () => {
     await transport.dispose();
   });
 
+  test("worker spawn uses a workspace-write worktree profile", async () => {
+    const executor: AgentExecutor = {
+      run: async (context) => ({
+        agentId: context.spec.identity.agentId,
+        status: "completed",
+        summary: "worker done",
+        artifacts: [],
+      }),
+    };
+    const { tools, transport } = toolsFor(executor, {
+      idFactory: (() => {
+        const values = ["worker-agent", "worker-task", "worker-session"];
+        return () => values.shift()!;
+      })(),
+    });
+
+    const spawned = (await tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run(
+      { kind: "worker", task: "write code" },
+      CTX,
+    )) as Record<string, unknown>;
+    expect(spawned.capabilities).toEqual(["fs.read", "fs.write", "process.exec"]);
+    const spec = transport.supervisor.requireInternal("worker-agent").spec;
+    expect(spec.sandbox.authority).toBe("workspace-write");
+    expect(spec.sandbox.workspace.access).toBe("write");
+    expect(spec.sandbox.workspace.isolation).toBe("worktree");
+    await transport.dispose();
+  });
+
   test("followup delivers a task.assigned message without changing capabilities", async () => {
     const executor: AgentExecutor = {
       async run(context) {
@@ -203,13 +231,13 @@ describe("agent model tools", () => {
     await transport.dispose();
   });
 
-  test("unknown, cross-parent, and writable worker targets fail closed", async () => {
+  test("unknown kinds, cross-parent access, and read-only worker grants fail closed", async () => {
     const executor: AgentExecutor = {
       run: async () => ({ agentId: "unused", status: "completed", summary: "ok", artifacts: [] }),
     };
     const { tools, transport } = toolsFor(executor);
     await expect(
-      tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run({ kind: "worker", task: "write" }, CTX),
+      tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run({ kind: "integrator", task: "merge" }, CTX),
     ).rejects.toThrow(/kind/);
 
     await tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run(
@@ -227,6 +255,24 @@ describe("agent model tools", () => {
     await expect(
       otherTools.get(GET_SUBAGENT_TOOL_NAME)!.run({ agent_id: first.id }, CTX),
     ).rejects.toThrow(/不属于当前 agent/);
+
+    const readOnlyTools = new Map(
+      createAgentTools({
+        transport,
+        parent: {
+          ...parent("main-readonly"),
+          authority: "read-only",
+          capabilities: ["fs.read", "process.exec", "agent.spawn"],
+        },
+        cwd: CTX.cwd,
+      }).map((tool) => [tool.name, tool]),
+    );
+    await expect(
+      readOnlyTools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run(
+        { kind: "worker", task: "write" },
+        { ...CTX, sessionId: "session-main-1" },
+      ),
+    ).rejects.toThrow(/authority/);
 
     await transport.dispose();
   });
