@@ -18,7 +18,16 @@ export type MsgId = number;
 
 /** 消息从哪来。用于调试、审计，以及区分"人说的"和"系统注入的"。 */
 export type MessageOrigin = "system" | "user" | "assistant" | "tool" | "inject";
-export type InjectionSource = "mcp" | "skill" | "system" | "snapshot";
+export type InjectionSource =
+  | "mcp"
+  | "skill"
+  | "goal"
+  | "plan"
+  | "checkpoint"
+  | "handoff"
+  | "review"
+  | "system"
+  | "snapshot";
 
 export const SYSTEM_MSGID: MsgId = 0;
 
@@ -89,7 +98,13 @@ export function toChatMessage(
   options: { extensionRole?: "developer" | "system" } = {},
 ): ChatMessage {
   const extension =
-    msg.injectionSource === "mcp" || msg.injectionSource === "skill";
+    msg.injectionSource === "mcp" ||
+    msg.injectionSource === "skill" ||
+    msg.injectionSource === "goal" ||
+    msg.injectionSource === "plan" ||
+    msg.injectionSource === "checkpoint" ||
+    msg.injectionSource === "handoff" ||
+    msg.injectionSource === "review";
   const role: Role = extension ? (options.extensionRole ?? "developer") : msg.role;
   const out: ChatMessage = { role, parts: [...msg.parts] };
   if (msg.reasoning !== undefined) out.reasoning = msg.reasoning;

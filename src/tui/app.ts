@@ -17,6 +17,10 @@ import type { Usage } from "../provider/types.ts";
 import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
+import {
+  GOAL_INITIALIZATION_INSTRUCTION,
+  type GoalController,
+} from "../goal/controller.ts";
 import type { McpStatus } from "../mcp/manager.ts";
 import type { SkillStatus } from "../skills/manager.ts";
 import { BranchService } from "../core/branch-service.ts";
@@ -219,6 +223,8 @@ export interface TuiOptions {
   banner?: string;
   /** 沙箱档位，用于状态栏与升档提示。 */
   mode?: SandboxMode;
+  /** 当前 session 的 Goal Contract controller；未持久化时省略。 */
+  goalController?: GoalController;
   /** 当前 session 的审计流水；TUI hooks 会把它和渲染 hooks 合并。 */
   audit?: AuditTrail;
   /**
@@ -314,6 +320,8 @@ export class TuiApp implements TuiInteraction {
   #renderScheduled = false;
   #resolveExit: (() => void) | undefined;
   #mode: SandboxMode = "workspace-write";
+  #goalController: GoalController | undefined;
+  #goalStatusLine: string | undefined;
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
@@ -390,6 +398,8 @@ export class TuiApp implements TuiInteraction {
     this.#branchService = options.branchService;
     this.#audit = options.audit;
     this.#mode = options.mode ?? "workspace-write";
+    this.#goalController = options.goalController;
+    this.#refreshGoalStatus();
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
     if (options.banner !== undefined) {
@@ -982,6 +992,11 @@ export class TuiApp implements TuiInteraction {
       void this.#openContextDialog();
       return;
     }
+    if (text === "/goal" || text.startsWith("/goal ")) {
+      this.#clearInput();
+      void this.#handleGoalCommand(text.slice("/goal".length).trim());
+      return;
+    }
     if (text === "/mode") {
       this.#clearInput();
       void this.#chooseSandboxMode();
@@ -1078,6 +1093,7 @@ export class TuiApp implements TuiInteraction {
   async #openCommandPalette(): Promise<void> {
     const commands = [
       { label: "/context   查看当前 session 上下文", run: () => this.#openContextDialog() },
+      { label: "/goal      初始化或查看 Goal", run: () => this.#handleGoalCommand("") },
       { label: "/provider  切换 provider", run: () => this.#chooseProvider() },
       { label: "/model     切换模型", run: () => this.#promptModel() },
       { label: "/key       设置 API key（系统 keychain）", run: () => this.#promptApiKey() },
@@ -1095,6 +1111,142 @@ export class TuiApp implements TuiInteraction {
     const selected = answers?.[0]?.selected[0];
     if (selected === undefined) return;
     await commands[selected]?.run();
+  }
+
+  /**
+   * `/goal` 是 Goal 的唯一显式入口。
+   *
+   * 有参数时只授予一次创建权并启动初始化 turn；真正创建仍由模型调用
+   * `create_goal` 完成，但普通 turn 永远拿不到该权限。
+   */
+  async #handleGoalCommand(argument: string): Promise<void> {
+    const controller = this.#goalController;
+    if (controller === undefined) {
+      this.#transcript.pushError("当前 session 未启用持久化，无法使用 Goal 模式");
+      this.#render(true);
+      return;
+    }
+
+    const goal = controller.currentGoal();
+    if (argument === "pause") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+      } else {
+        try {
+          controller.pause("用户通过 /goal pause 暂停");
+          this.#refreshGoalStatus();
+          this.#transcript.pushNotice("Goal 已暂停。输入 `/goal resume` 恢复。");
+        } catch (error) {
+          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+        }
+      }
+      this.#render(true);
+      return;
+    }
+    if (argument === "resume") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+      } else {
+        try {
+          controller.resume();
+          this.#refreshGoalStatus();
+          this.#transcript.pushNotice("Goal 已恢复。");
+        } catch (error) {
+          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+        }
+      }
+      this.#render(true);
+      return;
+    }
+    if (argument === "status" || (goal !== undefined && argument.length === 0)) {
+      await this.#showGoalStatus();
+      return;
+    }
+    if (goal !== undefined) {
+      this.#transcript.pushError(
+        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal pause`、`/goal resume`。",
+      );
+      this.#render(true);
+      return;
+    }
+
+    const rawIntent = argument.length > 0 ? argument : await this.#promptText("输入 Goal 原始意图");
+    if (rawIntent === undefined) return;
+    await this.#initializeGoal(rawIntent);
+  }
+
+  async #initializeGoal(rawIntent: string): Promise<void> {
+    const controller = this.#goalController;
+    if (controller === undefined) return;
+    if (this.#busy || this.#session.hasOpenToolBatch()) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再初始化 Goal");
+      this.#render(true);
+      return;
+    }
+    if (this.#session.queuedUserCount > 0) {
+      this.#transcript.pushError("当前 session 还有排队消息，先处理完再初始化 Goal");
+      this.#render(true);
+      return;
+    }
+
+    controller.authorizeCreate();
+    this.#session.enqueueInjection(GOAL_INITIALIZATION_INSTRUCTION, "goal");
+    this.#transcript.pushNotice("Goal 初始化已开始：模型会先澄清契约，不会立即改代码。");
+    this.#refreshGoalStatus();
+    this.#render(true);
+    await this.#runTurn(rawIntent);
+  }
+
+  async #showGoalStatus(): Promise<void> {
+    const controller = this.#goalController;
+    if (controller === undefined) return;
+    const goal = controller.currentGoal();
+    if (goal === undefined) {
+      this.#transcript.pushError("当前 session 没有 Goal。使用 `/goal <目标>` 初始化。");
+      this.#render(true);
+      return;
+    }
+
+    const canResume =
+      goal.status === "paused" ||
+      goal.status === "blocked" ||
+      goal.status === "usage_limited";
+    const action = await this.#openDialog({
+      title: "Goal 状态",
+      body: controller.dialogLines(),
+      hint: `${DIM}Esc / Enter 关闭${RESET}`,
+      actions:
+        goal.status === "active"
+          ? [
+              { label: "暂停 Goal", value: true, tone: "warn", shortcut: "p" },
+              { label: "关闭", value: false, tone: "neutral", shortcut: "Esc" },
+            ]
+          : canResume
+            ? [
+                { label: "恢复 Goal", value: true, tone: "ok", shortcut: "r" },
+                { label: "关闭", value: false, tone: "neutral", shortcut: "Esc" },
+              ]
+            : [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
+    });
+    if (!action) return;
+
+    try {
+      if (goal.status === "active") {
+        controller.pause("用户在 Goal 状态面板暂停");
+        this.#transcript.pushNotice("Goal 已暂停。");
+      } else if (canResume) {
+        controller.resume();
+        this.#transcript.pushNotice("Goal 已恢复。");
+      }
+      this.#refreshGoalStatus();
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+    }
+    this.#render(true);
+  }
+
+  #refreshGoalStatus(): void {
+    this.#goalStatusLine = this.#goalController?.statusLine();
   }
 
   /** `/context`：展示当前 session 的 effective config，并提供配置入口。 */
@@ -2030,6 +2182,8 @@ export class TuiApp implements TuiInteraction {
     this.#mode = runtime.mode;
     this.#audit = runtime.audit;
     this.#providerId = runtime.providerId;
+    this.#goalController = runtime.goalController;
+    this.#refreshGoalStatus();
     if (runtime.mcpStatus !== undefined) {
       this.#mcp = runtime.mcpStatus;
       const enabled = new Set(runtime.mcpStatus.servers.map((server) => server.id));
@@ -2140,6 +2294,13 @@ export class TuiApp implements TuiInteraction {
           message?.msgid,
           result.presentation,
         );
+        if (
+          call.name === "get_goal" ||
+          call.name === "create_goal" ||
+          call.name === "update_goal"
+        ) {
+          this.#refreshGoalStatus();
+        }
         this.#setActivity({ state: "waiting", detail: "读取工具结果" });
         this.#syncTodoShimmer();
       },
@@ -2176,6 +2337,8 @@ export class TuiApp implements TuiInteraction {
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
+      this.#goalController?.revokeCreateAuthorization();
+      this.#refreshGoalStatus();
 
       if (aborted) {
         this.#activity = { state: "aborted", detail: "用户中断" };
@@ -2564,7 +2727,11 @@ export class TuiApp implements TuiInteraction {
   #composeStatus(width: number): string {
     const modeColor = this.#mode === "no-sandbox" ? COLOR.warn : COLOR.ok;
     const badge = `${fg(modeColor)}${this.#mode}${RESET}`;
-    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}`;
+    const goalTag =
+      this.#goalStatusLine === undefined
+        ? ""
+        : ` ${DIM}·${RESET} ${fg(COLOR.tool)}${this.#goalStatusLine}${RESET}`;
+    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}${goalTag}`;
     const queued = this.#session.queuedUserCount;
     const queueTag = queued > 0 ? ` ${fg(COLOR.warn)}[已排队 ${queued}]${RESET}` : "";
     const right = this.#busy

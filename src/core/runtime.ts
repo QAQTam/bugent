@@ -16,8 +16,12 @@ import type { PersistedProviderConfig } from "../provider/registry.ts";
 import type { SessionStore } from "../store/repository.ts";
 import type { McpManager, McpStatus } from "../mcp/manager.ts";
 import type { SkillManager, SkillStatus } from "../skills/manager.ts";
+import type { GoalController } from "../goal/controller.ts";
 import { PermissionGate as Gate } from "../permission/gate.ts";
 import { AuditTrail as Audit } from "../store/audit.ts";
+import { GoalRepository } from "../store/goal-repository.ts";
+import { GoalController as Goals } from "../goal/controller.ts";
+import { createGoalTools } from "../tools/goal.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
 import { openSession } from "./open-session.ts";
 
@@ -33,6 +37,7 @@ export class SessionRuntime {
   readonly mcpStatus: McpStatus | undefined;
   readonly skillTools: readonly string[];
   readonly skillStatus: SkillStatus | undefined;
+  readonly goalController: GoalController | undefined;
   #dispose: (() => void) | undefined;
   #disposed = false;
 
@@ -47,6 +52,7 @@ export class SessionRuntime {
     mcpStatus?: McpStatus;
     skillTools?: readonly string[];
     skillStatus?: SkillStatus;
+    goalController?: GoalController;
     dispose?: () => void;
   }) {
     this.id = options.session.id;
@@ -60,6 +66,7 @@ export class SessionRuntime {
     this.mcpStatus = options.mcpStatus;
     this.skillTools = options.skillTools ?? [];
     this.skillStatus = options.skillStatus;
+    this.goalController = options.goalController;
     this.#dispose = options.dispose;
   }
 
@@ -191,11 +198,23 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     options.store?.setProviderConfig(options.sessionId, options.providerConfig);
   }
 
+  const goalController =
+    options.store === undefined
+      ? undefined
+      : new Goals({
+          repository: new GoalRepository(options.store.db),
+          session,
+        });
+  goalController?.ensureContext();
+
   const setup = createDefaultTools({
     mode,
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
   });
+  if (goalController !== undefined) {
+    for (const tool of createGoalTools(goalController)) setup.registry.register(tool);
+  }
   let mcpTools: string[] = [];
   let skillTools: string[] = [];
   try {
@@ -248,6 +267,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     ...(options.skillManager !== undefined
       ? { skillStatus: options.skillManager.status() }
       : {}),
+    ...(goalController !== undefined ? { goalController } : {}),
     ...(options.mcpManager !== undefined || options.skillManager !== undefined
       ? {
           dispose: () => {

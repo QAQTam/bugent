@@ -11,7 +11,14 @@
 
 import type { ChatMessage, ModelClient, ToolCall } from "../provider/types.ts";
 import { buildContext, lastMsgId, prefixHash } from "./context.ts";
-import { makeMessage, SYSTEM_MSGID, textPart, type MsgId, type StoredMessage } from "./message.ts";
+import {
+  makeMessage,
+  SYSTEM_MSGID,
+  textPart,
+  type InjectionSource,
+  type MsgId,
+  type StoredMessage,
+} from "./message.ts";
 import { createWorkspaceChange, type WorkspaceFileEdit } from "./workspace.ts";
 
 export interface SessionInit {
@@ -36,8 +43,6 @@ export interface SessionInit {
   /** 从历史恢复：传入当前分支路径（含 msgid 0）。 */
   restore?: readonly StoredMessage[];
 }
-
-export type InjectionSource = "mcp" | "skill" | "system" | "snapshot";
 
 export type SubmitResult =
   | { status: "started"; msgid: MsgId }
@@ -188,6 +193,14 @@ export class AgentSession {
       injectionSource: source,
       parts: [textPart(text)],
     });
+  }
+
+  /**
+   * Goal Contract 始终以 developer 语义渲染，但只追加、不改写。
+   * 工具 batch 中调用时排队，等下一个模型步的安全边界再落库。
+   */
+  appendGoalContext(text: string): void {
+    this.enqueueInjection(text, "goal");
   }
 
   appendAssistant(text: string, toolCalls?: readonly ToolCall[], reasoning?: string): StoredMessage {

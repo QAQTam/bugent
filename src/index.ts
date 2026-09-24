@@ -38,6 +38,9 @@ import {
 } from "./permission/policy.ts";
 import { AuditTrail } from "./store/audit.ts";
 import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
+import { GoalRepository } from "./store/goal-repository.ts";
+import { GoalController } from "./goal/controller.ts";
+import { createGoalTools } from "./tools/goal.ts";
 import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
 import { BUGENT_VERSION } from "./version.ts";
@@ -95,6 +98,8 @@ TUI 内：
   Ctrl+J / Alt+Enter 输入换行
   /                 打开命令菜单
   /context          查看当前 session 的 provider / model / sandbox
+  /goal <目标>      初始化 Goal Contract
+  /goal status      查看 / 暂停 / 恢复当前 Goal
   /mode <mode>      切换当前 session 的沙箱档位
   /new              新建会话
   /exit             退出
@@ -400,6 +405,17 @@ async function main(): Promise<void> {
       : {}),
     ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
   });
+  const goalController =
+    store === undefined
+      ? undefined
+      : new GoalController({
+          repository: new GoalRepository(store.db),
+          session,
+        });
+  goalController?.ensureContext();
+  if (goalController !== undefined) {
+    for (const tool of createGoalTools(goalController)) tools.registry.register(tool);
+  }
   const initialMcpTools =
     startedMcp.manager?.attach(tools.registry, initialMcpServerIds) ?? [];
   const initialSkillTools = startedSkills.manager.attach(tools.registry);
@@ -482,6 +498,7 @@ async function main(): Promise<void> {
         deleteApiKey: (sessionId: string, providerId: string) =>
           credentials.delete(sessionId, providerId),
         mode: tools.mode,
+        ...(goalController !== undefined ? { goalController } : {}),
         ...(startedMcp.manager !== undefined
           ? { mcp: startedMcp.manager.status(initialMcpServerIds) }
           : startedMcp.disabledReason !== undefined

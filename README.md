@@ -163,6 +163,18 @@ Epoch      刷新后的新上下文边界
 
 Goal 完成必须经过最终审计，不能由最后一个 todo checkbox 直接决定。
 
+P1 已接线：
+
+```text
+/goal <目标>     显式启动 Goal Contract 初始化
+/goal status     查看状态，并可暂停 / 恢复
+/goal pause      暂停
+/goal resume     恢复
+```
+
+只有 `/goal` 会授予一次性的 `create_goal` 权限；普通对话不能自行创建 Goal。
+创建后的 contract 作为 developer context 在 tool batch 结束后的安全边界注入。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |
