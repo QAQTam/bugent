@@ -25,6 +25,9 @@ import { createReadOnlyReviewRunner } from "../goal/review.ts";
 import { defaultHandoffRoot } from "../goal/handoff.ts";
 import { createGoalTools } from "../tools/goal.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
+import { createReadOnlyAgentExecutor } from "../agent/read-only-executor.ts";
+import { createInProcessTransport } from "../agent/transport.ts";
+import type { AgentAuthority, AgentCapability } from "../agent/model.ts";
 import { openSession } from "./open-session.ts";
 
 export class SessionRuntime {
@@ -232,11 +235,37 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
         });
   goalController?.ensureContext();
 
+  const agentTransport = createInProcessTransport({
+    executor: createReadOnlyAgentExecutor({
+      client: options.client,
+      model: options.model,
+    }),
+  });
+  const mainAgentId = `main_${session.id}`;
+  const mainAgentAuthority: AgentAuthority =
+    mode === "read-only" ? "read-only" : mode === "workspace-write" ? "workspace-write" : "full";
+  const mainAgentCapabilities: readonly AgentCapability[] = [
+    "fs.read",
+    "process.exec",
+    "agent.spawn",
+  ];
+
   const setup = createDefaultTools({
     mode,
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
     ...(goalController !== undefined ? { goalController } : {}),
+    agentTools: {
+      transport: agentTransport,
+      parent: {
+        agentId: mainAgentId,
+        rootId: mainAgentId,
+        sessionId: session.id,
+        authority: mainAgentAuthority,
+        capabilities: mainAgentCapabilities,
+      },
+      cwd: options.cwd,
+    },
   });
   if (goalController !== undefined) {
     for (const tool of createGoalTools(goalController)) setup.registry.register(tool);
@@ -294,13 +323,10 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
       ? { skillStatus: options.skillManager.status() }
       : {}),
     ...(goalController !== undefined ? { goalController } : {}),
-    ...(options.mcpManager !== undefined || options.skillManager !== undefined
-      ? {
-          dispose: () => {
-            options.mcpManager?.detach(setup.registry);
-            options.skillManager?.detach(setup.registry);
-          },
-        }
-      : {}),
+    dispose: () => {
+      void agentTransport.dispose();
+      options.mcpManager?.detach(setup.registry);
+      options.skillManager?.detach(setup.registry);
+    },
   });
 }

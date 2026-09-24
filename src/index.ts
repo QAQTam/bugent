@@ -47,6 +47,9 @@ import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
 import { BUGENT_VERSION } from "./version.ts";
 import { prepareStandaloneRuntime } from "./runtime/standalone.ts";
+import { createReadOnlyAgentExecutor } from "./agent/read-only-executor.ts";
+import { createInProcessTransport } from "./agent/transport.ts";
+import type { AgentAuthority, AgentCapability } from "./agent/model.ts";
 
 interface CliOptions {
   prompt?: string;
@@ -422,6 +425,20 @@ async function main(): Promise<void> {
   // 档位：CLI > 配置 > 默认 workspace-write
   const mode: SandboxMode =
     options.mode ?? (options.noSandbox ? "no-sandbox" : undefined) ?? config.sandbox?.mode ?? "workspace-write";
+  const agentTransport = createInProcessTransport({
+    executor: createReadOnlyAgentExecutor({
+      client,
+      model: effectiveModel,
+    }),
+  });
+  const mainAgentId = `main_${session.id}`;
+  const mainAgentAuthority: AgentAuthority =
+    mode === "read-only" ? "read-only" : mode === "workspace-write" ? "workspace-write" : "full";
+  const mainAgentCapabilities: readonly AgentCapability[] = [
+    "fs.read",
+    "process.exec",
+    "agent.spawn",
+  ];
 
   const goalController =
     store === undefined
@@ -456,6 +473,17 @@ async function main(): Promise<void> {
       : {}),
     ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
     ...(goalController !== undefined ? { goalController } : {}),
+    agentTools: {
+      transport: agentTransport,
+      parent: {
+        agentId: mainAgentId,
+        rootId: mainAgentId,
+        sessionId: session.id,
+        authority: mainAgentAuthority,
+        capabilities: mainAgentCapabilities,
+      },
+      cwd: options.cwd,
+    },
   });
   if (goalController !== undefined) {
     for (const tool of createGoalTools(goalController)) tools.registry.register(tool);
@@ -761,6 +789,7 @@ async function main(): Promise<void> {
       prompter.close();
     }
   } finally {
+    await agentTransport.dispose();
     await startedMcp.manager?.close();
     store?.close();
   }

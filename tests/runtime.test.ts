@@ -6,6 +6,7 @@ import { PermissionPolicy } from "../src/permission/policy.ts";
 import { createMockClient } from "../src/provider/adapters/mock.ts";
 import { SessionStore } from "../src/store/repository.ts";
 import { currentTodoList } from "../src/tools/todo.ts";
+import { SPAWN_SUBAGENT_TOOL_NAME } from "../src/tools/agent.ts";
 import { newSessionId } from "../src/util/id.ts";
 
 const stores: SessionStore[] = [];
@@ -107,6 +108,24 @@ describe("SessionRuntime 隔离", () => {
     expect(a.mode).toBe("no-sandbox");
     expect(b.gate.mode).toBe("workspace-write");
     expect(b.mode).toBe("workspace-write");
+  });
+
+  test("每个 session 注册独立子代理控制面，spawn 默认需要确认", () => {
+    const store = makeStore();
+    const runtime = makeRuntime(store, "workspace-write");
+    const spawn = runtime.tools.get(SPAWN_SUBAGENT_TOOL_NAME);
+
+    expect(spawn).toBeDefined();
+    expect(spawn?.defaultPermission).toBe("ask");
+    expect(runtime.tools.list().map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        "spawn_subagent",
+        "list_subagents",
+        "wait_subagent",
+        "get_subagent_output",
+      ]),
+    );
+    runtime.dispose();
   });
 
   test("messages、events 和 todo 不会跨 session 溢出", () => {

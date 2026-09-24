@@ -13,6 +13,7 @@ import {
 } from "./files.ts";
 import { createTodoWriteTool } from "./todo.ts";
 import { createAskUserTool } from "./ask_user.ts";
+import { createAgentTools, type AgentToolsOptions } from "./agent.ts";
 import { ToolRegistry } from "./types.ts";
 import type { PermissionRule } from "../permission/policy.ts";
 import type { GoalController } from "../goal/controller.ts";
@@ -30,12 +31,16 @@ export interface DefaultToolsOptions {
   runner?: ShellRunner;
   /** 持久化 session 的 Goal controller；存在时 todo_write 进入 Goal 校验模式。 */
   goalController?: GoalController;
+  /** 可选的子代理控制面；由 session runtime 注入 transport 与父身份。 */
+  agentTools?: AgentToolsOptions;
 }
 
 export interface ToolsSetup {
   registry: ToolRegistry;
   /** 实际生效的档位。 */
   mode: SandboxMode;
+  /** 本次注册的子代理工具名。 */
+  agentTools: string[];
   sandbox: {
     enabled: boolean;
     /** 状态说明，用于在 TUI/CLI 上如实告知用户。 */
@@ -106,6 +111,13 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
 
   registry.register(createBashTool(runner, { networkBlocked }));
 
+  let agentTools: string[] = [];
+  if (options.agentTools !== undefined) {
+    const created = createAgentTools(options.agentTools);
+    for (const tool of created) registry.register(tool);
+    agentTools = created.map((tool) => tool.name);
+  }
+
   // 让 needsSandbox 真正生效：明确说出是哪些工具拿不到沙箱，
   // 而不是笼统地降级了事。
   if (!enabled) {
@@ -118,6 +130,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
   return {
     registry,
     mode,
+    agentTools,
     sandbox: { enabled, note },
     defaultPermissionRules: registry.defaultPermissionRules(),
   };
