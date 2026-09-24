@@ -199,7 +199,9 @@ export function composeThinkingBlock(
                           : "思考";
   const text =
     activity.state === "thinking"
-      ? activity.detail ?? buffer.current
+      ? buffer.current.length > 0
+        ? buffer.current
+        : activity.detail ?? ""
       : activity.detail ?? "";
   lines[lineIndex] = renderActivityLine({
     width,

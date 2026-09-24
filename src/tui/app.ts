@@ -2443,7 +2443,7 @@ export class TuiApp implements TuiInteraction {
       // 思考链路：只进滚动缓冲，不进消息区、不落库
       onReasoning: (delta) => {
         this.#thinking.push(delta);
-        this.#setActivity({ state: "thinking", detail: "推理中" });
+        this.#setActivity({ state: "thinking" });
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。

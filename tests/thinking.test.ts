@@ -131,6 +131,18 @@ describe("思考链路 · 区块渲染", () => {
     expect(lines[0]).toContain("x");
   });
 
+  test("thinking 状态优先显示 reasoning 内容而不是状态 detail", () => {
+    const buffer = new ThinkingBuffer();
+    buffer.push("真实思考内容");
+    const line = composeThinkingBlock(buffer, 80, {
+      activity: { state: "thinking", detail: "推理中" },
+      frame: 0,
+    })[THINKING_LINE_INDEX]!;
+
+    expect(line).toContain("真实思考内容");
+    expect(line).not.toContain("推理中");
+  });
+
   test("agent activity 在没有 reasoning 时也显示工作状态", () => {
     const cases: Array<[AgentActivity, string]> = [
       [{ state: "waiting", detail: "连接模型" }, "等待模型"],
