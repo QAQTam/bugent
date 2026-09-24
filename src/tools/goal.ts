@@ -8,7 +8,13 @@
  */
 
 import type { GoalController } from "../goal/controller.ts";
-import type { EvidenceKind, RiskLevel, RiskPolicy, ReviewPolicy } from "../goal/types.ts";
+import type {
+  EvidenceKind,
+  RiskLevel,
+  RiskPolicy,
+  ReviewPolicy,
+} from "../goal/types.ts";
+import type { HandoffNarrativeSection } from "../goal/handoff.ts";
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 
@@ -17,6 +23,16 @@ export const CREATE_GOAL_TOOL_NAME = "create_goal";
 export const UPDATE_GOAL_TOOL_NAME = "update_goal";
 export const UPDATE_PLAN_TOOL_NAME = "update_plan";
 export const SUBMIT_CHECKPOINT_TOOL_NAME = "submit_checkpoint";
+export const GET_HANDOFF_TOOL_NAME = "get_handoff";
+export const HANDOFF_UPDATE_TOOL_NAME = "handoff_update";
+
+const HANDOFF_SECTIONS: readonly HandoffNarrativeSection[] = [
+  "work_log",
+  "decisions",
+  "risks",
+  "open_questions",
+  "file_map",
+];
 
 const EVIDENCE_KINDS: readonly EvidenceKind[] = [
   "test",
@@ -237,6 +253,39 @@ const SUBMIT_CHECKPOINT_PARAMETERS: JSONSchema = {
     },
   },
   required: ["checkpoint_id", "summary", "evidence"],
+};
+
+const GET_HANDOFF_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {
+    epoch_id: {
+      type: "string",
+      description: "省略时读取 canonical 最新 revision；提供时读取不可变 Epoch snapshot",
+    },
+  },
+};
+
+const HANDOFF_UPDATE_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {
+    base_revision: { type: "integer", description: "必须匹配当前 canonical revision" },
+    patches: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          section: { type: "string", enum: [...HANDOFF_SECTIONS] },
+          operation: { type: "string", enum: ["append", "correct"] },
+          content: { type: "string" },
+          target: { type: "string", description: "correct 时引用被订正的条目 id" },
+          reason: { type: "string", description: "correct 时必填" },
+          evidence: { type: "array", items: { type: "string" } },
+        },
+        required: ["section", "operation", "content"],
+      },
+    },
+  },
+  required: ["base_revision", "patches"],
 };
 
 export function createGoalTools(controller: GoalController): Tool[] {
@@ -498,5 +547,117 @@ export function createGoalTools(controller: GoalController): Tool[] {
     },
   };
 
-  return [getGoal, createGoal, updateGoal, updatePlan, submitCheckpoint];
+  const getHandoff: Tool<unknown, unknown> = {
+    name: GET_HANDOFF_TOOL_NAME,
+    description:
+      "读取当前 Goal 的 canonical Handoff，或按 epoch_id 读取不可变 snapshot。snapshot 与当前工作区是权威状态。",
+    parameters: GET_HANDOFF_PARAMETERS,
+    defaultPermission: "allow",
+    resources() {
+      return [{ key: "goal", access: "read" }];
+    },
+    describe(input: unknown) {
+      const source = record(input, "get_handoff input");
+      const epochId = source.epoch_id;
+      if (epochId !== undefined && typeof epochId !== "string") {
+        throw new Error("epoch_id 必须是字符串");
+      }
+      return {
+        resource: typeof epochId === "string" ? `epoch ${epochId}` : "canonical handoff",
+        summary: typeof epochId === "string" ? "读取 Handoff snapshot" : "读取最新 Handoff",
+      };
+    },
+    async run(input: unknown): Promise<unknown> {
+      const source = record(input, "get_handoff input");
+      const epochId = source.epoch_id;
+      if (epochId !== undefined && typeof epochId !== "string") {
+        throw new Error("epoch_id 必须是字符串");
+      }
+      const handoff = await controller.getHandoff(
+        typeof epochId === "string" ? epochId : undefined,
+      );
+      if (handoff === undefined) return { handoff: null };
+      return {
+        revision: handoff.revision.revision,
+        snapshot: handoff.snapshot,
+        snapshotHash: handoff.revision.snapshotHash ?? null,
+        markdown: handoff.markdown,
+      };
+    },
+  };
+
+  const handoffUpdate: Tool<unknown, unknown> = {
+    name: HANDOFF_UPDATE_TOOL_NAME,
+    description: [
+      "通过结构化 patch 更新 canonical Handoff 的叙事章节。",
+      "禁止整文件覆盖，禁止修改 Goal Contract、Checkpoints、Evidence 等系统事实章节。",
+      "base_revision 过期时必须先 get_handoff 再重试。",
+    ].join("\n"),
+    parameters: HANDOFF_UPDATE_PARAMETERS,
+    defaultPermission: "allow",
+    resources() {
+      return [{ key: "goal", access: "write" }];
+    },
+    describe(input: unknown) {
+      const source = record(input, "handoff_update input");
+      const count = Array.isArray(source.patches) ? source.patches.length : 0;
+      return { resource: "canonical handoff", summary: `更新 Handoff（${count} patches）` };
+    },
+    async run(input: unknown): Promise<unknown> {
+      const source = record(input, "handoff_update input");
+      const baseRevision = source.base_revision;
+      if (typeof baseRevision !== "number" || !Number.isInteger(baseRevision)) {
+        throw new Error("base_revision 必须是整数");
+      }
+      const patches = objects(source, "patches").map((patch, index) => {
+        const section = requiredString(patch, "section");
+        if (!HANDOFF_SECTIONS.includes(section as HandoffNarrativeSection)) {
+          throw new Error(`patches[${index}].section 不允许：${section}`);
+        }
+        const operation = requiredString(patch, "operation");
+        if (operation !== "append" && operation !== "correct") {
+          throw new Error(`patches[${index}].operation 非法：${operation}`);
+        }
+        const target = patch.target;
+        if (target !== undefined && typeof target !== "string") {
+          throw new Error(`patches[${index}].target 必须是字符串`);
+        }
+        const reason = patch.reason;
+        if (reason !== undefined && typeof reason !== "string") {
+          throw new Error(`patches[${index}].reason 必须是字符串`);
+        }
+        if (operation === "correct" && (typeof target !== "string" || target.trim().length === 0)) {
+          throw new Error(`patches[${index}] correction 必须提供 target`);
+        }
+        if (operation === "correct" && (typeof reason !== "string" || reason.trim().length === 0)) {
+          throw new Error(`patches[${index}] correction 必须提供 reason`);
+        }
+        const evidence = optionalStrings(patch, "evidence");
+        return {
+          section: section as HandoffNarrativeSection,
+          operation: operation as "append" | "correct",
+          content: requiredString(patch, "content"),
+          ...(typeof target === "string" ? { target } : {}),
+          ...(typeof reason === "string" ? { reason } : {}),
+          ...(evidence !== undefined ? { evidence } : {}),
+        };
+      });
+      const updated = await controller.applyHandoffPatches(baseRevision, "worker", patches);
+      return {
+        updated: true,
+        revision: updated.revision,
+        snapshotHash: updated.snapshotHash ?? null,
+      };
+    },
+  };
+
+  return [
+    getGoal,
+    createGoal,
+    updateGoal,
+    updatePlan,
+    submitCheckpoint,
+    getHandoff,
+    handoffUpdate,
+  ];
 }

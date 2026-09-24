@@ -41,6 +41,7 @@ import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
 import { GoalRepository } from "./store/goal-repository.ts";
 import { GoalController } from "./goal/controller.ts";
 import { createReadOnlyReviewRunner } from "./goal/review.ts";
+import { defaultHandoffRoot } from "./goal/handoff.ts";
 import { createGoalTools } from "./tools/goal.ts";
 import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
@@ -100,7 +101,10 @@ TUI 内：
   /                 打开命令菜单
   /context          查看当前 session 的 provider / model / sandbox
   /goal <目标>      初始化 Goal Contract
-  /goal status      查看 / 暂停 / 恢复当前 Goal
+  /goal status      查看当前 Goal
+  /goal continue    生成 Handoff snapshot 并切换到新 Context Epoch
+  /goal pause       暂停 Goal
+  /goal resume      恢复 Goal
   /mode <mode>      切换当前 session 的沙箱档位
   /new              新建会话
   /exit             退出
@@ -405,7 +409,9 @@ async function main(): Promise<void> {
       : new GoalController({
           repository: new GoalRepository(store.db),
           session,
+          store,
           cwd: options.cwd,
+          handoffRoot: defaultHandoffRoot(),
           reviewRunner: createReadOnlyReviewRunner({
             client,
             model: effectiveModel,

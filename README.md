@@ -73,6 +73,7 @@ TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可�
 | `~/.bugent/config.toml` | 配置（TOML，带注释，首次运行自动生成） |
 | `~/.bugent/sessions.db` | 会话与审计记录（SQLite + WAL） |
 | `~/.bugent/output/<session>/` | 工具的超长输出落盘，模型按需读取 |
+| `~/.bugent/handoffs/<session>/<goal>/` | Living Handoff 与不可变 Epoch snapshots |
 
 解析顺序：`~/.bugent/config.toml` → `./bugent.config.ts` → 环境变量。
 
@@ -188,6 +189,13 @@ P3 已接线：
 - Reviewer 使用全新 AgentSession 和只读工具集，不能写工作区。
 - `approve` 仍须所有 acceptance criteria proven，且没有 high/critical finding。
 - `changes_requested` 会把 Checkpoint 退回 active 进入 remediation。
+
+P4 已接线：
+
+- Living Handoff 的事实章节从 SQLite 重建，模型只能 patch 叙事章节。
+- 每次成功 patch 产生新 revision，旧 revision 与 Epoch snapshot 不可变。
+- `/goal continue` 在安全边界创建新 branch，并注入 goal/plan/todo/handoff seed。
+- `get_handoff` 可读取 canonical 或指定 epoch 的 snapshot。
 
 ## 当前进度
 

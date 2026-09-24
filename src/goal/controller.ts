@@ -6,12 +6,14 @@
  * is then queued as developer context and only lands at the next safe boundary.
  */
 
-import type { AgentSession } from "../core/session.ts";
+import { AgentSession } from "../core/session.ts";
+import { storedText } from "../core/message.ts";
 import { createHash } from "node:crypto";
 import type {
   CheckpointDefinition,
   GoalRepository,
 } from "../store/goal-repository.ts";
+import type { SessionStore } from "../store/repository.ts";
 import type {
   Checkpoint,
   Criterion,
@@ -19,6 +21,7 @@ import type {
   GoalReview,
   GoalStatus,
   GoalTodo,
+  HandoffRevision,
   PlanPhase,
   PlanRevision,
   RiskLevel,
@@ -31,6 +34,10 @@ import {
   withForcedRejection,
   type ReviewRunner,
 } from "./review.ts";
+import {
+  LivingHandoffBuilder,
+  type HandoffPatch,
+} from "./handoff.ts";
 import {
   verifyCheckpointDeterministically,
   type VerificationEvidenceInput,
@@ -68,7 +75,9 @@ export interface SubmitCheckpointInput {
 export interface GoalControllerOptions {
   repository: GoalRepository;
   session: AgentSession;
+  store?: SessionStore;
   cwd?: string;
+  handoffRoot?: string;
   reviewRunner?: ReviewRunner;
   now?: () => number;
 }
@@ -285,6 +294,30 @@ function renderReviewDecision(review: GoalReview): string {
   ].join("\n");
 }
 
+function manifestText(
+  session: AgentSession,
+  source: "mcp" | "skill",
+  fallback: string,
+): string {
+  const message = session.messages.find((item) => item.injectionSource === source);
+  return message === undefined ? fallback : storedText(message);
+}
+
+function renderContinuation(goal: Goal): string {
+  return [
+    "# Goal Continuation",
+    "",
+    "> Handoff snapshot 与当前工作区是权威状态；不要把旧记忆当成当前事实。",
+    "",
+    `- Objective: ${goal.objective}`,
+    `- Phase: ${goal.phase}`,
+    `- Active checkpoint: ${goal.activeCheckpointId ?? "-"}`,
+    "",
+    "先读取 Handoff snapshot，确认当前 Checkpoint 与 Evidence，再从当前工作区继续。",
+    "不要重新总结 Handoff；只有发现事实错误时才通过 correction patch 订正。",
+  ].join("\n");
+}
+
 export const GOAL_INITIALIZATION_INSTRUCTION = [
   "# Explicit Goal Initialization",
   "",
@@ -303,7 +336,9 @@ export const GOAL_INITIALIZATION_INSTRUCTION = [
 export class GoalController {
   readonly repository: GoalRepository;
   readonly session: AgentSession;
+  readonly store: SessionStore | undefined;
   readonly cwd: string;
+  readonly handoffRoot: string | undefined;
   readonly reviewRunner: ReviewRunner | undefined;
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
@@ -311,13 +346,159 @@ export class GoalController {
   constructor(options: GoalControllerOptions) {
     this.repository = options.repository;
     this.session = options.session;
+    this.store = options.store;
     this.cwd = options.cwd ?? process.cwd();
+    this.handoffRoot = options.handoffRoot;
     this.reviewRunner = options.reviewRunner;
     this.#now = options.now ?? Date.now;
   }
 
   currentGoal(): Goal | undefined {
     return this.repository.getCurrentGoal(this.session.id);
+  }
+
+  handoffBuilder(goalId: string): LivingHandoffBuilder | undefined {
+    if (this.handoffRoot === undefined) return undefined;
+    return new LivingHandoffBuilder({
+      repository: this.repository,
+      sessionId: this.session.id,
+      goalId,
+      root: this.handoffRoot,
+    });
+  }
+
+  async syncHandoff(updatedBy: "system" | "worker" | "reviewer" | "user" = "system"): Promise<HandoffRevision | undefined> {
+    const goal = this.currentGoal();
+    if (goal === undefined) return undefined;
+    return this.handoffBuilder(goal.id)?.sync(updatedBy);
+  }
+
+  async getHandoff(epochId?: string): Promise<{
+    revision: HandoffRevision;
+    markdown: string;
+    snapshot: boolean;
+  } | undefined> {
+    const goal = this.currentGoal();
+    if (goal === undefined) return undefined;
+    const builder = this.handoffBuilder(goal.id);
+    if (builder === undefined) return undefined;
+
+    if (epochId !== undefined) {
+      const epoch = this.repository.requireEpoch(epochId);
+      if (epoch.goalId !== goal.id) throw new Error(`Epoch ${epochId} 不属于当前 Goal`);
+      const markdown = await Bun.file(builder.snapshotPath(epoch.id)).text();
+      const revision = this.repository.requireHandoff(epoch.handoffId);
+      return { revision, markdown, snapshot: true };
+    }
+
+    let revision = this.repository.getCanonicalHandoff(goal.id);
+    if (revision === undefined) revision = await builder.sync("system");
+    const markdown = await builder.readCanonical();
+    if (markdown === undefined) throw new Error("canonical HANDOFF.md 不存在");
+    return { revision, markdown, snapshot: false };
+  }
+
+  async applyHandoffPatches(
+    baseRevision: number,
+    actor: "system" | "worker" | "reviewer" | "user",
+    patches: readonly HandoffPatch[],
+  ): Promise<HandoffRevision> {
+    const goal = this.requireCurrent();
+    const builder = this.handoffBuilder(goal.id);
+    if (builder === undefined) throw new Error("当前未配置 Handoff 存储");
+    return builder.applyPatches(baseRevision, actor, patches);
+  }
+
+  async createContextEpoch(
+    reason: "checkpoint" | "context_limit" | "resume" | "blocked" | "manual",
+    checkpointId?: string,
+  ): Promise<{ branchId: string; epochId: string; handoffRevision: number }> {
+    const goal = this.requireCurrent();
+    const store = this.store;
+    if (store === undefined) throw new Error("当前未启用持久化，无法创建 Context Epoch");
+    if (this.session.turnActive || this.session.hasOpenToolBatch()) {
+      throw new Error("只能在无 active turn / ToolBatch 的安全边界创建 Context Epoch");
+    }
+    if (this.session.queuedUserCount > 0) {
+      throw new Error("仍有排队用户消息，不能创建 Context Epoch");
+    }
+    const builder = this.handoffBuilder(goal.id);
+    if (builder === undefined) throw new Error("当前未配置 Handoff 存储");
+
+    const handoff = await builder.sync("system");
+    const epochId = `epoch_${crypto.randomUUID()}`;
+    const snapshot = await builder.writeEpochSnapshot(epochId);
+    if (snapshot.hash !== handoff.snapshotHash) {
+      throw new Error("Handoff snapshot hash 与 revision 不一致");
+    }
+
+    const sessionRecord = store.getSession(this.session.id);
+    if (sessionRecord === undefined) throw new Error(`未知 session：${this.session.id}`);
+    const previousBranchId = this.session.branchId;
+    const branchId = store.createBranch(this.session.id, 0, {
+      ...(previousBranchId !== undefined ? { parentBranchId: previousBranchId } : {}),
+      title: `goal ${goal.id} · ${reason}`,
+    });
+
+    try {
+      store.setActiveBranch(this.session.id, branchId);
+      const branchSession = new AgentSession({
+        id: this.session.id,
+        branchId,
+        system: sessionRecord.systemPrompt,
+        client: this.session.client,
+        model: this.session.model,
+        restore: store.loadBranchPath(this.session.id, branchId),
+        nextMsgId: store.nextMsgId(this.session.id),
+        onMessage: (message) => {
+          store.appendMessageToBranch(this.session.id, branchId, message, message.createdAt);
+        },
+      });
+      branchSession.appendInjection(
+        manifestText(this.session, "mcp", "# MCP servers\n\n(none)"),
+        "mcp",
+      );
+      branchSession.appendInjection(
+        manifestText(this.session, "skill", "# Skills\n\n(none)"),
+        "skill",
+      );
+      branchSession.appendGoalContext(renderGoalContract(goal));
+      const plan = this.repository.latestPlanRevision(goal.id);
+      if (plan !== undefined) {
+        branchSession.enqueueInjection(
+          renderPlan(plan, this.repository.listCheckpoints(goal.id)),
+          "plan",
+        );
+      }
+      const checkpoint =
+        checkpointId === undefined
+          ? goal.activeCheckpointId === undefined
+            ? undefined
+            : this.repository.getCheckpoint(goal.activeCheckpointId)
+          : this.repository.getCheckpoint(checkpointId);
+      const todo =
+        checkpoint === undefined
+          ? undefined
+          : this.repository.latestTodoSnapshot(goal.id, checkpoint.id);
+      if (checkpoint !== undefined && todo !== undefined) {
+        branchSession.enqueueInjection(renderCheckpointTodo(checkpoint, todo), "checkpoint");
+      }
+      branchSession.enqueueInjection(snapshot.markdown, "handoff");
+      branchSession.enqueueInjection(renderContinuation(goal), "handoff");
+
+      const epoch = this.repository.createEpoch(goal.id, {
+        id: epochId,
+        branchId,
+        ...(goal.activeEpochId !== undefined ? { parentEpochId: goal.activeEpochId } : {}),
+        ...(checkpoint !== undefined ? { checkpointId: checkpoint.id } : {}),
+        handoffId: handoff.id,
+        reason,
+      });
+      return { branchId, epochId: epoch.id, handoffRevision: handoff.revision };
+    } catch (error) {
+      if (previousBranchId !== undefined) store.setActiveBranch(this.session.id, previousBranchId);
+      throw error;
+    }
   }
 
   /**
@@ -602,6 +783,7 @@ export class GoalController {
         this.repository.activateCheckpoint(next.id);
         this.repository.setGoalPhase(goal.id, "executing");
       }
+      await this.syncHandoff("system");
       return {
         review: completed,
         checkpoint: finished,
@@ -660,6 +842,7 @@ export class GoalController {
     }
 
     this.session.enqueueInjection(renderReviewDecision(completedReview), "review");
+    await this.syncHandoff("reviewer");
     return {
       review: completedReview,
       checkpoint: updatedCheckpoint,

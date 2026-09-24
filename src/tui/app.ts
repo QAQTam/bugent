@@ -1093,7 +1093,7 @@ export class TuiApp implements TuiInteraction {
   async #openCommandPalette(): Promise<void> {
     const commands = [
       { label: "/context   查看当前 session 上下文", run: () => this.#openContextDialog() },
-      { label: "/goal      初始化或查看 Goal", run: () => this.#handleGoalCommand("") },
+      { label: "/goal      初始化 / 查看 / 继续 Goal", run: () => this.#handleGoalCommand("") },
       { label: "/provider  切换 provider", run: () => this.#chooseProvider() },
       { label: "/model     切换模型", run: () => this.#promptModel() },
       { label: "/key       设置 API key（系统 keychain）", run: () => this.#promptApiKey() },
@@ -1158,13 +1158,36 @@ export class TuiApp implements TuiInteraction {
       this.#render(true);
       return;
     }
+    if (argument === "continue") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+        this.#render(true);
+        return;
+      }
+      if (this.#busy || this.#session.hasOpenToolBatch()) {
+        this.#transcript.pushError("当前一轮还在跑，先结束或中断再刷新 Context Epoch");
+        this.#render(true);
+        return;
+      }
+      try {
+        const epoch = await controller.createContextEpoch("manual");
+        if (this.#switchRuntime(epoch.branchId, `已创建 Context Epoch ${epoch.epochId}`)) {
+          this.#refreshGoalStatus();
+          this.#render(true);
+        }
+      } catch (error) {
+        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+        this.#render(true);
+      }
+      return;
+    }
     if (argument === "status" || (goal !== undefined && argument.length === 0)) {
       await this.#showGoalStatus();
       return;
     }
     if (goal !== undefined) {
       this.#transcript.pushError(
-        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal pause`、`/goal resume`。",
+        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal continue`、`/goal pause`、`/goal resume`。",
       );
       this.#render(true);
       return;
