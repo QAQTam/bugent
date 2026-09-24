@@ -215,6 +215,15 @@ P6 已接线：
 - `/goal clear` 需确认，只删除 Goal 聚合，不删除对话历史或 Handoff 文件。
 - 恢复 session/runtime 时会幂等补回 goal/plan/todo 上下文。
 
+## Agent / Subagent
+
+子代理的领域模型与沙箱规范：
+
+- [`docs/agent-model.md`](docs/agent-model.md)：身份、AgentKind、Authority、Capability、生命周期、main-sub 通信与 ACP 边界。
+- [`docs/subagent-sandbox.md`](docs/subagent-sandbox.md)：read-only reviewer/explorer、worktree worker、网络、凭据、MCP、控制面与 lease。
+
+核心约定：`AgentKind` 不复用 API message `role`；子代理权限只能衰减；reviewer/explorer 永久只读；可写 worker 默认使用隔离 workspace。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |

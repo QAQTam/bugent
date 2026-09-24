@@ -1072,6 +1072,9 @@ goal.status = complete
 
 ## 12. 子代理 Review
 
+> Agent 身份、权限、生命周期和 main-sub 通信详见 `docs/agent-model.md`；
+> reviewer 的沙箱边界详见 `docs/subagent-sandbox.md`。
+
 ### 12.1 角色
 
 ```text
