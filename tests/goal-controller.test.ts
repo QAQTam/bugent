@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession } from "../src/core/session.ts";
 import { GoalController } from "../src/goal/controller.ts";
+import type { ReviewRunner } from "../src/goal/review.ts";
+import type { ReviewResult } from "../src/goal/types.ts";
 import { createMockClient } from "../src/provider/adapters/mock.ts";
 import { GoalRepository } from "../src/store/goal-repository.ts";
 import { SessionStore } from "../src/store/repository.ts";
@@ -27,7 +29,7 @@ afterEach(async () => {
   dirs.length = 0;
 });
 
-async function setup(): Promise<{
+async function setup(options: { reviewRunner?: ReviewRunner; cwd?: string } = {}): Promise<{
   store: SessionStore;
   session: AgentSession;
   controller: GoalController;
@@ -42,7 +44,7 @@ async function setup(): Promise<{
     updatedAt: 1,
     model: "test",
     systemPrompt: "SYS",
-    cwd: "/tmp",
+    cwd: options.cwd ?? "/tmp",
   });
   const session = new AgentSession({
     id: "s1",
@@ -55,9 +57,54 @@ async function setup(): Promise<{
   const controller = new GoalController({
     repository: new GoalRepository(store.db),
     session,
+    cwd: options.cwd ?? "/tmp",
+    ...(options.reviewRunner !== undefined ? { reviewRunner: options.reviewRunner } : {}),
     now: () => 100,
   });
   return { store, session, controller };
+}
+
+function prepareExecutingCheckpoint(controller: GoalController): void {
+  controller.authorizeCreate();
+  controller.createFromContract({
+    rawIntent: "实现 Goal",
+    objective: "实现完整 Goal",
+    successCriteria: ["测试通过"],
+  });
+  controller.applyPlan({
+    phases: [
+      {
+        id: "phase-1",
+        title: "基础",
+        objective: "完成持久化",
+        checkpointIds: ["cp1"],
+        dependsOn: [],
+        risks: [],
+        verification: ["bun test"],
+      },
+    ],
+    checkpoints: [
+      {
+        id: "cp1",
+        order: 1,
+        title: "仓储",
+        deliverable: "GoalRepository",
+        acceptanceCriteria: ["测试通过"],
+        evidenceRequired: ["test"],
+      },
+    ],
+  });
+  controller.writeTodos({
+    checkpointId: "cp1",
+    todos: [
+      {
+        id: "t1",
+        content: "写测试",
+        status: "completed",
+        completionEvidence: ["bun test tests/goal-controller.test.ts"],
+      },
+    ],
+  });
 }
 
 describe("Goal P1 · controller", () => {
@@ -355,6 +402,56 @@ describe("Goal P1 · tools", () => {
     expect(controller.currentGoal()?.phase).toBe("ready");
   });
 
+  test("submit_checkpoint 工具走 verifier 与 review gate", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [
+              { criterion: "测试通过", status: "proven", evidence: ["ev-test"] },
+            ],
+            findings: [],
+            unresolvedQuestions: [],
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+    const registry = new ToolRegistry();
+    for (const tool of createGoalTools(controller)) registry.register(tool);
+    const ctx = {
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callId: "c1",
+      sessionId: "s1",
+    };
+
+    const result = await registry.execute(
+      {
+        id: "c1",
+        name: "submit_checkpoint",
+        args: {
+          checkpoint_id: "cp1",
+          summary: "完成",
+          evidence: [
+            {
+              kind: "test",
+              summary: "tests pass",
+              reference: "bun test",
+              command: "bun test",
+              exit_code: 0,
+            },
+          ],
+        },
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('"reviewStatus": "approved"');
+    expect(result.output).toContain('"checkpointStatus": "completed"');
+  });
+
   test("get_goal/update_goal 返回持久状态", async () => {
     const { controller } = await setup();
     const registry = new ToolRegistry();
@@ -398,5 +495,129 @@ describe("Goal P1 · tools", () => {
     );
     expect(complete.ok).toBe(false);
     expect(complete.output).toContain("final_audit");
+  });
+});
+
+describe("Goal P3 · verification and review", () => {
+  const evidence = [
+    {
+      kind: "test" as const,
+      summary: "Goal controller tests pass",
+      reference: "bun test tests/goal-controller.test.ts",
+      command: "bun test tests/goal-controller.test.ts",
+      exitCode: 0,
+    },
+  ];
+
+  test("确定性验证失败时不会进入 review", async () => {
+    let reviewCalled = false;
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          reviewCalled = true;
+          throw new Error("should not run");
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+
+    await expect(
+      controller.submitCheckpoint({
+        checkpointId: "cp1",
+        summary: "失败命令",
+        evidence: [{ ...evidence[0]!, exitCode: 1 }],
+      }),
+    ).rejects.toThrow("退出码不是 0");
+    expect(reviewCalled).toBe(false);
+    expect(controller.repository.requireCheckpoint("cp1").status).toBe("active");
+  });
+
+  test("review approve 后 Checkpoint 才完成", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [
+              { criterion: "测试通过", status: "proven", evidence: ["ev-test"] },
+            ],
+            findings: [],
+            unresolvedQuestions: [],
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+
+    const result = await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "实现完成",
+      evidence,
+      remainingRisk: [],
+    });
+    expect(result.review.status).toBe("approved");
+    expect(result.checkpoint.status).toBe("completed");
+    expect(
+      controller.repository.listEvidence(controller.currentGoal()!.id, "cp1"),
+    ).toHaveLength(1);
+    expect(controller.currentGoal()?.phase).toBe("checkpoint_audit");
+  });
+
+  test("changes_requested 会让 Checkpoint 回到 active", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "changes_requested",
+            criteriaCoverage: [
+              { criterion: "测试通过", status: "partial", evidence: ["ev-test"] },
+            ],
+            findings: [
+              {
+                severity: "high",
+                title: "缺少边界测试",
+                evidence: "只有 happy path",
+                requestedChange: "补失败路径测试",
+              },
+            ],
+            unresolvedQuestions: [],
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+
+    const result = await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "待修复",
+      evidence,
+    });
+    expect(result.review.status).toBe("changes_requested");
+    expect(result.checkpoint.status).toBe("active");
+    expect(controller.repository.listReviewFindings(result.review.id).length).toBeGreaterThan(0);
+  });
+
+  test("reviewer approve 但 criteria 未覆盖时由系统强制拒绝", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [],
+            findings: [],
+            unresolvedQuestions: [],
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+
+    const result = await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "证据不足",
+      evidence,
+    });
+    expect(result.review.status).toBe("changes_requested");
+    expect(result.checkpoint.status).toBe("active");
   });
 });

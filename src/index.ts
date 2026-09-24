@@ -40,6 +40,7 @@ import { AuditTrail } from "./store/audit.ts";
 import { defaultDatabasePath, SessionStore } from "./store/repository.ts";
 import { GoalRepository } from "./store/goal-repository.ts";
 import { GoalController } from "./goal/controller.ts";
+import { createReadOnlyReviewRunner } from "./goal/review.ts";
 import { createGoalTools } from "./tools/goal.ts";
 import { createCredentialStore } from "./store/credentials.ts";
 import { newSessionId } from "./util/id.ts";
@@ -404,6 +405,12 @@ async function main(): Promise<void> {
       : new GoalController({
           repository: new GoalRepository(store.db),
           session,
+          cwd: options.cwd,
+          reviewRunner: createReadOnlyReviewRunner({
+            client,
+            model: effectiveModel,
+            cwd: options.cwd,
+          }),
         });
   goalController?.ensureContext();
 

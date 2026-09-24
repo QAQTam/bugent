@@ -8,7 +8,7 @@
  */
 
 import type { GoalController } from "../goal/controller.ts";
-import type { RiskLevel, RiskPolicy, ReviewPolicy } from "../goal/types.ts";
+import type { EvidenceKind, RiskLevel, RiskPolicy, ReviewPolicy } from "../goal/types.ts";
 import type { JSONSchema } from "../provider/types.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 
@@ -16,6 +16,17 @@ export const GET_GOAL_TOOL_NAME = "get_goal";
 export const CREATE_GOAL_TOOL_NAME = "create_goal";
 export const UPDATE_GOAL_TOOL_NAME = "update_goal";
 export const UPDATE_PLAN_TOOL_NAME = "update_plan";
+export const SUBMIT_CHECKPOINT_TOOL_NAME = "submit_checkpoint";
+
+const EVIDENCE_KINDS: readonly EvidenceKind[] = [
+  "test",
+  "command",
+  "file",
+  "diff",
+  "runtime",
+  "review",
+  "user",
+];
 
 const RISK_LEVELS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
 const UPDATE_STATUSES = ["paused", "blocked", "complete"] as const;
@@ -190,6 +201,42 @@ const UPDATE_PLAN_PARAMETERS: JSONSchema = {
     assumptions: { type: "array", items: { type: "string" } },
   },
   required: ["phases"],
+};
+
+const SUBMIT_CHECKPOINT_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {
+    checkpoint_id: { type: "string", description: "当前 active Checkpoint ID" },
+    summary: { type: "string", description: "本次提交的简短结果摘要" },
+    evidence: {
+      type: "array",
+      description: "可核验的结构化证据；命令类必须带 command 和 exit_code=0",
+      items: {
+        type: "object",
+        properties: {
+          kind: {
+            type: "string",
+            enum: [...EVIDENCE_KINDS],
+          },
+          summary: { type: "string" },
+          reference: {
+            type: "string",
+            description: "命令、文件路径、diff hash 或其他可定位引用",
+          },
+          digest: { type: "string", description: "file 证据的 sha256，可选" },
+          command: { type: "string", description: "test/command/runtime 证据必须提供" },
+          exit_code: { type: "integer", description: "命令退出码；必须为 0" },
+        },
+        required: ["kind", "summary", "reference"],
+      },
+    },
+    remaining_risk: {
+      type: "array",
+      description: "已识别但尚未解决的残余风险",
+      items: { type: "string" },
+    },
+  },
+  required: ["checkpoint_id", "summary", "evidence"],
 };
 
 export function createGoalTools(controller: GoalController): Tool[] {
@@ -386,5 +433,70 @@ export function createGoalTools(controller: GoalController): Tool[] {
     },
   };
 
-  return [getGoal, createGoal, updateGoal, updatePlan];
+  const submitCheckpoint: Tool<unknown, unknown> = {
+    name: SUBMIT_CHECKPOINT_TOOL_NAME,
+    description: [
+      "提交当前 Goal Checkpoint 进行确定性验证和独立 review。",
+      "只有所有 Todo 完成且带证据时才能提交；提交不等于完成，必须通过 verifier/review gate。",
+    ].join("\n"),
+    parameters: SUBMIT_CHECKPOINT_PARAMETERS,
+    defaultPermission: "allow",
+    resources() {
+      return [{ key: "goal", access: "write" }];
+    },
+    describe(input: unknown) {
+      const source = record(input, "submit_checkpoint input");
+      const checkpointId =
+        typeof source.checkpoint_id === "string" ? source.checkpoint_id : "(invalid)";
+      return {
+        resource: "current checkpoint",
+        summary: `提交 Checkpoint：${checkpointId}`,
+      };
+    },
+    async run(input: unknown, _ctx: ToolCtx): Promise<unknown> {
+      const source = record(input, "submit_checkpoint input");
+      const evidence = objects(source, "evidence").map((item, index) => {
+        const kind = requiredString(item, "kind");
+        if (!EVIDENCE_KINDS.includes(kind as EvidenceKind)) {
+          throw new Error(`evidence[${index}].kind 非法：${kind}`);
+        }
+        const digest = item.digest;
+        if (digest !== undefined && typeof digest !== "string") {
+          throw new Error(`evidence[${index}].digest 必须是字符串`);
+        }
+        const command = item.command;
+        if (command !== undefined && typeof command !== "string") {
+          throw new Error(`evidence[${index}].command 必须是字符串`);
+        }
+        const exitCode = item.exit_code;
+        if (exitCode !== undefined && (typeof exitCode !== "number" || !Number.isInteger(exitCode))) {
+          throw new Error(`evidence[${index}].exit_code 必须是整数`);
+        }
+        return {
+          kind: kind as EvidenceKind,
+          summary: requiredString(item, "summary"),
+          reference: requiredString(item, "reference"),
+          ...(typeof digest === "string" ? { digest } : {}),
+          ...(typeof command === "string" ? { command } : {}),
+          ...(typeof exitCode === "number" ? { exitCode } : {}),
+        };
+      });
+      const remainingRisk = optionalStrings(source, "remaining_risk") ?? [];
+      const result = await controller.submitCheckpoint({
+        checkpointId: requiredString(source, "checkpoint_id"),
+        summary: requiredString(source, "summary"),
+        evidence,
+        remainingRisk,
+      });
+      return {
+        reviewId: result.review.id,
+        reviewRound: result.review.round,
+        reviewStatus: result.review.status,
+        checkpointStatus: result.checkpoint.status,
+        nextCheckpointId: result.nextCheckpointId ?? null,
+      };
+    },
+  };
+
+  return [getGoal, createGoal, updateGoal, updatePlan, submitCheckpoint];
 }

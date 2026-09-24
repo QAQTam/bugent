@@ -21,6 +21,7 @@ import { PermissionGate as Gate } from "../permission/gate.ts";
 import { AuditTrail as Audit } from "../store/audit.ts";
 import { GoalRepository } from "../store/goal-repository.ts";
 import { GoalController as Goals } from "../goal/controller.ts";
+import { createReadOnlyReviewRunner } from "../goal/review.ts";
 import { createGoalTools } from "../tools/goal.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
 import { openSession } from "./open-session.ts";
@@ -204,6 +205,12 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
       : new Goals({
           repository: new GoalRepository(options.store.db),
           session,
+          cwd: options.cwd,
+          reviewRunner: createReadOnlyReviewRunner({
+            client: options.client,
+            model: options.model,
+            cwd: options.cwd,
+          }),
         });
   goalController?.ensureContext();
 

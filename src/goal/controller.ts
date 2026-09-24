@@ -7,6 +7,7 @@
  */
 
 import type { AgentSession } from "../core/session.ts";
+import { createHash } from "node:crypto";
 import type {
   CheckpointDefinition,
   GoalRepository,
@@ -15,6 +16,7 @@ import type {
   Checkpoint,
   Criterion,
   Goal,
+  GoalReview,
   GoalStatus,
   GoalTodo,
   PlanPhase,
@@ -24,6 +26,15 @@ import type {
   ReviewPolicy,
   TodoSnapshot,
 } from "./types.ts";
+import {
+  reviewResultRejection,
+  withForcedRejection,
+  type ReviewRunner,
+} from "./review.ts";
+import {
+  verifyCheckpointDeterministically,
+  type VerificationEvidenceInput,
+} from "./verification.ts";
 
 export interface GoalContractInput {
   rawIntent: string;
@@ -47,9 +58,18 @@ export interface GoalTodoInput {
   todos: readonly Omit<GoalTodo, "checkpointId">[];
 }
 
+export interface SubmitCheckpointInput {
+  checkpointId: string;
+  summary: string;
+  evidence: readonly VerificationEvidenceInput[];
+  remainingRisk?: readonly string[];
+}
+
 export interface GoalControllerOptions {
   repository: GoalRepository;
   session: AgentSession;
+  cwd?: string;
+  reviewRunner?: ReviewRunner;
   now?: () => number;
 }
 
@@ -204,6 +224,67 @@ function renderCheckpointTodo(
   ].join("\n");
 }
 
+interface WorkspaceRevision {
+  base: string;
+  head: string;
+  diffHash: string;
+}
+
+function captureWorkspaceRevision(cwd: string): WorkspaceRevision {
+  const headResult = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (headResult.exitCode !== 0) {
+    return { base: "unknown", head: "unknown", diffHash: "unknown" };
+  }
+  const head = headResult.stdout.toString().trim();
+  const diffResult = Bun.spawnSync(["git", "diff", "--no-ext-diff", "--binary", "HEAD"], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (diffResult.exitCode !== 0) {
+    return { base: head, head: head, diffHash: `head:${head}` };
+  }
+  const diff = diffResult.stdout;
+  const diffHash =
+    diff.byteLength === 0
+      ? `head:${head}`
+      : `sha256:${createHash("sha256").update(diff).digest("hex")}`;
+  return {
+    base: head,
+    head: diff.byteLength === 0 ? head : `${head}+worktree`,
+    diffHash,
+  };
+}
+
+function renderReviewDecision(review: GoalReview): string {
+  const coverage = review.criteriaCoverage
+    .map((item) => `- ${item.status}: ${item.criterion}`)
+    .join("\n");
+  return [
+    "# Goal Review Result",
+    "",
+    `- Review ID: ${review.id}`,
+    `- Checkpoint ID: ${review.checkpointId}`,
+    `- Round: ${review.round}`,
+    `- Status: ${review.status}`,
+    `- Verdict: ${review.verdict ?? "(pending)"}`,
+    "",
+    "## Criteria Coverage",
+    "",
+    coverage.length > 0 ? coverage : "- (none)",
+    "",
+    "## Unresolved Questions",
+    "",
+    review.unresolvedQuestions.length > 0
+      ? review.unresolvedQuestions.map((question) => `- ${question}`).join("\n")
+      : "- (none)",
+  ].join("\n");
+}
+
 export const GOAL_INITIALIZATION_INSTRUCTION = [
   "# Explicit Goal Initialization",
   "",
@@ -222,12 +303,16 @@ export const GOAL_INITIALIZATION_INSTRUCTION = [
 export class GoalController {
   readonly repository: GoalRepository;
   readonly session: AgentSession;
+  readonly cwd: string;
+  readonly reviewRunner: ReviewRunner | undefined;
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
 
   constructor(options: GoalControllerOptions) {
     this.repository = options.repository;
     this.session = options.session;
+    this.cwd = options.cwd ?? process.cwd();
+    this.reviewRunner = options.reviewRunner;
     this.#now = options.now ?? Date.now;
   }
 
@@ -433,6 +518,155 @@ export class GoalController {
     return snapshot;
   }
 
+  async submitCheckpoint(input: SubmitCheckpointInput): Promise<{
+    review: GoalReview;
+    checkpoint: Checkpoint;
+    nextCheckpointId?: string;
+  }> {
+    const goal = this.requireCurrent();
+    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.phase !== "executing") {
+      throw new Error(`只有 executing 阶段可以提交 Checkpoint，当前为 ${goal.phase}`);
+    }
+    if (goal.activeCheckpointId !== input.checkpointId) {
+      throw new Error(`只能提交当前 Checkpoint：${goal.activeCheckpointId ?? "(none)"}`);
+    }
+    const checkpoint = this.repository.requireCheckpoint(input.checkpointId);
+    if (checkpoint.status !== "active") {
+      throw new Error(`Checkpoint 当前不是 active：${checkpoint.status}`);
+    }
+    const todo = this.repository.latestTodoSnapshot(goal.id, checkpoint.id);
+    if (todo === undefined) throw new Error("提交 Checkpoint 前必须建立 Todo snapshot");
+
+    const verification = await verifyCheckpointDeterministically({
+      checkpoint,
+      todos: todo.todos,
+      evidence: input.evidence,
+      cwd: this.cwd,
+    });
+    if (!verification.ok) {
+      throw new Error(`确定性验证失败：${verification.errors.join("；")}`);
+    }
+
+    const existingReviews = this.repository.listReviews(goal.id, checkpoint.id);
+    const nextRound = existingReviews.length + 1;
+    if (nextRound > 3) {
+      throw new Error("Checkpoint 已达到 3 轮 review；需要用户决定如何继续");
+    }
+
+    const storedEvidence = input.evidence.map((evidence) =>
+      this.repository.addEvidence(goal.id, {
+        checkpointId: checkpoint.id,
+        kind: evidence.kind,
+        summary: evidence.summary,
+        reference: evidence.reference,
+        ...(evidence.digest !== undefined ? { digest: evidence.digest } : {}),
+        ...(evidence.command !== undefined ? { command: evidence.command } : {}),
+        ...(evidence.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
+      }),
+    );
+    const revision = captureWorkspaceRevision(this.cwd);
+    const review = this.repository.createReview(goal.id, {
+      checkpointId: checkpoint.id,
+      round: nextRound,
+      reviewer: "read-only-reviewer",
+      baseRevision: revision.base,
+      headRevision: revision.head,
+      diffHash: revision.diffHash,
+      criteriaCoverage: checkpoint.acceptanceCriteria.map((criterion) => ({
+        criterion,
+        status: "missing",
+        evidence: [],
+      })),
+    });
+
+    this.repository.setCheckpointStatus(checkpoint.id, "verifying");
+    if (goal.riskPolicy.reviewPolicy === "off") {
+      this.repository.setCheckpointStatus(checkpoint.id, "reviewing");
+      const completed = this.repository.completeReview(review.id, {
+        verdict: "approve",
+        criteriaCoverage: checkpoint.acceptanceCriteria.map((criterion) => ({
+          criterion,
+          status: "proven",
+          evidence: storedEvidence.map((evidence) => evidence.id),
+        })),
+        findings: [],
+        unresolvedQuestions: [],
+      });
+      const finished = this.repository.setCheckpointStatus(checkpoint.id, "completed");
+      const next = this.repository
+        .listCheckpoints(goal.id)
+        .find((candidate) => candidate.status === "pending");
+      this.repository.setGoalPhase(goal.id, "checkpoint_audit");
+      if (next !== undefined) {
+        this.repository.activateCheckpoint(next.id);
+        this.repository.setGoalPhase(goal.id, "executing");
+      }
+      return {
+        review: completed,
+        checkpoint: finished,
+        ...(next !== undefined ? { nextCheckpointId: next.id } : {}),
+      };
+    }
+
+    if (this.reviewRunner === undefined) {
+      throw new Error("当前没有独立 reviewer，不能通过该 Checkpoint");
+    }
+    this.repository.setReviewStatus(review.id, "running");
+    this.repository.setCheckpointStatus(checkpoint.id, "reviewing");
+
+    let result;
+    try {
+      result = await this.reviewRunner.run({
+        goal,
+        checkpoint,
+        todos: todo.todos,
+        evidence: storedEvidence,
+        remainingRisk: input.remainingRisk ?? [],
+        cwd: this.cwd,
+        baseRevision: revision.base,
+        headRevision: revision.head,
+        diffHash: revision.diffHash,
+      });
+    } catch (error) {
+      this.repository.setReviewStatus(review.id, "blocked");
+      this.repository.setCheckpointStatus(checkpoint.id, "blocked");
+      throw new Error(
+        `reviewer 执行失败，Checkpoint 已阻塞：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const gateErrors = reviewResultRejection(result, checkpoint.acceptanceCriteria);
+    const completedReview = this.repository.completeReview(
+      review.id,
+      withForcedRejection(result, gateErrors),
+    );
+    let updatedCheckpoint = this.repository.requireCheckpoint(checkpoint.id);
+    let nextCheckpointId: string | undefined;
+
+    if (completedReview.status === "approved") {
+      updatedCheckpoint = this.repository.setCheckpointStatus(checkpoint.id, "completed");
+      this.repository.setGoalPhase(goal.id, "checkpoint_audit");
+      const next = this.repository
+        .listCheckpoints(goal.id)
+        .find((candidate) => candidate.status === "pending");
+      if (next !== undefined) {
+        nextCheckpointId = next.id;
+        this.repository.activateCheckpoint(next.id);
+        this.repository.setGoalPhase(goal.id, "executing");
+      }
+    } else {
+      updatedCheckpoint = this.repository.requireCheckpoint(checkpoint.id);
+    }
+
+    this.session.enqueueInjection(renderReviewDecision(completedReview), "review");
+    return {
+      review: completedReview,
+      checkpoint: updatedCheckpoint,
+      ...(nextCheckpointId !== undefined ? { nextCheckpointId } : {}),
+    };
+  }
+
   pause(reason?: string): Goal {
     return this.#userStatus("paused", reason);
   }
@@ -478,11 +712,17 @@ export class GoalController {
     const goal = this.currentGoal();
     if (goal === undefined) return ["当前没有 Goal。使用 `/goal <目标>` 初始化。"];
     const progress = this.repository.checkpointProgress(goal.id);
+    const review = this.repository.listReviews(goal.id).at(-1);
     return [
       `Goal      ${goal.objective}`,
       `Status    ${goal.status}`,
       `Phase     ${goal.phase}`,
       `Progress  ${progress.completed}/${progress.total} checkpoints`,
+      `Review    ${
+        review === undefined
+          ? "(none)"
+          : `${review.status} · round ${review.round}${review.verdict === undefined ? "" : ` · ${review.verdict}`}`
+      }`,
       `Budget    ${goal.tokensUsed}${goal.tokenBudget === undefined ? "" : ` / ${goal.tokenBudget}`}`,
       `Risk      ${goal.riskPolicy.level} · review ${goal.riskPolicy.reviewPolicy}`,
     ];

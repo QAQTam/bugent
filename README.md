@@ -182,6 +182,13 @@ P2 已接线：
 - Goal Todo 标记 completed 必须提供 `completionEvidence`。
 - Plan / Checkpoint / Todo 变化只追加 developer delta，不改写旧 msgid。
 
+P3 已接线：
+
+- `submit_checkpoint` 先跑确定性 verifier，再进入独立 review。
+- Reviewer 使用全新 AgentSession 和只读工具集，不能写工作区。
+- `approve` 仍须所有 acceptance criteria proven，且没有 high/critical finding。
+- `changes_requested` 会把 Checkpoint 退回 active 进入 remediation。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |
