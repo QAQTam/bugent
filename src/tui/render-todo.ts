@@ -23,6 +23,14 @@ export const TODO_MARKERS: Record<TodoStatus, string> = {
   completed: "[x]",
 };
 
+/**
+ * 折叠态面板占几行（含标题与展开按钮）。
+ *
+ * 待办动辄十几条，全铺开会把消息区挤没；折叠态只留"标题 + 当前在做的那一项
+ * + 展开按钮"，看计划的全貌靠点一下。
+ */
+export const TODO_COLLAPSED_LINES = 3;
+
 const STATUS_COLOR: Record<TodoStatus, string> = {
   pending: COLOR.todoPending,
   in_progress: COLOR.todoActive,
@@ -114,6 +122,11 @@ export interface TodoPanelOptions {
   summary?: string;
   /** in_progress 的 shimmer 相位；0..1。 */
   shimmer?: number;
+  /**
+   * 折叠态：能全部放进 {@link TODO_COLLAPSED_LINES} 就全放，放不下只留
+   * "当前在做的那一项"，剩下的交给调用方的展开按钮。
+   */
+  collapsed?: boolean;
 }
 
 /**
@@ -136,6 +149,21 @@ export function composeTodoPanel(
   const titleBudget = Math.max(1, width - visibleWidth(progress) - 3);
   const header = `${BOLD}${truncatePlain(title, titleBudget)}${RESET} ${DIM}${progress}${RESET}`;
 
+  const line = (todo: Todo): string =>
+    `  ${renderTodoLine(todo, Math.max(1, width - 2), {
+      ...(todo.status === "in_progress" && options.shimmer !== undefined
+        ? { shimmer: options.shimmer }
+        : {}),
+    })}`;
+
+  // 折叠态：放得下就全放（调用方据此不画展开按钮），放不下只留"现在在干什么"。
+  if (options.collapsed === true) {
+    const room = Math.max(1, TODO_COLLAPSED_LINES - 1);
+    if (todos.length <= room) return [header, ...todos.map(line)];
+    const active = todos.find((todo) => todo.status === "in_progress") ?? todos[0]!;
+    return [header, line(active)];
+  }
+
   const budget = maxLines - 1; // 标题占一行
   let shown: Todo[];
   let hidden: number;
@@ -156,15 +184,7 @@ export function composeTodoPanel(
   }
 
   const lines = [header];
-  for (const todo of shown) {
-    lines.push(
-      `  ${renderTodoLine(todo, Math.max(1, width - 2), {
-        ...(todo.status === "in_progress" && options.shimmer !== undefined
-          ? { shimmer: options.shimmer }
-          : {}),
-      })}`,
-    );
-  }
+  for (const todo of shown) lines.push(line(todo));
   if (hidden > 0) {
     lines.push(`${DIM}  … 还有 ${hidden} 项${RESET}`);
   }

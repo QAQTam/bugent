@@ -7,10 +7,16 @@
  */
 
 import { visibleWidth } from "./ansi.ts";
-import { BOLD, bg, fg, RESET } from "./markdown.ts";
-import { COLOR } from "./theme.ts";
+import {
+  buttonWidth,
+  buttonRows,
+  glyphOf,
+  paintButtonLines,
+  type ButtonShape,
+  type ButtonTone,
+} from "./button.ts";
 
-export type DialogActionTone = "ok" | "warn" | "error" | "neutral";
+export type DialogActionTone = ButtonTone;
 
 export interface DialogAction<T = boolean> {
   label: string;
@@ -25,6 +31,12 @@ export interface DialogButtonHit<T = boolean> {
   start: number;
   /** 0-based 可见列，包含右侧边框。 */
   end: number;
+  /** 相对动作组首行的 0-based 行号（框形态下按钮占 3 行）。 */
+  row: number;
+  /** 占几行。 */
+  rowSpan: number;
+  /** 左上角字形，自检锚点用它比对画面。 */
+  glyph: string;
   value: T;
 }
 
@@ -35,7 +47,8 @@ export interface DialogButtonRowHit<T = boolean> {
 }
 
 export interface ComposedDialogActions<T = boolean> {
-  text: string;
+  /** 动作组占的行（框形态 3 行，紧凑形态 1 行）。 */
+  lines: string[];
   hits: DialogButtonHit<T>[];
 }
 
@@ -44,69 +57,56 @@ export interface DialogActionRenderState<T = boolean> {
   pressed?: T;
 }
 
-function tonePalette(tone: DialogActionTone | undefined): { background: string; foreground: string } {
-  switch (tone) {
-    case "ok":
-      return { background: COLOR.buttonOkBg, foreground: COLOR.buttonOkFg };
-    case "warn":
-      return { background: COLOR.buttonWarnBg, foreground: COLOR.buttonWarnFg };
-    case "error":
-      return { background: COLOR.buttonErrorBg, foreground: COLOR.buttonErrorFg };
-    case "neutral":
-    default:
-      return { background: COLOR.buttonNeutralBg, foreground: COLOR.buttonNeutralFg };
-  }
+export interface DialogActionLayout {
+  /** 按钮形态；终端放不下框时退化成紧凑形态。 */
+  shape?: ButtonShape;
 }
 
 /**
- * 生成一行按钮，例如 `▐ 同意（y） ▌   ▐ 拒绝（n） ▌`。
+ * 生成一组动作按钮，例如 `┌────┐   ┌────┐` / `│ 同意（y） │   │ 拒绝（n） │` / `└────┘   └────┘`。
  *
- * 按钮使用填充背景 + 半块字符形成“方框”，不再只是 `[ ]`。
- * `start/end` 仍按包含左边框的整行坐标计算，鼠标命中逻辑无需改变。
+ * 每个按钮都走 `paintButtonLines()`（矩形 + 背景 + 悬停/按下态），这里只负责
+ * 一组里排几个、间距多少。`start/end` 按包含左边框的整行坐标计算，鼠标命中
+ * 逻辑无需改变；`row/rowSpan` 让调用方把弹窗局部行换算成屏幕矩形。
  */
 export function composeDialogActions<T = boolean>(
   actions: readonly DialogAction<T>[],
   state: DialogActionRenderState<T> = {},
+  layout: DialogActionLayout = {},
 ): ComposedDialogActions<T> {
+  const shape = layout.shape ?? "box";
+  const rows = buttonRows(shape);
   const hits: DialogButtonHit<T>[] = [];
-  let text = " ";
   // 第 0 列是对话框左边框；文本从第 1 列开始，按钮从第 2 列开始。
+  const lines = Array.from({ length: rows }, () => " ");
   let cursor = 2;
 
   for (let index = 0; index < actions.length; index += 1) {
     const action = actions[index]!;
     if (index > 0) {
-      text += "   ";
+      for (let row = 0; row < rows; row += 1) lines[row] += "   ";
       cursor += 3;
     }
 
     const label = action.shortcut === undefined ? action.label : `${action.label}（${action.shortcut}）`;
-    const boxed = `▐ ${label} ▌`;
     const start = cursor;
     const pressed = state.pressed !== undefined && state.pressed === action.value;
     const hovered = !pressed && state.hovered !== undefined && state.hovered === action.value;
-    const palette = tonePalette(action.tone);
-    const background = pressed
-      ? bg(COLOR.buttonPressedBg)
-      : hovered
-        ? bg(COLOR.buttonHoverBg)
-        : bg(palette.background);
-    const foreground = pressed
-      ? fg(COLOR.buttonPressedFg)
-      : hovered
-        ? fg(COLOR.buttonHoverFg)
-        : fg(palette.foreground);
-    text += `${BOLD}${background}${foreground}${boxed}${RESET}`;
-    cursor += visibleWidth(boxed);
+    const painted = paintButtonLines(label, action.tone, { hovered, pressed }, shape);
+    for (let row = 0; row < rows; row += 1) lines[row] += painted[row]!;
 
     hits.push({
       start,
-      end: cursor - 1,
+      end: cursor + buttonWidth(label) - 1,
+      row: 0,
+      rowSpan: rows,
+      glyph: glyphOf(shape),
       value: action.value,
     });
+    cursor += buttonWidth(label);
   }
 
-  return { text, hits };
+  return { lines, hits };
 }
 
 /** 判断某一行的可见列是否命中按钮；返回按钮值，未命中返回 undefined。 */

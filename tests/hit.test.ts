@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hitRect, rectCenter, rectOfRow } from "../src/tui/hit.ts";
-import { composeCenteredButton } from "../src/tui/history-drawer.ts";
-import { hitTargetName } from "../src/tui/hit-target.ts";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { hitTargetName, messageRegions } from "../src/tui/hit-target.ts";
 
 describe("鼠标命中", () => {
   test("只在矩形内命中，undefined 永远不命中", () => {
@@ -21,18 +19,29 @@ describe("鼠标命中", () => {
     expect(rectCenter({ top: 4, bottom: 6, left: 10, right: 20 })).toEqual({ x: 15, y: 5 });
     expect(rectCenter(rectOfRow(7, 9, 10))).toEqual({ x: 9, y: 7 });
   });
+});
 
-  test("居中按钮返回正确的点击区间", () => {
-    const button = composeCenteredButton("abc", 20, 7);
-    expect(visibleWidth(button.line)).toBe(11);
-    expect(button.line.trimEnd()).toBe("        abc");
-    expect(button.hit).toEqual({ top: 7, bottom: 7, left: 9, right: 11 });
+describe("消息区按键语义", () => {
+  const rect = { top: 5, bottom: 8, left: 1, right: 80 };
+  const tool = { callId: "c1", rect };
+  const message = { msgid: 7, undoMsgid: 7, rect };
+
+  test("工具卡片：左键展开 / 收起，右键开消息菜单", () => {
+    expect(messageRegions([tool], [])).toEqual([
+      { target: { kind: "tool", callId: "c1" }, rect, button: "left" },
+    ]);
   });
 
-  test("窄屏时按钮被截断，命中区间不越界", () => {
-    const button = composeCenteredButton("[ 查看更多消息 ]", 5, 0);
-    expect(visibleWidth(button.line)).toBeLessThanOrEqual(5);
-    expect(button.hit).toEqual({ top: 0, bottom: 0, left: 1, right: 5 });
+  test("普通消息只认右键，左键不登记任何区域", () => {
+    const regions = messageRegions([], [message]);
+    expect(regions).toEqual([{ target: { kind: "message", msgid: 7, undoMsgid: 7 }, rect, button: "right" }]);
+    expect(regions.some((entry) => entry.button === "left")).toBe(false);
+  });
+
+  test("工具卡片与普通消息共存时，左键先落到工具卡片上", () => {
+    const regions = messageRegions([tool], [message]);
+    const left = regions.filter((entry) => entry.button === "left");
+    expect(left.map((entry) => hitTargetName(entry.target))).toEqual(["tool:c1"]);
   });
 });
 

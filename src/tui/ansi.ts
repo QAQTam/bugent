@@ -13,11 +13,24 @@ export function visibleWidth(text: string): number {
   return Bun.stringWidth(text);
 }
 
-/** 按可见宽度截断，保留 ANSI 序列完整性，并追加省略号。 */
+/**
+ * 按可见宽度截断，保留 ANSI 序列完整性，并追加省略号。
+ *
+ * 结果**保证**不超过 maxWidth。`Bun.sliceAnsi` 自己不做这个保证：它按列切，
+ * 但会把跨界的宽字符整个带出来（预算 15 列切 CJK 会返回 16 列），省略号也
+ * 不计入预算。差这一列，整行就会在终端里自动折行 —— 铺满整行的底色块（吸顶
+ * 用户消息）一旦折行就散了。所以这里切完再量，不满足就少给一列重切。
+ */
 export function truncateAnsi(text: string, maxWidth: number, ellipsis = "…"): string {
   if (maxWidth <= 0) return "";
   if (visibleWidth(text) <= maxWidth) return text;
-  return Bun.sliceAnsi(text, 0, maxWidth, ellipsis, true);
+  const ellipsisWidth = visibleWidth(ellipsis);
+  if (ellipsisWidth > maxWidth) return Bun.sliceAnsi(text, 0, maxWidth, "", true);
+  for (let budget = maxWidth - ellipsisWidth; budget >= 0; budget -= 1) {
+    const head = Bun.sliceAnsi(text, 0, budget, "", true);
+    if (visibleWidth(head) + ellipsisWidth <= maxWidth) return `${head}${ellipsis}`;
+  }
+  return "";
 }
 
 /** 右侧补空格到指定可见宽度（已超宽则原样返回）。 */

@@ -23,6 +23,8 @@ export type HitTarget =
   | { kind: "input"; index: number }
   | { kind: "returnToLatest" }
   | { kind: "moreHistory" }
+  /** 待办面板的展开/收起按钮。 */
+  | { kind: "todoToggle" }
   | { kind: "tool"; callId: string }
   | { kind: "message"; msgid: MsgId; undoMsgid: MsgId };
 
@@ -30,6 +32,34 @@ export interface HitRegionEntry {
   target: HitTarget;
   rect: HitRect;
   button: ProbeButton;
+}
+
+/**
+ * 消息区的按键语义：工具卡片与普通消息的矩形本来就重合，谁管哪个键在这里一次定死。
+ *
+ * - 工具卡片：左键展开 / 收起，右键开消息菜单 —— 同一个矩形两种键各管一件事。
+ * - 普通消息：只有右键开菜单。左键落在正文上不登记任何区域，也就是空操作，
+ *   免得在聊天区随手一点就弹出撤回 / 分叉的菜单。
+ *
+ * 抽成纯函数是为了让"哪个键管什么"能被单测钉住，而不是只靠 PTY 里点一下。
+ */
+export function messageRegions(
+  tools: readonly { callId: string; rect: HitRect }[],
+  messages: readonly { msgid: MsgId; undoMsgid: MsgId; rect: HitRect }[],
+): HitRegionEntry[] {
+  const regions: HitRegionEntry[] = [];
+  for (const hit of tools) {
+    regions.push({
+      target: { kind: "tool", callId: hit.callId },
+      rect: hit.rect,
+      button: "left",
+    });
+  }
+  for (const hit of messages) {
+    const target: HitTarget = { kind: "message", msgid: hit.msgid, undoMsgid: hit.undoMsgid };
+    regions.push({ target, rect: hit.rect, button: "right" });
+  }
+  return regions;
 }
 
 /** 稳定 id：自检比较与报错定位都用它。 */
@@ -51,6 +81,8 @@ export function hitTargetName(target: HitTarget): string {
       return "returnToLatest";
     case "moreHistory":
       return "moreHistory";
+    case "todoToggle":
+      return "todoToggle";
     case "tool":
       return `tool:${target.callId}`;
     case "message":

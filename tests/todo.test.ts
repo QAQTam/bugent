@@ -405,6 +405,31 @@ describe("todo_write · 渲染", () => {
     expect(lines[1]).toContain("关键任务");
   });
 
+  test("折叠态：只留标题 + 当前在做的那一项（展开按钮由调用方补）", () => {
+    const lines = composeTodoPanel(sample, 60, { collapsed: true });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("1/3");
+    expect(lines[1]).toContain("[>]");
+  });
+
+  test("折叠态：两项以内全放，不需要展开按钮", () => {
+    const lines = composeTodoPanel(sample.slice(0, 2), 60, { collapsed: true });
+    expect(lines).toHaveLength(3); // 标题 + 两项
+    expect(lines[1]).toContain("[x]");
+    expect(lines[2]).toContain("[>]");
+  });
+
+  test("折叠态：没有进行中的项就显示第一项", () => {
+    const pending: Todo[] = Array.from({ length: 5 }, (_, i) => ({
+      id: `task-${i + 1}`,
+      content: `任务 ${i + 1}`,
+      status: "pending" as const,
+    }));
+    const lines = composeTodoPanel(pending, 60, { collapsed: true });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("任务 1");
+  });
+
   test("transcript 里只留一行摘要（列表交给 sticky 面板）", () => {
     const item: ToolItem = {
       kind: "tool",

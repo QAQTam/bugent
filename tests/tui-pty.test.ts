@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bg } from "../src/tui/markdown.ts";
 import { COLOR } from "../src/tui/theme.ts";
+import { USER_BAND_MARK } from "../src/tui/user-band.ts";
 
 const strip = (text: string): string => Bun.stripANSI(text);
 const HOVER_BG = bg(COLOR.buttonHoverBg);
@@ -24,6 +25,52 @@ async function waitFor(
 }
 
 describe("TUI PTY 冒烟", () => {
+  /** 差分帧里每行的起点是 `ESC[<行>;1H ESC[2K`，据此还原某段文字所在的屏幕行。 */
+  const rowOfIn = (text: string, needle: string): number => {
+    let found = 0;
+    for (const m of text.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|$)/g)) {
+      if (strip(m[2]!).includes(needle)) found = Number(m[1]);
+    }
+    return found;
+  };
+
+  /**
+   * 最后一帧的可见文字（帧以隐藏光标的 `\x1b[?25l` 开头）。
+   *
+   * 按钮是按下-抬起生效的：按下的那一帧只会换底色，动作要等抬起才发生。
+   * 判断"动作有没有发生"必须看最后一帧，不能看累积输出 —— 累积里还留着
+   * 按下那一帧的旧画面。
+   */
+  const lastFrame = (text: string): string => {
+    const frames = text.split("\x1b[?25l").filter((frame) => frame.length > 0);
+    return strip(frames.at(-1) ?? "");
+  };
+
+  /**
+   * 找出画着某个按钮的那一行，以及按钮左边框的 1-based **显示列**。
+   *
+   * 不写死列号：按钮是居中的矩形，宽度一变（文案或边框改动）写死的坐标就
+   * 点空了 —— 之前正是这样把「查看更多消息」点到了旁边的提示文字上。
+   * 列号必须按显示宽度算：`indexOf` 给的是 UTF-16 下标，提示文字里的中文
+   * 一个字符占两列，直接用下标会整体偏左。
+   *
+   * 取标签**左边最近**的边框字符：框形态是 `│`，紧凑形态是 `▐`；弹窗里还有
+   * 一层对话框自己的竖线，不能认错。
+   */
+  const buttonAt = (text: string, label: string): { row: number; column: number } => {
+    let found = { row: 0, column: -1 };
+    for (const m of text.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|$)/g)) {
+      const visible = strip(m[2]!);
+      const labelAt = visible.indexOf(label);
+      if (labelAt < 0) continue;
+      const before = visible.slice(0, labelAt);
+      const edge = Math.max(before.lastIndexOf("│"), before.lastIndexOf("▐"));
+      if (edge < 0) continue;
+      found = { row: Number(m[1]), column: Bun.stringWidth(before.slice(0, edge)) + 1 };
+    }
+    return found;
+  };
+
   test(
     "多行 bracketed paste 只进入输入框，不自动提交",
     async () => {
@@ -203,6 +250,63 @@ describe("TUI PTY 冒烟", () => {
         output = "";
         terminal.write("\x1b[<0;5;22m");
         await waitFor(() => output, (text) => strip(text).includes("[已复制 5 字符]"));
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  test(
+    "左键点聊天正文不弹菜单，右键才弹",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-rightclick-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, TERM: "xterm-256color" },
+        terminal,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write("hello\r");
+        await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
+
+        /** 差分帧里每行的起点是 `ESC[<行>;1H ESC[2K`，据此还原回复正文所在的屏幕行。 */
+        const replyRow = rowOfIn(output, "[mock] hello");
+        expect(replyRow).toBeGreaterThan(0);
+
+        // 左键点在正文上：什么都不该发生，尤其不能弹出消息操作菜单。
+        output = "";
+        terminal.write(`\x1b[<0;20;${replyRow}M\x1b[<0;20;${replyRow}m`);
+        await Bun.sleep(300);
+        expect(strip(output)).not.toContain("消息操作");
+
+        // 同一个位置换成右键：菜单照常打开。
+        output = "";
+        terminal.write(`\x1b[<2;20;${replyRow}M\x1b[<2;20;${replyRow}m`);
+        await waitFor(() => output, (text) => strip(text).includes("消息操作 · #"));
+
+        // 菜单打开期间 Ctrl+C 归它（和对话框一样），先 Esc 关掉再退出。
+        terminal.write("\x1b");
+        await Bun.sleep(150);
 
         terminal.write("\x03");
         expect(await proc.exited).toBe(0);
@@ -486,24 +590,139 @@ describe("TUI PTY 冒烟", () => {
         );
         await waitFor(() => output, (text) => strip(text).includes("turn 10"));
 
+        output = "";
         terminal.write("\x1b[5~\x1b[5~\x1b[5~");
         await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
 
+        // 先按画出来的位置定位，再清空输出观察点击结果
+        const more = buttonAt(output, "查看更多消息");
+        expect(more.row).toBeGreaterThan(0);
+
+        // 悬停到「查看更多消息」上：底色换成高亮色（变亮），形状与位置不变
         output = "";
-        terminal.write("\x1b[<0;30;2M\x1b[<0;30;2m");
-        await waitFor(() => output, (text) => strip(text).includes("更早消息 · ↑↓"));
+        terminal.write(`\x1b[<35;${more.column + 3};${more.row}M`);
+        await waitFor(() => output, (text) => text.includes(HOVER_BG));
+        expect(strip(output)).toContain("│ 查看更多消息 │");
+        expect(rowOfIn(output, "查看更多消息")).toBe(more.row);
+
+        // 按下-抬起：只按下只换底色，不能提前生效；抬起才打开抽屉
+        output = "";
+        const moreX = more.column + 3;
+        terminal.write(`\x1b[<0;${moreX};${more.row}M`);
+        await waitFor(() => output, (text) => text.includes(PRESSED_BG));
+        expect(lastFrame(output)).not.toContain("更早消息 · ↑↓");
+        expect(strip(output)).toContain("│ 查看更多消息 │");
 
         output = "";
-        // 输入框变成 3 行框之后思考区下移一格，“回到最新消息”在第 9 行。
-        terminal.write("\x1b[<0;30;9M\x1b[<0;30;9m");
-        await waitFor(() => output, (text) => text.length > 0);
-        expect(strip(output)).not.toContain("更早消息 · ↑↓");
+        terminal.write(`\x1b[<0;${moreX};${more.row}m`);
+        await waitFor(() => output, (text) => strip(text).includes("更早消息 · ↑↓"));
+
+        // 输入框变成 3 行框之后思考区下移一格，「回到最新消息」画在思考区最后三行。
+        const back = buttonAt(output, "回到最新消息");
+        expect(back.row).toBe(8);
+
+        // 悬停到矩形按钮上：换的是底色（变亮），位置和形状都不动
+        output = "";
+        const hoverX = back.column + 3;
+        terminal.write(`\x1b[<35;${hoverX};${back.row}M`);
+        await waitFor(() => output, (text) => text.includes(HOVER_BG));
+        const hovered = rowOfIn(output, "回到最新消息");
+        expect(hovered).toBe(8);
+        expect(strip(output)).toContain("│ 回到最新消息 │");
+
+        output = "";
+        const backX = back.column + 3;
+        terminal.write(`\x1b[<0;${backX};${back.row}M\x1b[<0;${backX};${back.row}m`);
+        // 按下只换底色，抬起才回到最新：等到"抽屉那一行不再是分隔线"为止
+        await waitFor(
+          () => output,
+          (text) => text.length > 0 && !lastFrame(text).includes("更早消息 · ↑↓"),
+        );
+        expect(lastFrame(output)).not.toContain("更早消息 · ↑↓");
 
         terminal.write("/exit\r");
         expect(await proc.exited).toBe(0);
       } finally {
         if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
         terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
+    "本轮用户消息滚出可视区后吸顶在顶部，下一轮输入后让位",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-band-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 60,
+        rows: 12,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      // 需要持久化：吸顶行要按 msgid 登记命中区（右键开消息菜单），
+      // 没有 msgid 时它和普通消息一样不可点。
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, TERM: "xterm-256color", BUGENT_HIT_PROBE: "1" },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      // mock 只对第一轮做回显，所以"长提示词 = 长回复"这一轮必须放在第一个：
+      // 回复一长，这一轮的用户消息就整块落到窗口上方（三屏上限之外），
+      // 正是吸顶存在的意义。
+      const longPrompt = `ALPHA-USER-MESSAGE ${"padding ".repeat(80)}TAIL-ALPHA`;
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        // 第一轮长消息：用户消息被长回复挤出窗口 -> 顶部常驻一行
+        terminal.write(`${longPrompt}\r`);
+        await waitFor(() => output, (text) => strip(text).includes(USER_BAND_MARK));
+        expect(rowOfIn(output, USER_BAND_MARK)).toBe(2);
+        expect(strip(output)).toContain(`${USER_BAND_MARK} › ALPHA-USER-MESSAGE`);
+        const bottomRow = rowOfIn(output, "TAIL-ALPHA");
+        expect(bottomRow).toBeGreaterThan(2);
+
+        // 往上滚三行：吸顶行还在第 2 行 —— 差分渲染不会重写没变的行，
+        // 所以用"右键点它"来证明它还在那儿，顺便验证吸顶行的命中区是对的。
+        output = "";
+        terminal.write("\x1b[<64;10;5M");
+        await Bun.sleep(250);
+        terminal.write("\x1b[<2;20;2M\x1b[<2;20;2m");
+        await waitFor(() => output, (text) => strip(text).includes("消息操作 · #"));
+        expect(rowOfIn(output, "消息操作")).toBeGreaterThan(2);
+        terminal.write("\x1b");
+        await Bun.sleep(250);
+
+        // 再滚回底部：正文行号回到原处 —— 吸顶只是顶部多一行，正文没有错位
+        output = "";
+        terminal.write("\x1b[<65;10;5M");
+        await Bun.sleep(250);
+        expect(rowOfIn(output, "TAIL-ALPHA")).toBe(bottomRow);
+
+        // 第二轮（短消息）：新的一条就在窗口里，吸顶让位
+        output = "";
+        terminal.write("short-two\r");
+        await waitFor(() => output, (text) => strip(text).includes("[mock] script exhausted"));
+        // 它出现在正文里（带 `›` 前缀的行），而不是被钉在顶部的吸顶行
+        expect(strip(output)).toContain("› short-two");
+        expect(strip(output)).not.toContain(USER_BAND_MARK);
+
+        terminal.write("/exit\r");
+        expect(await proc.exited).toBe(0);
+        // 自检开着：吸顶行参与命中登记后，仍然没有点不到的区域
+        expect(strip(output)).not.toContain("[hit-probe]");
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
       }
     },
     20_000,
@@ -769,32 +988,12 @@ describe("TUI PTY 冒烟", () => {
         killSignal: "SIGKILL",
       });
 
-      /** 差分帧里每行的起点是 `ESC[<行>;1H ESC[2K`，据此还原某段文字所在的屏幕行。 */
-      const rowOf = (text: string, needle: string): number => {
-        let found = 0;
-        for (const m of text.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|$)/g)) {
-          if (strip(m[2]!).includes(needle)) found = Number(m[1]);
-        }
-        return found;
-      };
-      /** 找出画着某个按钮的那一行，以及它第一个 `▐` 的 0-based 列。 */
-      const buttonAt = (text: string, label: string): { row: number; column: number } => {
-        let found = { row: 0, column: -1 };
-        for (const m of text.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|$)/g)) {
-          const visible = strip(m[2]!);
-          if (visible.includes("▐") && visible.includes(label)) {
-            found = { row: Number(m[1]), column: visible.indexOf("▐") + 1 }; // 1-based 列
-          }
-        }
-        return found;
-      };
-
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
         terminal.write("hello\r");
         await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
 
-        const replyRow = rowOf(output, "[mock] hello");
+        const replyRow = rowOfIn(output, "[mock] hello");
         expect(replyRow).toBeGreaterThan(0);
 
         output = "";
@@ -823,6 +1022,139 @@ describe("TUI PTY 冒烟", () => {
     20_000,
   );
   test(
+    "矮终端下弹窗按钮退化成紧凑形态，仍然点得到",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-compact-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        // 12 行放不下 3 行高的方框按钮（菜单要 15 行），必须整体退化
+        cols: 60,
+        rows: 12,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, TERM: "xterm-256color", BUGENT_HIT_PROBE: "1" },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write("hello\r");
+        await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
+
+        const replyRow = rowOfIn(output, "[mock] hello");
+        output = "";
+        terminal.write(`\x1b[<2;20;${replyRow}M\x1b[<2;20;${replyRow}m`);
+        await waitFor(() => output, (text) => strip(text).includes("消息操作 · #"));
+
+        // 紧凑形态：一行一个 `▐ 标签 ▌`，菜单整个塞进 12 行里
+        expect(strip(output)).toContain("▐ 复制（c） ▌");
+        expect(strip(output)).toContain("└");
+
+        const button = buttonAt(output, "复制");
+        expect(button.row).toBeGreaterThan(2);
+        output = "";
+        const x = button.column + 3;
+        terminal.write(`\x1b[<0;${x};${button.row}M\x1b[<0;${x};${button.row}m`);
+        await waitFor(() => output, (text) => strip(text).includes("已复制"));
+
+        terminal.write("/exit\r");
+        expect(await proc.exited).toBe(0);
+        expect(strip(output)).not.toContain("[hit-probe]");
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  test(
+    "待办面板默认折叠三行，点按钮展开/收起",
+    async () => {
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const todos = Array.from({ length: 6 }, (_, index) => ({
+        id: `step-${index + 1}`,
+        content: `步骤 ${index + 1}：做点事情`,
+        status: "pending",
+      }));
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TERM: "xterm-256color",
+          BUGENT_HIT_PROBE: "1",
+          // mock 默认只回显文本；这里让它先发一次 todo_write，面板才有东西可画
+          BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+            name: "todo_write",
+            args: { summary: "联调待办面板", todos },
+          }),
+        },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write("做个计划\r");
+        await waitFor(() => output, (text) => strip(text).includes("展开全部"));
+
+        // 折叠态 = 标题 + 当前项 + 展开按钮，第 6 项不该出现
+        const collapsed = strip(output);
+        expect(collapsed).toContain("待办 · 联调待办面板");
+        expect(collapsed).toContain("[ ] 步骤 1：做点事情");
+        expect(collapsed).not.toContain("步骤 6：做点事情");
+
+        const expand = buttonAt(output, "展开全部");
+        expect(expand.row).toBeGreaterThan(2);
+        const expandX = expand.column + 3;
+        output = "";
+        terminal.write(`\x1b[<0;${expandX};${expand.row}M\x1b[<0;${expandX};${expand.row}m`);
+        await waitFor(() => output, (text) => strip(text).includes("收起"));
+        expect(strip(output)).toContain("步骤 6：做点事情");
+
+        // 展开态最后一行是收起按钮
+        const collapse = buttonAt(output, "收起");
+        const collapseX = collapse.column + 3;
+        output = "";
+        terminal.write(`\x1b[<0;${collapseX};${collapse.row}M\x1b[<0;${collapseX};${collapse.row}m`);
+        // 折叠后第 6 项要消失：判最后一帧，累积输出里还留着展开时的旧画面
+        await waitFor(
+          () => output,
+          (text) => text.length > 0 && lastFrame(text).includes("展开全部"),
+        );
+        expect(lastFrame(output)).not.toContain("步骤 6：做点事情");
+
+        terminal.write("/exit\r");
+        expect(await proc.exited).toBe(0);
+        expect(strip(output)).not.toContain("[hit-probe]");
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
     "命中区间自检：一轮真实交互里没有点不到的区域",
     async () => {
       const home = await mkdtemp(join(tmpdir(), "bugent-hitprobe-"));
@@ -845,22 +1177,13 @@ describe("TUI PTY 冒烟", () => {
         killSignal: "SIGKILL",
       });
 
-      /** 差分帧里每行的起点是 `ESC[<行>;1H ESC[2K`，据此还原某段文字所在的屏幕行。 */
-      const rowOf = (needle: string): number => {
-        let found = 0;
-        for (const m of output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|$)/g)) {
-          if (strip(m[2]!).includes(needle)) found = Number(m[1]);
-        }
-        return found;
-      };
-
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
         terminal.write("hello\r");
         await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
 
         // 1) 消息操作菜单：弹窗按钮 + 弹窗正文 + 左右边框
-        const replyRow = rowOf("[mock] hello");
+        const replyRow = rowOfIn(output, "[mock] hello");
         terminal.write(`\x1b[<2;10;${replyRow}M\x1b[<2;10;${replyRow}m`);
         await waitFor(() => output, (text) => strip(text).includes("消息操作 · #"));
         terminal.write("\x1b");

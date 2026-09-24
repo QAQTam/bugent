@@ -18,32 +18,47 @@ describe("授权弹窗按钮", () => {
     { label: "拒绝", value: false, tone: "error", shortcut: "n" },
   ];
 
-  test("按钮使用方框底板，并把快捷键合进标签", () => {
+  test("按钮是描边方框，并把快捷键合进标签", () => {
     const composed = composeDialogActions(actions);
-    const plain = composed.text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+    const text = composed.lines.join("\n").replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 
-    expect(plain).toContain("▐ 同意（y） ▌");
-    expect(plain).toContain("▐ 拒绝（n） ▌");
-    expect(plain).not.toContain("[ 同意 ]");
+    expect(composed.lines).toHaveLength(3);
+    expect(text).toContain("│ 同意（y） │");
+    expect(text).toContain("│ 拒绝（n） │");
+    expect(text).toContain("┌");
+    expect(text).not.toContain("[ 同意 ]");
     expect(composed.hits).toHaveLength(2);
     expect(composed.hits[0]!.value).toBe(true);
     expect(composed.hits[1]!.value).toBe(false);
     expect(composed.hits[0]!.end).toBeLessThan(composed.hits[1]!.start);
+    // 框形态下每个按钮占 3 行，命中区要跟着标出来
+    expect(composed.hits[0]!.rowSpan).toBe(3);
+    expect(composed.hits[0]!.glyph).toBe("┌");
+  });
+
+  test("紧凑形态只有一行，标签照样带方框边框", () => {
+    const composed = composeDialogActions(actions, {}, { shape: "compact" });
+    expect(composed.lines).toHaveLength(1);
+    expect(Bun.stripANSI(composed.lines[0]!)).toContain("▐ 同意（y） ▌");
+    expect(composed.hits[0]!.rowSpan).toBe(1);
+    expect(composed.hits[0]!.glyph).toBe("▐");
   });
 
   test("同意 / 拒绝使用不同语义底板", () => {
     const composed = composeDialogActions(actions);
-    expect(composed.text).toContain(bg(COLOR.buttonOkBg));
-    expect(composed.text).toContain(bg(COLOR.buttonErrorBg));
+    const text = composed.lines.join("");
+    expect(text).toContain(bg(COLOR.buttonOkBg));
+    expect(text).toContain(bg(COLOR.buttonErrorBg));
   });
 
   test("高危授权使用警告色底板，而不是危险红或安全绿", () => {
     const elevated = composeDialogActions([
       { label: "允许这一次", value: true, tone: "warn", shortcut: "y" },
     ]);
-    expect(elevated.text).toContain(bg(COLOR.buttonWarnBg));
-    expect(elevated.text).not.toContain(bg(COLOR.buttonErrorBg));
-    expect(elevated.text).not.toContain(bg(COLOR.buttonOkBg));
+    const text = elevated.lines.join("");
+    expect(text).toContain(bg(COLOR.buttonWarnBg));
+    expect(text).not.toContain(bg(COLOR.buttonErrorBg));
+    expect(text).not.toContain(bg(COLOR.buttonOkBg));
   });
 
   test("命中边界包含按钮首尾，按钮外不误触", () => {
@@ -66,7 +81,6 @@ describe("授权弹窗按钮", () => {
       visibleWidth("▐ 同意（y） ▌"),
     );
   });
-
   test("回归：同一行有两个按钮时，第二个按钮也能命中", () => {
     const { hits } = composeDialogActions(actions);
     const rows = [
@@ -80,9 +94,9 @@ describe("授权弹窗按钮", () => {
   });
 
   test("hover / pressed 使用不同背景，pressed 优先于 hover", () => {
-    const normal = composeDialogActions(actions).text;
-    const hovered = composeDialogActions(actions, { hovered: true }).text;
-    const pressed = composeDialogActions(actions, { hovered: true, pressed: true }).text;
+    const normal = composeDialogActions(actions).lines.join("");
+    const hovered = composeDialogActions(actions, { hovered: true }).lines.join("");
+    const pressed = composeDialogActions(actions, { hovered: true, pressed: true }).lines.join("");
 
     expect(hovered).not.toBe(normal);
     expect(pressed).not.toBe(hovered);

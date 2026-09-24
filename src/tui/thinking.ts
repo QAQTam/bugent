@@ -36,6 +36,9 @@ import { COLOR } from "./theme.ts";
  */
 export const THINKING_BLOCK_ROWS = 3;
 
+/** 菊花（含思考尾巴）自己至少要占的行数 —— 任何情况下都不能被别的控件挤掉。 */
+export const THINKING_SPINNER_ROWS = 1;
+
 /** 思考渲染在预留区的第几行（0-based）。1 = 中间。 */
 export const THINKING_LINE_INDEX = 1;
 

@@ -30,6 +30,10 @@ export interface Theme {
   dialogBg: string;
   dialogBorder: string;
 
+  /** 吸顶的本轮用户消息：整行铺底，和正文区分开。 */
+  userBandBg: string;
+  userBandFg: string;
+
   // 待办三态
   todoPending: string;
   todoActive: string;
@@ -97,6 +101,9 @@ export const darkTheme: Theme = {
   dialogBg: "#283142",
   dialogBorder: "#fbbf24",
 
+  userBandBg: "#1e293b",
+  userBandFg: "#7dd3fc",
+
   todoPending: "#64748b",
   todoActive: "#fbbf24",
   todoShimmer: "#fff7d6",
@@ -126,8 +133,9 @@ export const darkTheme: Theme = {
   buttonWarnFg: "#fef3c7",
   buttonErrorBg: "#991b1b",
   buttonErrorFg: "#fee2e2",
-  buttonHoverBg: "#1e3a5f",
-  buttonHoverFg: "#e0f2fe",
+  // 悬停/按下底色刻意取得比上面四种按钮底色都亮（见 button.ts 的说明）
+  buttonHoverBg: "#64748b",
+  buttonHoverFg: "#f8fafc",
   buttonPressedBg: "#2563eb",
   buttonPressedFg: "#ffffff",
 };

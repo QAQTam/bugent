@@ -13,7 +13,40 @@ import {
   type ProviderTlsConfig,
   type ReasoningReplay,
 } from "./adapters/openai-chat.ts";
-import { createMockClient } from "./adapters/mock.ts";
+import { createMockClient, type MockTurn } from "./adapters/mock.ts";
+
+/**
+ * mock 的脚本。
+ *
+ * 默认：把最后一条 user 消息原样回显，够用来验证链路。
+ *
+ * `BUGENT_MOCK_TOOL_CALL`（JSON：`{"name":"todo_write","args":{…}}`）会让它先在
+ * 第一轮发一次工具调用，之后照旧回显 —— 否则"内容由工具产出"的界面（待办面板、
+ * 工具卡片）在端到端测试里造不出来，只能靠真实模型碰运气。工具名由调用方给，
+ * provider 层因此仍然不认识任何具体工具。
+ */
+function mockScript(): MockTurn[] {
+  const echo: MockTurn = (req) => {
+    const last = [...req.messages].reverse().find((message) => message.role === "user");
+    const text = last?.parts.map((part) => (part.type === "text" ? part.text : "")).join("") ?? "";
+    return [
+      { type: "text", delta: `[mock] ${text}` },
+      { type: "done", reason: "stop" },
+    ];
+  };
+
+  const raw = Bun.env.BUGENT_MOCK_TOOL_CALL;
+  if (raw === undefined || raw.trim().length === 0) return [echo];
+
+  const parsed = JSON.parse(raw) as { name?: unknown; args?: unknown };
+  if (typeof parsed.name !== "string" || parsed.name.length === 0) {
+    throw new Error('BUGENT_MOCK_TOOL_CALL 需要形如 {"name":"todo_write","args":{…}} 的 JSON');
+  }
+  return [
+    { toolCalls: [{ id: "mock-tool-call-1", name: parsed.name, args: parsed.args ?? {} }] },
+    echo,
+  ];
+}
 
 export type EndpointKind =
   | "openai-chat"
@@ -63,17 +96,7 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
   mock: (config, model) =>
     createMockClient({
       id: `${config.id}/mock/${model}`,
-      // 默认 mock：把最后一条 user 消息原样回显，够用来验证链路。
-      script: [
-        (req) => {
-          const last = [...req.messages].reverse().find((m) => m.role === "user");
-          const text = last?.parts.map((p) => (p.type === "text" ? p.text : "")).join("") ?? "";
-          return [
-            { type: "text", delta: `[mock] ${text}` },
-            { type: "done", reason: "stop" },
-          ];
-        },
-      ],
+      script: mockScript(),
     }),
 
   "openai-responses": (_config, model) => {

@@ -60,19 +60,29 @@ import { applyTheme, COLOR } from "./theme.ts";
 import { detectTerminalBackground } from "./background.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
-import { composeTodoPanel } from "./render-todo.ts";
+import { composeTodoPanel, TODO_COLLAPSED_LINES } from "./render-todo.ts";
 import {
   composeThinkingBlock,
   isSpinningActivity,
   ThinkingBuffer,
   THINKING_BLOCK_ROWS,
+  THINKING_SPINNER_ROWS,
   type AgentActivity,
 } from "./thinking.ts";
 import { TranscriptLayout, maxScrollOffset } from "./transcript-layout.ts";
-import { composeCenteredButton, composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
+import { composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
+import {
+  BUTTON_BOX_ROWS,
+  buttonRows,
+  buttonShapeFor,
+  composeButton,
+  type ButtonShape,
+} from "./button.ts";
+import { composeUserBand, shouldPinUserMessage } from "./user-band.ts";
 import { hitRect, rectCenter, rectOfRow, type HitRect } from "./hit.ts";
 import {
   hitTargetName,
+  messageRegions,
   type HitRegionEntry,
   type HitTarget,
   type ProbeButton,
@@ -116,9 +126,7 @@ import {
   dialogInnerWidth,
   dialogLeftPadding,
   dialogPointAt,
-  hitDialogActionAtLine,
   type DialogAction,
-  type DialogButtonRowHit,
 } from "./dialog.ts";
 import {
   MESSAGE_ACTIONS,
@@ -130,11 +138,27 @@ import {
 /** 弹窗渲染结果：行 + 按钮（弹窗局部坐标）。 */
 interface RenderedDialog {
   lines: string[];
-  buttons: { target: HitTarget; line: number; left: number; right: number }[];
+  buttons: {
+    target: HitTarget;
+    /** 按钮首行（弹窗局部 0-based 行号）。 */
+    line: number;
+    /** 按钮占几行：框形态 3 行，紧凑形态 1 行。 */
+    lineSpan: number;
+    left: number;
+    right: number;
+    /** 左上角字形，自检锚点用它比对画面。 */
+    glyph: string;
+  }[];
 }
 
 /** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
 export const BODY_INDENT = 3;
+
+/** 画在正文/思考区里的按钮：命中矩形 + 左上角字形。 */
+interface PlacedButton {
+  rect: HitRect;
+  glyph: string;
+}
 
 /**
  * 命中区间自检开关（`BUGENT_HIT_PROBE`）。
@@ -179,10 +203,36 @@ interface PendingMessageMenu {
   actions: readonly DialogAction<MessageAction>[];
 }
 
-/** 当前鼠标交互的弹窗按钮。 */
+/**
+ * 当前鼠标悬停 / 按下的按钮。
+ *
+ * 所有矩形按钮都在这里 —— 悬停高亮只需要"重绘时按目标查一次状态"，
+ * 各渲染点不必各存一份 hover 布尔值。
+ */
 type ButtonTarget =
   | { kind: "dialog"; value: boolean }
-  | { kind: "message"; value: MessageAction };
+  | { kind: "message"; value: MessageAction }
+  | { kind: "moreHistory" }
+  | { kind: "returnToLatest" }
+  | { kind: "todoToggle" };
+
+/** 按钮的稳定身份；比较悬停/按下目标时只认它。 */
+function buttonKey(target: ButtonTarget | undefined): string | undefined {
+  switch (target?.kind) {
+    case undefined:
+      return undefined;
+    case "dialog":
+      return `dialog:${String(target.value)}`;
+    case "message":
+      return `message:${target.value}`;
+    case "moreHistory":
+      return "moreHistory";
+    case "returnToLatest":
+      return "returnToLatest";
+    case "todoToggle":
+      return "todoToggle";
+  }
+}
 
 /** 请求 TUI 宿主创建/切换 runtime。 */
 export interface RuntimeRequest {
@@ -359,10 +409,16 @@ export class TuiApp implements TuiInteraction {
   #scrollbarDrag: { metrics: ScrollbarMetrics; grabOffset: number } | undefined;
   /** body 顶部是否有非内容行（“查看更多消息”按钮）；鼠标命中要扣掉。 */
   #bodyContentOffset = 0;
-  /** 消息区顶部“查看更多消息”按钮的屏幕矩形。 */
-  #moreHistoryHit: HitRect | undefined;
-  /** 输入框上方“回到最新消息”按钮的屏幕矩形。 */
-  #returnToLatestHit: HitRect | undefined;
+  /** 消息区顶部“查看更多消息”按钮；含左上角字形，供自检锚点比对画面。 */
+  #moreHistoryButton: PlacedButton | undefined;
+  /** 正文区顶部吸顶的本轮用户消息；右键可打开它的消息菜单。 */
+  #pinnedUserHit: { msgid: MsgId; undoMsgid: MsgId; rect: HitRect } | undefined;
+  /** 输入框上方“回到最新消息”按钮。 */
+  #returnToLatestButton: PlacedButton | undefined;
+  /** 待办面板的展开/收起按钮。 */
+  #todoToggleButton: PlacedButton | undefined;
+  /** 待办面板是否展开；默认折叠成 3 行。 */
+  #todoPanelExpanded = false;
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
   #abort: AbortController | undefined;
@@ -393,9 +449,9 @@ export class TuiApp implements TuiInteraction {
   /** 本帧是否有覆盖层（弹窗 / 消息菜单 / ask_user）。它盖住的区域不可点。 */
   #overlayOpen = false;
   /** 当前权限弹窗按钮的屏幕矩形。 */
-  #dialogButtonHits: { value: boolean; rect: HitRect }[] = [];
+  #dialogButtonHits: { value: boolean; rect: HitRect; glyph: string }[] = [];
   /** 当前消息操作菜单按钮的屏幕矩形。 */
-  #messageButtonHits: { value: MessageAction; rect: HitRect }[] = [];
+  #messageButtonHits: { value: MessageAction; rect: HitRect; glyph: string }[] = [];
   /** ask_user 表单每一行的屏幕矩形。 */
   #askLineHits: { value: number; rect: HitRect }[] = [];
   /** 弹窗整体矩形：范围内、按钮之外的点击被吞掉，不穿透到下面的消息列表。 */
@@ -834,26 +890,30 @@ export class TuiApp implements TuiInteraction {
       return;
     }
 
-    // 弹窗 / 消息操作菜单使用标准按下-抬起语义。
-    if (this.#pendingMessageMenu !== undefined || this.#pendingDialog !== undefined) {
-      if (key.button !== "left") return;
-
-      if (key.pressed) {
-        const target = this.#buttonTargetAt(key.x, key.y);
-        this.#pressedButton = target;
-        if (target !== undefined) this.#render(true);
-        return;
-      }
-
+    // 按钮统一按下-抬起：按下先显示按下态，抬起时还停在同一个按钮上才生效。
+    // 拖到一半松手不会误触发，正文区的按钮和弹窗按钮手感一致。
+    if (key.button === "left") {
       const target = this.#buttonTargetAt(key.x, key.y);
-      const pressed = this.#pressedButton;
-      this.#pressedButton = undefined;
-      if (pressed !== undefined && this.#sameButtonTarget(pressed, target)) {
-        this.#invokeButton(pressed);
+      if (key.pressed) {
+        if (target !== undefined) {
+          this.#pressedButton = target;
+          this.#render(true);
+          return;
+        }
+        // 按在按钮之外：清掉上一次残留的按下态（按住按钮拖出去就是这种）
+        if (this.#pressedButton !== undefined) {
+          this.#pressedButton = undefined;
+          this.#render(true);
+        }
       } else {
-        this.#render(true);
+        const pressed = this.#pressedButton;
+        if (pressed !== undefined) {
+          this.#pressedButton = undefined;
+          if (this.#sameButtonTarget(pressed, target)) this.#invokeButton(pressed);
+          else this.#render(true);
+          return;
+        }
       }
-      return;
     }
 
     if (!key.pressed) return;
@@ -880,11 +940,12 @@ export class TuiApp implements TuiInteraction {
         return;
       case "dialogBody":
         return;
+      // 四个按钮目标（moreHistory / returnToLatest / dialogButton / messageButton）
+      // 都在上面的按下-抬起分支里处理完了，不会走到这里。
       case "returnToLatest":
-        this.#returnToLatest();
-        return;
       case "moreHistory":
-        this.#openHistoryDrawer();
+      case "dialogButton":
+      case "messageButton":
         return;
       case "tool":
         // 展开会改变布局，必须整屏重绘而不是走差分
@@ -904,9 +965,7 @@ export class TuiApp implements TuiInteraction {
   }
 
   #sameButtonTarget(a: ButtonTarget | undefined, b: ButtonTarget | undefined): boolean {
-    if (a === undefined || b === undefined) return a === b;
-    if (a.kind !== b.kind) return false;
-    return a.value === b.value;
+    return buttonKey(a) === buttonKey(b);
   }
 
   /** 组装本帧的可点区域。**顺序即优先级**，与鼠标处理共用。 */
@@ -918,6 +977,18 @@ export class TuiApp implements TuiInteraction {
         target: { kind: "scrollbar" },
         rect: scrollbarRect(this.#scrollbar),
         button: "left",
+      });
+    }
+    // 吸顶的本轮用户消息：它就是那条消息，所以右键行为与正文里的消息一致。
+    if (this.#pinnedUserHit !== undefined) {
+      regions.push({
+        target: {
+          kind: "message",
+          msgid: this.#pinnedUserHit.msgid,
+          undoMsgid: this.#pinnedUserHit.undoMsgid,
+        },
+        rect: this.#pinnedUserHit.rect,
+        button: "right",
       });
     }
     for (const entry of this.#messageButtonHits) {
@@ -948,34 +1019,29 @@ export class TuiApp implements TuiInteraction {
     // 弹窗打开时它盖住的区域都不可点（鼠标处理在弹窗分支直接 return）
     if (this.#overlayOpen) return regions;
 
-    if (this.#returnToLatestHit !== undefined) {
+    if (this.#returnToLatestButton !== undefined) {
       regions.push({
         target: { kind: "returnToLatest" },
-        rect: this.#returnToLatestHit,
+        rect: this.#returnToLatestButton.rect,
         button: "left",
       });
     }
-    if (this.#moreHistoryHit !== undefined && !this.#viewState.historyOpen) {
+    if (this.#moreHistoryButton !== undefined && !this.#viewState.historyOpen) {
       regions.push({
         target: { kind: "moreHistory" },
-        rect: this.#moreHistoryHit,
+        rect: this.#moreHistoryButton.rect,
         button: "left",
       });
     }
-    for (const hit of this.#toolHits) {
+    if (this.#todoToggleButton !== undefined) {
       regions.push({
-        target: { kind: "tool", callId: hit.callId },
-        rect: hit.rect,
+        target: { kind: "todoToggle" },
+        rect: this.#todoToggleButton.rect,
         button: "left",
       });
     }
-    for (const hit of this.#messageHits) {
-      // 左键：普通消息也能点开菜单；工具卡片那一块由上面的 tool 区域先接住。
-      // 右键：工具卡片与普通消息都走消息菜单。
-      const target: HitTarget = { kind: "message", msgid: hit.msgid, undoMsgid: hit.undoMsgid };
-      regions.push({ target, rect: hit.rect, button: "left" });
-      regions.push({ target, rect: hit.rect, button: "right" });
-    }
+    // 工具卡片与普通消息的按键语义集中在 messageRegions（纯函数，单测覆盖）。
+    regions.push(...messageRegions(this.#toolHits, this.#messageHits));
 
     return regions;
   }
@@ -1010,9 +1076,31 @@ export class TuiApp implements TuiInteraction {
   /** 弹窗按钮的 hover / press 目标；其它区域不参与悬停高亮。 */
   #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
     const target = this.#hitTargetAt(x, y, "left");
-    if (target?.kind === "dialogButton") return { kind: "dialog", value: target.value };
-    if (target?.kind === "messageButton") return { kind: "message", value: target.value };
-    return undefined;
+    if (target === undefined) return undefined;
+    switch (target.kind) {
+      case "dialogButton":
+        return { kind: "dialog", value: target.value };
+      case "messageButton":
+        return { kind: "message", value: target.value };
+      case "moreHistory":
+        return { kind: "moreHistory" };
+      case "returnToLatest":
+        return { kind: "returnToLatest" };
+      case "todoToggle":
+        return { kind: "todoToggle" };
+      default:
+        return undefined;
+    }
+  }
+
+  /** 某个按钮此刻是不是悬停 / 按下 —— 渲染时问这一句就够了。 */
+  #buttonState(target: ButtonTarget): { hovered?: boolean; pressed?: boolean } {
+    const hovered = this.#sameButtonTarget(this.#hoveredButton, target);
+    const pressed = this.#sameButtonTarget(this.#pressedButton, target);
+    return {
+      ...(hovered ? { hovered: true } : {}),
+      ...(pressed ? { pressed: true } : {}),
+    };
   }
 
   /**
@@ -1068,7 +1156,16 @@ export class TuiApp implements TuiInteraction {
   #collectVisualAnchors(): VisualAnchor[] {
     const anchors: VisualAnchor[] = [];
     for (const entry of [...this.#messageButtonHits, ...this.#dialogButtonHits]) {
-      anchors.push({ name: "button", x: entry.rect.left, y: entry.rect.top, glyph: "▐" });
+      anchors.push({ name: "button", x: entry.rect.left, y: entry.rect.top, glyph: entry.glyph });
+    }
+    for (const [name, button] of [
+      ["moreHistory", this.#moreHistoryButton],
+      ["returnToLatest", this.#returnToLatestButton],
+      ["todoToggle", this.#todoToggleButton],
+    ] as const) {
+      if (button !== undefined) {
+        anchors.push({ name, x: button.rect.left, y: button.rect.top, glyph: button.glyph });
+      }
     }
     if (this.#dialogRect !== undefined) {
       anchors.push({
@@ -1120,8 +1217,30 @@ export class TuiApp implements TuiInteraction {
   }
 
   #invokeButton(target: ButtonTarget): void {
-    if (target.kind === "dialog") this.#finishDialog(target.value);
-    else this.#resolveMessageAction(target.value);
+    switch (target.kind) {
+      case "dialog":
+        this.#finishDialog(target.value);
+        return;
+      case "message":
+        this.#resolveMessageAction(target.value);
+        return;
+      case "moreHistory":
+        this.#openHistoryDrawer();
+        return;
+      case "returnToLatest":
+        this.#returnToLatest();
+        return;
+      case "todoToggle":
+        this.#toggleTodoPanel();
+        return;
+    }
+  }
+
+  /** 待办面板展开/收起：只影响面板自身高度，正文让位。 */
+  #toggleTodoPanel(): void {
+    this.#todoPanelExpanded = !this.#todoPanelExpanded;
+    this.#clearButtonInteraction();
+    this.#render(true);
   }
 
   #insert(text: string): void {
@@ -3040,13 +3159,13 @@ export class TuiApp implements TuiInteraction {
       this.#pendingDialog !== undefined ||
       this.#pendingMessageMenu !== undefined ||
       this.#askFlow !== undefined;
+    // 弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
+    const maxDialogRows = Math.max(0, height - 2);
     const dialogContent: RenderedDialog = overlayOpen
-      ? this.#renderDialog(width)
+      ? this.#renderDialog(width, maxDialogRows)
       : { lines: [], buttons: [] };
     const dialogLines = this.#paintDialog(dialogContent.lines);
     this.#overlayOpen = overlayOpen;
-    // 弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
-    const maxDialogRows = Math.max(0, height - 2);
     // 渲染与鼠标命中共用同一个左内边距，避免两边各算一遍导致点击整体偏移
     const dialogPadding = dialogLeftPadding(width);
     const dialogBlock = dialogLines
@@ -3057,25 +3176,35 @@ export class TuiApp implements TuiInteraction {
     // 思考区固定预留（默认 3 行，小终端自动收缩），不思考时是全空白 ——
     // 这块空间同时充当输入框上方的呼吸留白。
     // 有弹窗时隐藏思考区，把空间让给正文与弹窗。
+    //
+    // 「回到最新消息」出现时再向正文借 1 行：菊花单独占 1 行，按钮占 3 行（框形态），
+    // 两者都不挤掉 —— 借来的这 1 行直接从正文高度里扣。
+    const baseThinking = Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
+    const returnWanted = dialogRows === 0 && shouldShowReturnButton(this.#viewState);
+    const returnShape: ButtonShape | undefined = returnWanted
+      ? buttonShapeFor(baseThinking)
+      : undefined;
+    const returnRows = returnShape === undefined ? 0 : buttonRows(returnShape);
     const thinkingRows =
-      dialogRows > 0 ? 0 : Math.min(THINKING_BLOCK_ROWS, Math.max(1, height - 4));
+      dialogRows > 0 ? 0 : Math.max(baseThinking, returnRows + THINKING_SPINNER_ROWS);
     const thinkingBlock =
       dialogRows > 0
         ? []
         : composeThinkingBlock(this.#thinking, width, {
-            rows: thinkingRows,
+            rows: thinkingRows - returnRows,
             frame: this.#thinkingFrame,
             activity: this.#activity,
           });
 
-    // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置。
+    // 下面所有高度计算都用 thinkingRows（思考区总高），不能用 thinkingBlock.length ——
+    // 后者此刻还没算上「回到最新消息」占的那几行。
     const panelBudget = Math.max(
       0,
       Math.min(
         Math.floor(height * 0.4),
         dialogRows > 0
           ? height - 2 - dialogRows
-          : height - 3 - thinkingBlock.length,
+          : height - 3 - thinkingRows,
       ),
     );
     const todoList = this.#todos();
@@ -3083,10 +3212,19 @@ export class TuiApp implements TuiInteraction {
       panelBudget >= 2
         ? composeTodoPanel(todoList.todos, width, {
             maxLines: panelBudget,
+            collapsed: !this.#todoPanelExpanded,
             ...(todoList.summary !== undefined ? { summary: todoList.summary } : {}),
             ...(this.#todoShimmer > 0 ? { shimmer: this.#todoShimmer } : {}),
           })
         : [];
+    // 展开/收起按钮占面板最后一行；先占位，等 bodyHeight 定下来再算它的屏幕行号。
+    const todoToggleLabel =
+      todoList.todos.length > TODO_COLLAPSED_LINES - 1
+        ? this.#todoPanelExpanded
+          ? "收起"
+          : `展开全部（${todoList.todos.length} 项）`
+        : undefined;
+    const todoToggleIndex = todoToggleLabel === undefined ? -1 : todoPanel.push("") - 1;
 
     // 输入框几何必须在正文高度之前确定：框高随输入行数增长（1..5 行内容），
     // 正文高度依赖它。渲染、硬件光标、鼠标命中三处共用同一份几何。
@@ -3099,17 +3237,14 @@ export class TuiApp implements TuiInteraction {
       height,
       inputLines: inputLayout.lines.length,
       todoRows: todoPanel.length,
-      thinkingRows: thinkingBlock.length,
+      thinkingRows,
     });
     const inputBoxHeight = dialogRows > 0 ? 0 : inputPlan.boxHeight;
 
     const bodyHeight =
       dialogRows > 0
         ? Math.max(1, height - 1 - todoPanel.length - dialogRows)
-        : Math.max(
-            1,
-            height - 2 - (inputBoxHeight - 1) - todoPanel.length - thinkingBlock.length,
-          );
+        : Math.max(1, height - 2 - (inputBoxHeight - 1) - todoPanel.length - thinkingRows);
     const body = this.#composeBody(width, bodyHeight);
     const scrollbarViewportHeight = Math.max(1, bodyHeight - this.#bodyContentOffset);
     this.#scrollbar = this.#viewState.historyOpen
@@ -3137,17 +3272,42 @@ export class TuiApp implements TuiInteraction {
       this.#dialogHeight = 0;
     }
 
-    // “回到最新消息”放在思考区最后一行：它本来就是输入框上方的留白，
-    // 不额外挤占消息区高度，也不会造成 layout 抖动。
-    if (shouldShowReturnButton(this.#viewState) && thinkingBlock.length > 0) {
-      const rowIndex = thinkingBlock.length - 1;
-      const label = `${fg(COLOR.tool)}[ 回到最新消息 ]${RESET}`;
-      const row = 1 + bodyHeight + todoPanel.length + thinkingBlock.length;
-      const button = composeCenteredButton(label, width, row);
-      thinkingBlock[rowIndex] = button.line;
-      this.#returnToLatestHit = button.hit;
+    // “回到最新消息”画在思考区最后几行：这块本来就是输入框上方的留白，
+    // 出现时向正文借 1 行（菊花单独一行，按钮 3 行），不会造成 layout 抖动。
+    if (returnShape !== undefined && thinkingRows > 0) {
+      const first = thinkingBlock.length; // 追加在菊花行之后
+      const row = 1 + bodyHeight + todoPanel.length + first + 1;
+      const button = composeButton({
+        label: "回到最新消息",
+        width,
+        row,
+        tone: "ok",
+        shape: returnShape,
+        state: this.#buttonState({ kind: "returnToLatest" }),
+      });
+      for (const line of button.lines) thinkingBlock.push(line);
+      this.#returnToLatestButton =
+        button.hit === undefined ? undefined : { rect: button.hit, glyph: button.glyph };
     } else {
-      this.#returnToLatestHit = undefined;
+      this.#returnToLatestButton = undefined;
+    }
+
+    // 待办面板的展开/收起按钮：行号依赖 bodyHeight，所以在这里才填进占位行。
+    if (todoToggleIndex >= 0 && todoToggleLabel !== undefined) {
+      const row = 1 + bodyHeight + todoToggleIndex + 1;
+      const button = composeButton({
+        label: todoToggleLabel,
+        width,
+        row,
+        tone: "neutral",
+        shape: "compact",
+        state: this.#buttonState({ kind: "todoToggle" }),
+      });
+      todoPanel[todoToggleIndex] = button.lines[0] ?? "";
+      this.#todoToggleButton =
+        button.hit === undefined ? undefined : { rect: button.hit, glyph: button.glyph };
+    } else {
+      this.#todoToggleButton = undefined;
     }
 
     if (dialogRows > 0) {
@@ -3164,17 +3324,18 @@ export class TuiApp implements TuiInteraction {
       this.#dialogButtonHits = [];
       this.#askLineHits = [];
       for (const button of dialogContent.buttons) {
-        if (button.line >= dialogRows) continue; // 被裁掉的行不算可点
+        // 被裁掉的行不算可点：框形态的按钮要三行都画出来才登记
+        if (button.line + button.lineSpan - 1 >= dialogRows) continue;
         const rect: HitRect = {
           top: toScreenRow(button.line),
-          bottom: toScreenRow(button.line),
+          bottom: toScreenRow(button.line + button.lineSpan - 1),
           left: dialogPadding + button.left + 1,
           right: dialogPadding + button.right + 1,
         };
         if (button.target.kind === "messageButton") {
-          this.#messageButtonHits.push({ value: button.target.value, rect });
+          this.#messageButtonHits.push({ value: button.target.value, rect, glyph: button.glyph });
         } else if (button.target.kind === "dialogButton") {
-          this.#dialogButtonHits.push({ value: button.target.value, rect });
+          this.#dialogButtonHits.push({ value: button.target.value, rect, glyph: button.glyph });
         }
       }
       this.#dialogRect = {
@@ -3281,8 +3442,17 @@ export class TuiApp implements TuiInteraction {
    *
    * 局部坐标 -> 屏幕坐标的换算放在 #compose 里做：那时才知道弹窗画在屏幕的
    * 哪一行、水平居中留白是多少（行数依赖渲染结果，算位置又依赖行数）。
+   *
+   * 按钮默认画成框（3 行）；`maxRows` 放不下时整体退化成紧凑形态（1 行）再画
+   * 一次 —— 小终端上宁可按钮矮一点，也不能把动作截掉一半。
    */
-  #renderDialog(width: number): RenderedDialog {
+  #renderDialog(width: number, maxRows: number): RenderedDialog {
+    const boxed = this.#composeDialogContent(width, "box");
+    if (boxed.lines.length <= maxRows) return boxed;
+    return this.#composeDialogContent(width, "compact");
+  }
+
+  #composeDialogContent(width: number, shape: ButtonShape): RenderedDialog {
     const buttons: RenderedDialog["buttons"] = [];
     const inner = dialogInnerWidth(width);
     const color = fg(COLOR.dialogBorder);
@@ -3317,21 +3487,26 @@ export class TuiApp implements TuiInteraction {
         this.#pressedButton?.kind === "message" ? this.#pressedButton.value : undefined;
 
       for (let offset = 0; offset < menu.actions.length; offset += 3) {
+        // 框形态下两组之间空一行，否则两排方框会贴成一堵墙
+        if (offset > 0 && shape === "box") lines.push(row(""));
         const actions = composeDialogActions<MessageAction>(
           menu.actions.slice(offset, offset + 3),
           {
             ...(hovered !== undefined ? { hovered } : {}),
             ...(pressed !== undefined ? { pressed } : {}),
           },
+          { shape },
         );
-        lines.push(row(actions.text));
-        const actionLine = lines.length - 1;
+        for (const line of actions.lines) lines.push(row(line));
+        const first = lines.length - actions.lines.length;
         for (const hit of actions.hits) {
           buttons.push({
             target: { kind: "messageButton", value: hit.value },
-            line: actionLine,
+            line: first + hit.row,
+            lineSpan: hit.rowSpan,
             left: hit.start,
             right: hit.end,
+            glyph: hit.glyph,
           });
         }
       }
@@ -3357,18 +3532,24 @@ export class TuiApp implements TuiInteraction {
       this.#hoveredButton?.kind === "dialog" ? this.#hoveredButton.value : undefined;
     const pressed =
       this.#pressedButton?.kind === "dialog" ? this.#pressedButton.value : undefined;
-    const actions = composeDialogActions(dialog.actions, {
-      ...(hovered !== undefined ? { hovered } : {}),
-      ...(pressed !== undefined ? { pressed } : {}),
-    });
-    lines.push(row(actions.text));
-    const actionLine = lines.length - 1;
+    const actions = composeDialogActions(
+      dialog.actions,
+      {
+        ...(hovered !== undefined ? { hovered } : {}),
+        ...(pressed !== undefined ? { pressed } : {}),
+      },
+      { shape },
+    );
+    for (const line of actions.lines) lines.push(row(line));
+    const first = lines.length - actions.lines.length;
     for (const hit of actions.hits) {
       buttons.push({
         target: { kind: "dialogButton", value: hit.value },
-        line: actionLine,
+        line: first + hit.row,
+        lineSpan: hit.rowSpan,
         left: hit.start,
         right: hit.end,
+        glyph: hit.glyph,
       });
     }
 
@@ -3450,17 +3631,56 @@ export class TuiApp implements TuiInteraction {
       this.#bodyContentOffset = 0;
       this.#toolHits = [];
       this.#messageHits = [];
-      this.#moreHistoryHit = undefined;
+      this.#moreHistoryButton = undefined;
+      this.#pinnedUserHit = undefined;
       this.#regions = this.#buildRegions();
       return drawer.lines;
     }
 
-    const showMore = shouldShowMoreButton(this.#viewState, total, height);
-    const viewportHeight = Math.max(1, height - (showMore ? 1 : 0));
-    const viewport = this.#layout.window(viewportHeight, this.#viewState.scrollOffset);
+    // 顶部行数不能把正文挤没：吸顶行 + 按钮要占位，正文至少留 1 行，
+    // 否则 body 会多吐出一行、把下面的思考区/输入框整体顶偏（自检的锚点会直接报错）。
+    // 位置不够时按钮先退化成紧凑形态，再不够就不画。
+    const wantMore = shouldShowMoreButton(this.#viewState, total, height);
+    // 吸顶要不要出现，取决于窗口起点；窗口高度又取决于吸不吸顶。先用"只有按钮"
+    // 的窗口探一次：窗口缩小后起点只会往下走，所以这个判断不会来回抖。
+    const probe = this.#layout.window(
+      Math.max(1, height - (wantMore ? BUTTON_BOX_ROWS : 0)),
+      this.#viewState.scrollOffset,
+    );
+    const pinned = this.#pinnedUser(probe.start, width);
+    const room = Math.max(0, height - 1);
+    const bandRows = pinned !== undefined && room >= 2 ? 1 : 0;
+    const bandLine = bandRows > 0 ? pinned?.line : undefined;
+    const moreShape = wantMore ? buttonShapeFor(room - bandRows) : undefined;
+    const moreButton =
+      moreShape === undefined
+        ? undefined
+        : composeButton({
+            label: "查看更多消息",
+            hint: `${DIM}↑ 更早消息已折叠 ${RESET}`,
+            width,
+            row: 2 + bandRows, // body 第 0 行 = 屏幕第 2 行
+            tone: "neutral",
+            shape: moreShape,
+            state: this.#buttonState({ kind: "moreHistory" }),
+          });
+    // 实际画出来的行数才作数：太窄时 composeButton 会放弃按钮
+    const topRows = bandRows + (moreButton?.lines.length ?? 0);
+    const viewport = this.#layout.window(
+      Math.max(1, height - topRows),
+      this.#viewState.scrollOffset,
+    );
 
     this.#bodyWindowStart = viewport.start;
-    this.#bodyContentOffset = showMore ? 1 : 0;
+    this.#bodyContentOffset = topRows;
+    this.#pinnedUserHit =
+      bandLine === undefined || pinned?.msgid === undefined || pinned.undoMsgid === undefined
+        ? undefined
+        : {
+            msgid: pinned.msgid,
+            undoMsgid: pinned.undoMsgid,
+            rect: { top: 2, bottom: 2, left: 1, right: width },
+          };
     /** 内容行区间 -> 屏幕矩形；整块滚出窗口时返回 undefined（没画出来就不可点）。 */
     const bodyRect = (block: { start: number; contentEnd: number }): HitRect | undefined => {
       const visible = visibleRangeOf(
@@ -3502,16 +3722,50 @@ export class TuiApp implements TuiInteraction {
         : [{ msgid, undoMsgid, rect }];
     });
 
-    if (!showMore) {
-      this.#moreHistoryHit = undefined;
-      return viewport.lines;
+    // 顶部几行：吸顶的本轮用户消息（如果有）、「查看更多消息」按钮。
+    const top: string[] = [];
+    if (bandLine !== undefined) top.push(bandLine);
+    if (moreButton !== undefined) {
+      top.push(...moreButton.lines);
+      this.#moreHistoryButton =
+        moreButton.hit === undefined
+          ? undefined
+          : { rect: moreButton.hit, glyph: moreButton.glyph };
+    } else {
+      this.#moreHistoryButton = undefined;
     }
+    return top.length === 0 ? viewport.lines : [...top, ...viewport.lines];
+  }
 
-    const label = `${DIM}↑ 更早消息已折叠 ${RESET}${fg(COLOR.tool)}[ 查看更多消息 ]${RESET}`;
-    // 按钮画在 body 的第 0 行；body 从屏幕第 2 行开始
-    const button = composeCenteredButton(label, width, 2);
-    this.#moreHistoryHit = button.hit;
-    return [button.line, ...viewport.lines];
+  /**
+   * 本轮用户消息的吸顶行。
+   *
+   * 出现条件：最后一条 user 条目**整块**滚到窗口上方（`contentEnd < windowStart`）。
+   * 窗口起点为 0 时不吸顶 —— 那时它本来就在屏幕上，再钉一行只是重复。
+   *
+   * 这里只画一份副本：正文里的用户消息照旧留在原处，不挪走、不塌陷，所以
+   * 回看时看到的还是完整的一轮。提交下一轮后新消息落在窗口底部（可见），
+   * 条件自然不成立，吸顶自动消失 —— 不需要额外的"什么时候解除"状态。
+   */
+  #pinnedUser(
+    windowStart: number,
+    width: number,
+  ): { line: string; msgid?: MsgId; undoMsgid?: MsgId } | undefined {
+    const items = this.#transcript.items;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]!;
+      if (item.kind !== "user") continue;
+      const block = this.#layout.blocks[index];
+      if (!shouldPinUserMessage(block?.contentEnd, windowStart)) return undefined;
+      const msgid = displayMsgId(item);
+      const undoMsgid = displayActionMsgId(item);
+      return {
+        line: composeUserBand(item.text, width),
+        ...(msgid !== undefined ? { msgid } : {}),
+        ...(undoMsgid !== undefined ? { undoMsgid } : {}),
+      };
+    }
+    return undefined;
   }
 
   #renderItem(item: DisplayItem, width: number): string[] {
