@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -151,6 +151,60 @@ describe("P7 · edit_file", () => {
 
     expect(out).toContain("替换 2 处");
     expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("y\ny\n");
+  });
+
+  test("new_string 中的 $ 替换模板按字面量写入", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "a.txt"), "token\n");
+
+    await editTool.run(
+      { path: "a.txt", old_string: "token", new_string: "$& $$ $1 $`" },
+      ctxFor(cwd),
+    );
+
+    expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("$& $$ $1 $`\n");
+  });
+
+  test("编辑保留原文件权限", async () => {
+    if (process.platform === "win32") return;
+    const cwd = await workspace();
+    const path = join(cwd, "script.sh");
+    await writeFile(path, "#!/bin/sh\necho old\n", "utf8");
+    await chmod(path, 0o755);
+
+    await editTool.run(
+      { path: "script.sh", old_string: "old", new_string: "new" },
+      ctxFor(cwd),
+    );
+
+    expect((await stat(path)).mode & 0o777).toBe(0o755);
+    expect(await readFile(path, "utf8")).toContain("echo new");
+  });
+
+  test("拒绝编辑二进制文件", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "bin.dat"), Buffer.from([0x00, 0x41, 0x42]));
+
+    await expect(
+      editTool.run({ path: "bin.dat", old_string: "A", new_string: "B" }, ctxFor(cwd)),
+    ).rejects.toThrow(/二进制/);
+  });
+
+  test("replace_all 非 boolean 时拒绝", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "a.txt"), "x\n");
+
+    await expect(
+      editTool.run(
+        {
+          path: "a.txt",
+          old_string: "x",
+          new_string: "y",
+          replace_all: "true" as unknown as boolean,
+        },
+        ctxFor(cwd),
+      ),
+    ).rejects.toThrow(/replace_all 必须是 boolean/);
   });
 
   test("空 old_string 与无变化替换被拒绝", async () => {

@@ -9,7 +9,7 @@
  */
 
 import { statSync } from "node:fs";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { JSONSchema } from "../provider/types.ts";
 import type { ResourceClaim } from "./locks.ts";
@@ -422,26 +422,29 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
 
     async run(input: EditFileInput, ctx: ToolCtx): Promise<string> {
       const rawPath = requireString(input.path, "path");
+      if (rawPath.length === 0) throw new Error("path 不能为空");
       const oldString = requireString(input.old_string, "old_string");
       const newString = requireString(input.new_string, "new_string");
-
-      if (oldString.length === 0) {
-        throw new Error("old_string 不能为空");
-      }
+      if (oldString.length === 0) throw new Error("old_string 不能为空");
       if (oldString === newString) {
         throw new Error("old_string 与 new_string 相同，无需修改");
+      }
+      if (input.replace_all !== undefined && typeof input.replace_all !== "boolean") {
+        throw new Error("replace_all 必须是 boolean");
       }
 
       const replaceAll = input.replace_all === true;
       const absolute = resolveWithin(ctx.cwd, rawPath);
       const display = relativeTo(ctx.cwd, absolute);
 
-      const file = Bun.file(absolute);
-      if (!(await file.exists())) {
-        throw new Error(`文件不存在：${display}`);
-      }
+      const fileStat = await stat(absolute).catch(() => undefined);
+      if (fileStat === undefined) throw new Error(`文件不存在：${display}`);
+      if (!fileStat.isFile()) throw new Error(`不是普通文件：${display}`);
 
-      const original = await file.text();
+      const original = await Bun.file(absolute).text();
+      if (original.includes("\0")) {
+        throw new Error(`拒绝编辑二进制文件：${display}`);
+      }
       const occurrences = countOccurrences(original, oldString);
 
       if (occurrences === 0) {
@@ -454,13 +457,24 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
         );
       }
 
+      // Do not use String.replace(search, replacement): `$&`, `$1`, `$'`
+      // would be interpreted as replacement templates instead of literal text.
       const updated = replaceAll
         ? original.split(oldString).join(newString)
-        : original.replace(oldString, newString);
+        : (() => {
+            const index = original.indexOf(oldString);
+            return original.slice(0, index) + newString + original.slice(index + oldString.length);
+          })();
+      const updatedBytes = Buffer.byteLength(updated, "utf8");
+      if (updatedBytes > MAX_WRITE_BYTES) {
+        throw new Error(`编辑后内容过大：${updatedBytes} 字节，上限 ${MAX_WRITE_BYTES}`);
+      }
 
       const temp = `${absolute}.bugent-tmp-${process.pid}-${Date.now()}`;
+      const mode = fileStat.mode & 0o777;
       try {
-        await writeFile(temp, updated, "utf8");
+        await writeFile(temp, updated, { encoding: "utf8", mode });
+        await chmod(temp, mode);
         await rename(temp, absolute);
       } catch (error) {
         await unlink(temp).catch(() => {});
