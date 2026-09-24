@@ -676,6 +676,12 @@ export class GoalRepository {
     return rows.map(rowToGoal);
   }
 
+  /** 用户显式 clear：只删除 Goal 聚合，不删除消息历史。 */
+  deleteGoal(goalId: string): boolean {
+    const result = this.#db.query("DELETE FROM session_goals WHERE goal_id = ?").run(goalId);
+    return result.changes > 0;
+  }
+
   updateGoalContract(goalId: string, patch: GoalContractPatch): Goal {
     const current = this.requireGoal(goalId);
     if (current.status === "complete") {

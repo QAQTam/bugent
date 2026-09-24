@@ -211,6 +211,8 @@ P6 已接线：
 - `/goal finalize` 对所有 success criteria 做 goal-level 独立审计。
 - 最后一个 Checkpoint 完成只进入 `checkpoint_audit`，不能直接完成 Goal。
 - final audit 失败会回到 `executing`，不会把未覆盖的目标标记为完成。
+- `/goal edit` 只能在 contract 尚未进入 planning 前修改。
+- `/goal clear` 需确认，只删除 Goal 聚合，不删除对话历史或 Handoff 文件。
 - 恢复 session/runtime 时会幂等补回 goal/plan/todo 上下文。
 
 ## 当前进度

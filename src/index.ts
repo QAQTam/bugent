@@ -107,6 +107,8 @@ TUI 内：
   /goal finalize    执行最终完成审计
   /goal pause       暂停 Goal
   /goal resume      恢复 Goal
+  /goal edit        编辑未进入 planning 的 Goal Contract
+  /goal clear       清除 Goal 聚合（保留对话）
   /mode <mode>      切换当前 session 的沙箱档位
   /new              新建会话
   /exit             退出

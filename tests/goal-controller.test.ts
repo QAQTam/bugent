@@ -294,6 +294,35 @@ describe("Goal P1 · controller", () => {
     expect(wrongCheckpoint.output).toContain("当前 Checkpoint");
   });
 
+  test("用户可编辑未规划 Goal Contract，clear 只删除 Goal 聚合", async () => {
+    const { session, controller } = await setup();
+    controller.repository.createGoal({
+      id: "draft-goal",
+      sessionId: "s1",
+      rawIntent: "原始目标",
+      objective: "原始目标",
+      successCriteria: [{ id: "SC-1", text: "旧标准", evidenceRequired: ["test"] }],
+      phase: "draft",
+    });
+    const beforeMessages = session.messages.length;
+
+    const edited = controller.editContract({
+      rawIntent: "更新目标",
+      objective: "更新后的目标",
+      successCriteria: ["新标准"],
+      constraints: ["新约束"],
+      nonGoals: [],
+    });
+    expect(edited.objective).toBe("更新后的目标");
+    expect(edited.successCriteria[0]?.text).toBe("新标准");
+    expect(session.messages.length).toBeGreaterThan(beforeMessages);
+
+    const cleared = controller.clearGoal();
+    expect(cleared).toBe("draft-goal");
+    expect(controller.currentGoal()).toBeUndefined();
+    expect(session.messages.length).toBeGreaterThan(beforeMessages);
+  });
+
   test("pause/resume 是用户控制；模型 complete 仍受 final audit 门禁", async () => {
     const { controller } = await setup();
     controller.authorizeCreate();

@@ -993,6 +993,42 @@ export class GoalController {
     return this.#userStatus("paused", reason);
   }
 
+  editContract(input: GoalContractInput): Goal {
+    const goal = this.requireCurrent();
+    if (
+      goal.phase !== "draft" &&
+      goal.phase !== "inspecting" &&
+      goal.phase !== "clarifying"
+    ) {
+      throw new Error("Goal Contract 已进入 planning，不能原地改写；请 clear 后重新初始化");
+    }
+    const updated = this.repository.updateGoalContract(goal.id, {
+      rawIntent: input.rawIntent,
+      objective: input.objective,
+      successCriteria: input.successCriteria.map((text, index) => ({
+        id: criterionId(index),
+        text,
+        evidenceRequired: ["command/test/file/runtime evidence"],
+      })),
+      ...(input.constraints !== undefined ? { constraints: input.constraints } : {}),
+      ...(input.nonGoals !== undefined ? { nonGoals: input.nonGoals } : {}),
+      ...(input.riskPolicy !== undefined ? { riskPolicy: input.riskPolicy } : {}),
+      ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+    });
+    this.session.appendGoalContext(renderGoalContract(updated));
+    return updated;
+  }
+
+  clearGoal(): string {
+    const goal = this.requireCurrent();
+    if (!this.repository.deleteGoal(goal.id)) throw new Error(`删除 Goal 失败：${goal.id}`);
+    this.session.enqueueInjection(
+      `# Goal Cleared\n\n- Goal ID: ${goal.id}\n- 用户显式清除 Goal 聚合；对话历史与 Handoff 文件保留。`,
+      "system",
+    );
+    return goal.id;
+  }
+
   progressFingerprint(): string {
     const goal = this.currentGoal();
     if (goal === undefined) return "none";

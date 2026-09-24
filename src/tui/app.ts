@@ -1254,13 +1254,79 @@ export class TuiApp implements TuiInteraction {
       }
       return;
     }
+    if (argument === "edit") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+        this.#render(true);
+        return;
+      }
+      const objective = await this.#promptText(`Goal objective（当前：${goal.objective}）`);
+      if (objective === undefined) return;
+      const criteriaText = await this.#promptText("成功标准（用 ; 分隔）");
+      if (criteriaText === undefined) return;
+      const constraintsText = await this.#promptText("约束（用 ; 分隔，可留空）");
+      const nonGoalsText = await this.#promptText("非目标（用 ; 分隔，可留空）");
+      const split = (value: string | undefined): string[] =>
+        (value ?? "")
+          .split(";")
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0);
+      try {
+        controller.editContract({
+          rawIntent: goal.rawIntent,
+          objective,
+          successCriteria: split(criteriaText),
+          constraints: split(constraintsText),
+          nonGoals: split(nonGoalsText),
+          riskPolicy: goal.riskPolicy,
+          ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
+        });
+        this.#refreshGoalStatus();
+        this.#transcript.pushNotice("Goal Contract 已更新。");
+      } catch (error) {
+        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      }
+      this.#render(true);
+      return;
+    }
+    if (argument === "clear") {
+      if (goal === undefined) {
+        this.#transcript.pushError("当前 session 没有 Goal");
+        this.#render(true);
+        return;
+      }
+      const confirmed = await this.#openDialog({
+        title: "清除 Goal",
+        body: [
+          `将删除 Goal ${goal.id} 的 Checkpoint、Evidence、Review 元数据。`,
+          "对话消息与 Handoff 文件会保留。",
+        ],
+        hint: `${DIM}Esc / Enter 取消${RESET}`,
+        actions: [
+          { label: "清除", value: true, tone: "error", shortcut: "y" },
+          { label: "取消", value: false, tone: "neutral", shortcut: "n" },
+        ],
+      });
+      if (confirmed) {
+        try {
+          const cleared = controller.clearGoal();
+          this.#goalContinuationStreak = 0;
+          this.#refreshGoalStatus();
+          this.#transcript.pushNotice(`Goal 已清除：${cleared}`);
+        } catch (error) {
+          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+        }
+        this.#render(true);
+      }
+      return;
+    }
     if (argument === "status" || (goal !== undefined && argument.length === 0)) {
       await this.#showGoalStatus();
       return;
     }
     if (goal !== undefined) {
       this.#transcript.pushError(
-        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`。",
+        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`、`/goal edit`、`/goal clear`。",
       );
       this.#render(true);
       return;
