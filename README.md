@@ -350,6 +350,22 @@ TUI 展示仍保持 O(1) 内存：只保留当前思考行，输入框上方固�
 ✻ 思考 The riddle: "一个农夫有17只羊…        ← 菊花动画，超宽时滚动
 ```
 
+菊花同时代表 agent 活动状态，而不只是 reasoning：
+
+```text
+✻ 等待模型 · 连接模型
+✻ 思考 · reasoning 尾部
+✻ 生成回复
+✻ 执行工具 · bash
+✻ 重试 · 重新请求
+✖ 已断开 · 真实错误
+■ 已中止 · 用户中断
+○ idle
+```
+
+因此 bash、MCP 或 skill 长时间执行时，即使没有 reasoning，菊花仍会持续动画；
+断线后会停止并保留红色错误状态，不会伪装成 idle。
+
 遇到 `\n` 就销毁当前行重新开始。持久化的 reasoning 用于协议回放，不用于展开思考全文。
 
 > `deepseek-v4.1-flash` 需要显式设置 `extra_body = { reasoning_effort = "high" }`

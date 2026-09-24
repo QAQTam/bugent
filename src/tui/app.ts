@@ -45,7 +45,13 @@ import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
-import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
+import {
+  composeThinkingBlock,
+  isSpinningActivity,
+  ThinkingBuffer,
+  THINKING_BLOCK_ROWS,
+  type AgentActivity,
+} from "./thinking.ts";
 import { TranscriptLayout, maxScrollOffset } from "./transcript-layout.ts";
 import { composeCenteredButton, composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
 import { hitTest, type HitRegion } from "./hit.ts";
@@ -272,6 +278,8 @@ export class TuiApp implements TuiInteraction {
   #layout = new TranscriptLayout<DisplayItem>();
   /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
   #thinking = new ThinkingBuffer();
+  /** Agent 的运行状态；spinner 代表 alive/working，而不是只看 reasoning。 */
+  #activity: AgentActivity = { state: "idle" };
   /** 菊花帧；只在 thinking.active 时驱动。 */
   #thinkingFrame = 0;
   #thinkingTimer: ReturnType<typeof setInterval> | undefined;
@@ -1893,7 +1901,7 @@ export class TuiApp implements TuiInteraction {
         case "retry": {
           const plan = this.#branchService.retryFrom(this.#session.id, menu.msgid);
           if (this.#switchRuntime(plan.branchId, `正在从 #${plan.userMsgid} 重试`)) {
-            void this.#runTurn(plan.input);
+            void this.#runTurn(plan.input, true);
           }
           return;
         }
@@ -2031,6 +2039,7 @@ export class TuiApp implements TuiInteraction {
       }));
     } else if (this.#mcp?.disabledReason === undefined) this.#mcp = undefined;
     this.#skillStatus = runtime.skillStatus;
+    this.#activity = { state: "idle" };
     this.#lastAssistantMsgid = undefined;
   }
 
@@ -2070,12 +2079,16 @@ export class TuiApp implements TuiInteraction {
 
   /* --------------------------- 对话推进 --------------------------- */
 
-  async #runTurn(input: string): Promise<void> {
+  async #runTurn(input: string, retry = false): Promise<void> {
     const controller = new AbortController();
     this.#busy = true;
     this.#abort = controller;
     this.#thinking.reset();
+    this.#activity = retry
+      ? { state: "retrying", detail: "重新请求" }
+      : { state: "waiting", detail: "连接模型" };
     this.#stopThinkingAnimation();
+    this.#syncThinkingAnimation();
     this.#render();
     this.#syncTodoShimmer();
 
@@ -2086,25 +2099,29 @@ export class TuiApp implements TuiInteraction {
       },
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
-        this.#scheduleRender();
+        this.#setActivity({ state: "responding", detail: "生成回复" });
       },
       // 思考链路：只进滚动缓冲，不进消息区、不落库
       onReasoning: (delta) => {
         this.#thinking.push(delta);
-        this.#scheduleRender();
+        this.#setActivity({ state: "thinking", detail: "推理中" });
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
       onAssistant: (message) => {
         // reasoning 不落 msgid；assistant 消息边界就是思考链路的生命周期边界。
         this.#thinking.reset();
-        this.#stopThinkingAnimation();
         this.#lastAssistantMsgid = message.msgid;
         this.#transcript.endAssistant(message.msgid);
+        this.#setActivity(
+          message.toolCalls !== undefined && message.toolCalls.length > 0
+            ? { state: "tool", detail: message.toolCalls.map((call) => call.name).join(", ") }
+            : { state: "waiting", detail: "整理回复" },
+        );
       },
       onToolCall: (call) => {
         this.#transcript.startTool(call, this.#lastAssistantMsgid);
-        this.#scheduleRender();
+        this.#setActivity({ state: "tool", detail: call.name });
       },
       // 运行中的流式输出：只保留末尾若干行，内存有界
       onToolProgress: (call, chunk, stream) => {
@@ -2123,18 +2140,22 @@ export class TuiApp implements TuiInteraction {
           message?.msgid,
           result.presentation,
         );
+        this.#setActivity({ state: "waiting", detail: "读取工具结果" });
         this.#syncTodoShimmer();
-        this.#scheduleRender();
       },
       onUsage: (usage) => {
         this.#usage = Transcript.mergeUsage(this.#usage, usage);
         this.#scheduleRender();
       },
-      onExtensionRoleFallback: (error) => this.#confirmExtensionRoleFallback(error),
+      onExtensionRoleFallback: async (error) => {
+        this.#setActivity({ state: "retrying", detail: "兼容性重发" });
+        return this.#confirmExtensionRoleFallback(error);
+      },
     };
     const hooks = combineHooks(uiHooks, this.#audit?.hooks());
 
     let completed = false;
+    let failure: string | undefined;
     try {
       // runUserTurn 负责把用户消息写进 session —— 不要绕过它直接调 runTurn
       const result = await runUserTurn(this.#session, input, {
@@ -2144,16 +2165,26 @@ export class TuiApp implements TuiInteraction {
         signal: controller.signal,
       });
       completed = result.reason !== "error";
+      if (!completed) failure = "请求未完成";
     } catch (error) {
-      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      failure = error instanceof Error ? error.message : String(error);
+      this.#transcript.pushError(failure);
     } finally {
       const aborted = controller.signal.aborted;
       this.#transcript.endAssistant();
       this.#thinking.reset();
-      this.#stopThinkingAnimation();
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
+
+      if (aborted) {
+        this.#activity = { state: "aborted", detail: "用户中断" };
+      } else if (failure !== undefined) {
+        this.#activity = { state: "disconnected", detail: failure };
+      } else {
+        this.#activity = { state: "idle" };
+      }
+      this.#stopThinkingAnimation();
 
       const queued = this.#session.queuedUserCount;
       if (aborted && queued > 0) {
@@ -2194,9 +2225,15 @@ export class TuiApp implements TuiInteraction {
     });
   }
 
-  /** 思考中的菊花动画；没有 reasoning 时不常驻定时器。 */
+  #setActivity(activity: AgentActivity, render = true): void {
+    this.#activity = activity;
+    this.#syncThinkingAnimation();
+    if (render) this.#scheduleRender();
+  }
+
+  /** 工作中的菊花动画；没有 active work 时不常驻定时器。 */
   #syncThinkingAnimation(): void {
-    const active = this.#busy && this.#thinking.active;
+    const active = this.#busy && isSpinningActivity(this.#activity);
     if (!active) {
       this.#stopThinkingAnimation();
       return;
@@ -2204,7 +2241,7 @@ export class TuiApp implements TuiInteraction {
     if (this.#thinkingTimer !== undefined) return;
 
     this.#thinkingTimer = setInterval(() => {
-      if (!this.#busy || !this.#thinking.active) {
+      if (!this.#busy || !isSpinningActivity(this.#activity)) {
         this.#stopThinkingAnimation();
         return;
       }
@@ -2305,6 +2342,7 @@ export class TuiApp implements TuiInteraction {
         : composeThinkingBlock(this.#thinking, width, {
             rows: thinkingRows,
             frame: this.#thinkingFrame,
+            activity: this.#activity,
           });
 
     // sticky 待办面板：不能吃掉太多屏幕，最多占 40% 且必须给消息区留位置。
@@ -2531,7 +2569,7 @@ export class TuiApp implements TuiInteraction {
     const queueTag = queued > 0 ? ` ${fg(COLOR.warn)}[已排队 ${queued}]${RESET}` : "";
     const right = this.#busy
       ? `${fg(COLOR.busy)}● 运行中${RESET}${queueTag}`
-      : `${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${
+      : `${fg(COLOR.ok)}○ idle${RESET} ${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${
           this.#usage.cached !== undefined ? ` ⚡${this.#usage.cached}` : ""
         }${RESET}${queueTag}`;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));

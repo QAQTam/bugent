@@ -11,7 +11,7 @@
 
 ```bash
 bun test
-# 512 pass / 0 fail
+# 514 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -519,10 +519,10 @@ bun run package:bugent
 
 ```text
 dist/bugent/bugent-0.0.0-linux-x64/bugent
-sha256: f93a5478f544e768ed9334958821e6cc7e764d5080d7900f4d7214e52196946e
+sha256: d355dc91674209c598a73e7e948044f8d3b59b10c9735835ffba1afc12f3b3f1
 
 dist/bugent/bugent-0.0.0-linux-x64.tar.gz
-sha256: a8d7f7f43d87585050fcdafef9fd1e1fa3d58aed5f65bb4c5645caa898f24813
+sha256: dc6484fa61c67fd8300a1138e1513ddb1b79de09e65d71030230bbe3d1eaabc6
 ```
 
 构建工具链注意：
@@ -584,7 +584,7 @@ MCP 接线：
 
 ```text
 bun test
-# 512 pass / 0 fail
+# 514 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -677,7 +677,34 @@ tests/scrollbar.test.ts   纯数学与渲染回归
 tests/tui-pty.test.ts     真实 SGR 拖动后 chat 到达“查看更多消息”
 ```
 
-## 10.6 buTUI experimental entry
+## 10.6 Agent activity spinner
+
+菊花不再只代表 reasoning，而是代表 agent 是否仍在工作：
+
+```text
+idle          ○ idle（状态栏），思考区为空
+waiting       ✻ 等待模型 · 连接模型 / 读取工具结果
+thinking      ✻ 思考 · reasoning 尾部
+responding    ✻ 生成回复
+tool          ✻ 执行工具 · bash / mcp__... / skill__...
+retrying      ✻ 重试 · 手动 retry / developer role 兼容性重发
+disconnected  ✖ 已断开 · 真实错误文本
+aborted       ■ 已中止 · 用户中断
+```
+
+状态来源：
+
+- `#runTurn` 开始时进入 `waiting`；
+- `onReasoning` / `onText` 切换 `thinking` / `responding`；
+- `onAssistant` 清 reasoning buffer，但不清 agent activity；
+- `onToolCall` 进入 `tool`，`onToolResult` 回到 `waiting`；
+- 手动 retry 和 developer role 兼容性回退进入 `retrying`；
+- catch / `reason=error` 进入 `disconnected`，abort 进入 `aborted`；
+- turn 正常结束进入 `idle`。
+
+因此 bash、MCP、skill load 等长时间工具执行期间，即使没有 reasoning，菊花仍持续动画；断线后菊花停止并保留红色 `✖ 已断开`，不会伪装成 idle。
+
+## 10.7 buTUI experimental entry
 
 已引入独立实验入口，现有 `src/tui` 仍为默认 UI，两套 UI 并行维护：
 

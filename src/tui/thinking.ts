@@ -33,6 +33,26 @@ export const THINKING_LINE_INDEX = 1;
 /** Claude Code 风格的菊花闪烁帧。 */
 export const THINKING_FRAMES = ["✻", "✽", "✶", "✳", "✢"] as const;
 
+export type AgentActivity =
+  | { state: "idle" }
+  | { state: "waiting"; detail?: string }
+  | { state: "thinking"; detail?: string }
+  | { state: "responding"; detail?: string }
+  | { state: "tool"; detail?: string }
+  | { state: "retrying"; detail?: string }
+  | { state: "disconnected"; detail?: string }
+  | { state: "aborted"; detail?: string };
+
+export function isSpinningActivity(activity: AgentActivity): boolean {
+  return (
+    activity.state === "waiting" ||
+    activity.state === "thinking" ||
+    activity.state === "responding" ||
+    activity.state === "tool" ||
+    activity.state === "retrying"
+  );
+}
+
 export class ThinkingBuffer {
   #current = "";
   #active = false;
@@ -91,36 +111,112 @@ export function tailToWidth(text: string, width: number): { text: string; trunca
 }
 
 /**
- * 生成预留区的 5 行。不思考时返回全空行（保持输入框上方的呼吸空间）。
+ * 生成预留区。默认保持原有 reasoning-only 行为；传入 activity 后，菊花代表
+ * agent 是否仍在工作，即使没有 reasoning 或正在跑工具也不会消失。
  */
 export function composeThinkingBlock(
   buffer: ThinkingBuffer,
   width: number,
-  options: { rows?: number; lineIndex?: number; frame?: number } = {},
+  options: {
+    rows?: number;
+    lineIndex?: number;
+    frame?: number;
+    activity?: AgentActivity;
+  } = {},
 ): string[] {
   const rows = Math.max(1, options.rows ?? THINKING_BLOCK_ROWS);
   const lineIndex = Math.min(options.lineIndex ?? THINKING_LINE_INDEX, rows - 1);
   const lines: string[] = Array.from({ length: rows }, () => "");
-
-  if (!buffer.active) return lines;
-
+  const activity = options.activity;
   const frameIndex = Math.abs(Math.floor(options.frame ?? 0)) % THINKING_FRAMES.length;
   const frame = THINKING_FRAMES[frameIndex]!;
-  const label = `${frame} 思考 `;
-  const labelWidth = Bun.stringWidth(label);
 
-  // 省略号那一格必须算进预算，否则整体宽度会超 1 格 —— 在 TUI 里就是错位
-  const budget = Math.max(1, width - labelWidth);
-  const truncated = Bun.stringWidth(buffer.current) > budget;
-  const available = truncated ? Math.max(1, budget - 1) : budget;
+  if (activity === undefined) {
+    if (!buffer.active) return lines;
+    lines[lineIndex] = renderActivityLine({
+      width,
+      frame,
+      frameIndex,
+      label: "思考",
+      text: buffer.current,
+      tone: "reasoning",
+    });
+    return lines;
+  }
 
-  const { text } = tailToWidth(buffer.current, available);
-  const prefix = truncated ? "…" : "";
-  const spinner = `${BOLD}${fg(
-    frameIndex % 2 === 0 ? COLOR.reasoningSpinner : COLOR.reasoningSpinnerDim,
-  )}${frame}${RESET}`;
-  const body = `${spinner} ${fg(COLOR.reasoning)}思考 ${prefix}${text}${RESET}`;
+  if (activity.state === "idle") return lines;
 
-  lines[lineIndex] = body;
+  if (activity.state === "disconnected" || activity.state === "aborted") {
+    const disconnected = activity.state === "disconnected";
+    lines[lineIndex] = renderActivityLine({
+      width,
+      frame: disconnected ? "✖" : "■",
+      frameIndex: 0,
+      label: disconnected ? "已断开" : "已中止",
+      text: activity.detail ?? "",
+      tone: disconnected ? "error" : "warn",
+    });
+    return lines;
+  }
+
+  const label =
+    activity.state === "waiting"
+      ? "等待模型"
+      : activity.state === "responding"
+        ? "生成回复"
+        : activity.state === "tool"
+          ? "执行工具"
+          : activity.state === "retrying"
+            ? "重试"
+            : "思考";
+  const text =
+    activity.state === "thinking"
+      ? activity.detail ?? buffer.current
+      : activity.detail ?? "";
+  lines[lineIndex] = renderActivityLine({
+    width,
+    frame,
+    frameIndex,
+    label,
+    text,
+    tone: activity.state === "tool" ? "tool" : activity.state === "retrying" ? "warn" : "reasoning",
+  });
   return lines;
+}
+
+function renderActivityLine(options: {
+  width: number;
+  frame: string;
+  frameIndex: number;
+  label: string;
+  text: string;
+  tone: "reasoning" | "tool" | "warn" | "error";
+}): string {
+  const labelText = `${options.frame} ${options.label} `;
+  const labelWidth = Bun.stringWidth(labelText);
+  const budget = Math.max(1, options.width - labelWidth);
+  const truncated = Bun.stringWidth(options.text) > budget;
+  const available = truncated ? Math.max(1, budget - 1) : budget;
+  const { text } = tailToWidth(options.text, available);
+  const prefix = truncated ? "…" : "";
+  const spinnerColor =
+    options.tone === "error"
+      ? COLOR.error
+      : options.tone === "warn"
+        ? COLOR.warn
+        : options.tone === "tool"
+          ? COLOR.tool
+          : options.frameIndex % 2 === 0
+            ? COLOR.reasoningSpinner
+            : COLOR.reasoningSpinnerDim;
+  const bodyColor =
+    options.tone === "error"
+      ? COLOR.error
+      : options.tone === "warn"
+        ? COLOR.warn
+        : options.tone === "tool"
+          ? COLOR.tool
+          : COLOR.reasoning;
+  const spinner = `${BOLD}${fg(spinnerColor)}${options.frame}${RESET}`;
+  return `${spinner} ${fg(bodyColor)}${options.label} ${prefix}${text}${RESET}`;
 }

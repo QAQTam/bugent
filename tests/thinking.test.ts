@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   composeThinkingBlock,
+  isSpinningActivity,
   tailToWidth,
   ThinkingBuffer,
   THINKING_BLOCK_ROWS,
   THINKING_FRAMES,
   THINKING_LINE_INDEX,
+  type AgentActivity,
 } from "../src/tui/thinking.ts";
 import { mapStreamEvent } from "../src/provider/adapters/openai-chat.ts";
 import type { ChatChunk } from "../src/provider/types.ts";
@@ -127,6 +129,41 @@ describe("思考链路 · 区块渲染", () => {
     const lines = composeThinkingBlock(buffer, 40, { rows: 3, lineIndex: 0 });
     expect(lines).toHaveLength(3);
     expect(lines[0]).toContain("x");
+  });
+
+  test("agent activity 在没有 reasoning 时也显示工作状态", () => {
+    const cases: Array<[AgentActivity, string]> = [
+      [{ state: "waiting", detail: "连接模型" }, "等待模型"],
+      [{ state: "responding", detail: "生成回复" }, "生成回复"],
+      [{ state: "tool", detail: "bash" }, "执行工具"],
+      [{ state: "retrying", detail: "重新请求" }, "重试"],
+    ];
+
+    for (const [activity, label] of cases) {
+      const line = composeThinkingBlock(new ThinkingBuffer(), 80, {
+        activity,
+        frame: 0,
+      })[THINKING_LINE_INDEX]!;
+      expect(line).toContain(label);
+      expect(line).toContain(THINKING_FRAMES[0]);
+    }
+    expect(isSpinningActivity({ state: "tool", detail: "bash" })).toBe(true);
+    expect(isSpinningActivity({ state: "idle" })).toBe(false);
+  });
+
+  test("disconnect / abort 保留静态终态，不继续动画", () => {
+    const disconnected = composeThinkingBlock(new ThinkingBuffer(), 80, {
+      activity: { state: "disconnected", detail: "ECONNRESET" },
+    })[THINKING_LINE_INDEX]!;
+    const aborted = composeThinkingBlock(new ThinkingBuffer(), 80, {
+      activity: { state: "aborted", detail: "用户中断" },
+    })[THINKING_LINE_INDEX]!;
+
+    expect(disconnected).toContain("已断开");
+    expect(disconnected).toContain("ECONNRESET");
+    expect(disconnected).not.toContain(THINKING_FRAMES[0]);
+    expect(aborted).toContain("已中止");
+    expect(isSpinningActivity({ state: "disconnected", detail: "x" })).toBe(false);
   });
 });
 
