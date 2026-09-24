@@ -621,3 +621,105 @@ describe("Goal P3 · verification and review", () => {
     expect(result.checkpoint.status).toBe("active");
   });
 });
+
+describe("Goal P5 · continuation accounting", () => {
+  test("执行中可继续，连续三次无进展进入 blocked", async () => {
+    const { session, controller } = await setup();
+    prepareExecutingCheckpoint(controller);
+    expect(controller.canAutoContinue()).toEqual({ allowed: true });
+
+    const start = controller.beginContinuation();
+    expect(controller.currentGoal()?.continuationCount).toBe(1);
+    expect(session.messages.at(-1)?.injectionSource).toBe("goal");
+
+    const first = controller.completeTurn({
+      turnId: "g1",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 10, output: 5 },
+      fingerprintBefore: start.fingerprint,
+    });
+    expect(first.outcome).toBe("no_progress");
+    expect(first.blockedStreak).toBe(1);
+
+    controller.completeTurn({
+      turnId: "g2",
+      startedAt: 1000,
+      endedAt: 2000,
+      usage: { input: 10, output: 5 },
+      fingerprintBefore: controller.progressFingerprint(),
+    });
+    const third = controller.completeTurn({
+      turnId: "g3",
+      startedAt: 2000,
+      endedAt: 3000,
+      usage: { input: 10, output: 5 },
+      fingerprintBefore: controller.progressFingerprint(),
+    });
+    expect(third.blocked).toBe(true);
+    expect(controller.currentGoal()?.status).toBe("blocked");
+    expect(controller.currentGoal()?.tokensUsed).toBe(45);
+  });
+
+  test("waiting_user 会暂停自动 continuation，直到用户输入", async () => {
+    const { controller } = await setup();
+    prepareExecutingCheckpoint(controller);
+    controller.deferForUser();
+    expect(controller.canAutoContinue()).toEqual({
+      allowed: false,
+      reason: "waiting for user",
+    });
+    controller.clearUserDeferral();
+    expect(controller.canAutoContinue()).toEqual({ allowed: true });
+  });
+
+  test("达到 token budget 会停止 continuation", async () => {
+    const { controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证预算停止",
+      successCriteria: ["停止"],
+      tokenBudget: 10,
+    });
+    controller.applyPlan({
+      phases: [
+        {
+          id: "p1",
+          title: "预算",
+          objective: "达到预算",
+          checkpointIds: ["cp1"],
+          dependsOn: [],
+          risks: [],
+          verification: ["test"],
+        },
+      ],
+      checkpoints: [
+        {
+          id: "cp1",
+          order: 1,
+          title: "预算",
+          deliverable: "stop",
+          acceptanceCriteria: ["stop"],
+          evidenceRequired: ["test"],
+        },
+      ],
+    });
+    controller.writeTodos({
+      checkpointId: "cp1",
+      todos: [{ id: "t1", content: "执行", status: "in_progress" }],
+    });
+    expect(controller.canAutoContinue()).toEqual({ allowed: true });
+    const start = controller.beginContinuation();
+    const completion = controller.completeTurn({
+      turnId: "budget-turn",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 6, output: 4 },
+      fingerprintBefore: start.fingerprint,
+    });
+    expect(completion.budgetLimited).toBe(true);
+    expect(controller.currentGoal()?.status).toBe("budget_limited");
+    expect(controller.canAutoContinue().allowed).toBe(false);
+  });
+});

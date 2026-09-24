@@ -412,6 +412,12 @@ async function main(): Promise<void> {
           store,
           cwd: options.cwd,
           handoffRoot: defaultHandoffRoot(),
+          ...(config.goals?.reviewPolicy !== undefined
+            ? { defaultReviewPolicy: config.goals.reviewPolicy }
+            : {}),
+          ...(config.goals?.maxGoalTokenBudget !== undefined
+            ? { maxTokenBudget: config.goals.maxGoalTokenBudget }
+            : {}),
           reviewRunner: createReadOnlyReviewRunner({
             client,
             model: effectiveModel,
@@ -514,6 +520,10 @@ async function main(): Promise<void> {
           credentials.delete(sessionId, providerId),
         mode: tools.mode,
         ...(goalController !== undefined ? { goalController } : {}),
+        goalAutoContinue: config.goals?.autoContinue ?? false,
+        ...(config.goals?.maxConsecutiveTurns !== undefined
+          ? { maxGoalContinuationTurns: config.goals.maxConsecutiveTurns }
+          : {}),
         ...(startedMcp.manager !== undefined
           ? { mcp: startedMcp.manager.status(initialMcpServerIds) }
           : startedMcp.disabledReason !== undefined
@@ -624,6 +634,12 @@ async function main(): Promise<void> {
                   skillManager: startedSkills.manager,
                   cwd: options.cwd,
                   store,
+                  ...(config.goals?.reviewPolicy !== undefined
+                    ? { goalDefaultReviewPolicy: config.goals.reviewPolicy }
+                    : {}),
+                  ...(config.goals?.maxGoalTokenBudget !== undefined
+                    ? { maxGoalTokenBudget: config.goals.maxGoalTokenBudget }
+                    : {}),
                   mode: runtimeMode,
                   ...(config.sandbox?.writablePaths !== undefined
                     ? { writablePaths: config.sandbox.writablePaths }

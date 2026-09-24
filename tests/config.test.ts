@@ -52,4 +52,36 @@ server_name = "api.internal"
       parseConfigToml(configWithProvider(`reasoning_replay = "invalid"`)),
     ).toThrow(/reasoning_replay/);
   });
+
+  test("解析 Goal Mode 配置并拒绝非法值", () => {
+    const config = parseConfigToml(
+      configWithProvider(`
+[goals]
+enabled = false
+auto_continue = true
+max_consecutive_turns = 12
+max_goal_token_budget = 50000
+context_refresh = "manual"
+handoff_inline_bytes = 16384
+review_policy = "high"
+review_model = "openai/reviewer"
+`),
+    );
+    expect(config.goals).toEqual({
+      enabled: false,
+      autoContinue: true,
+      maxConsecutiveTurns: 12,
+      maxGoalTokenBudget: 50000,
+      contextRefresh: "manual",
+      handoffInlineBytes: 16384,
+      reviewPolicy: "high",
+      reviewModel: "openai/reviewer",
+    });
+    expect(() =>
+      parseConfigToml(configWithProvider(`[goals]\nauto_continue = "yes"`)),
+    ).toThrow(/auto_continue/);
+    expect(() =>
+      parseConfigToml(configWithProvider(`[goals]\nreview_policy = "sometimes"`)),
+    ).toThrow(/review_policy/);
+  });
 });

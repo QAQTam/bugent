@@ -9,6 +9,7 @@ import type { ProviderConfig } from "../provider/registry.ts";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import type { SandboxMode } from "../permission/mode.ts";
 import type { McpStdioServerConfig } from "../mcp/stdio.ts";
+import type { ReviewPolicy } from "../goal/types.ts";
 
 export interface AgentConfig {
   /** system prompt Markdown 文件；相对路径按 cwd 解析，支持 ~。 */
@@ -52,6 +53,17 @@ export interface SkillsConfig {
   disabled?: string[];
 }
 
+export interface GoalsConfig {
+  enabled?: boolean;
+  autoContinue?: boolean;
+  maxConsecutiveTurns?: number;
+  maxGoalTokenBudget?: number;
+  contextRefresh?: "checkpoint" | "threshold" | "manual";
+  handoffInlineBytes?: number;
+  reviewPolicy?: ReviewPolicy;
+  reviewModel?: string;
+}
+
 export interface BugentConfig {
   /** 形如 "openai/gpt-4o-mini"。 */
   defaultModel: string;
@@ -61,6 +73,7 @@ export interface BugentConfig {
   sandbox?: SandboxConfig;
   mcp?: McpConfig;
   skills?: SkillsConfig;
+  goals?: GoalsConfig;
 }
 
 export function defineConfig(config: BugentConfig): BugentConfig {

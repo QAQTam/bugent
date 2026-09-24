@@ -8,6 +8,7 @@
 
 import { AgentSession } from "../core/session.ts";
 import { storedText } from "../core/message.ts";
+import type { Usage } from "../provider/types.ts";
 import { createHash } from "node:crypto";
 import type {
   CheckpointDefinition,
@@ -72,6 +73,27 @@ export interface SubmitCheckpointInput {
   remainingRisk?: readonly string[];
 }
 
+export interface GoalContinuationStart {
+  turnId: string;
+  fingerprint: string;
+}
+
+export interface GoalTurnCompletion {
+  outcome: "progress" | "verified_wait" | "no_progress" | "error" | "aborted";
+  blockedStreak: number;
+  blocked: boolean;
+  budgetLimited: boolean;
+}
+
+export interface GoalTurnRecordInput {
+  turnId: string;
+  startedAt: number;
+  endedAt: number;
+  usage: Usage;
+  outcome?: "error" | "aborted";
+  fingerprintBefore?: string;
+}
+
 export interface GoalControllerOptions {
   repository: GoalRepository;
   session: AgentSession;
@@ -79,6 +101,8 @@ export interface GoalControllerOptions {
   cwd?: string;
   handoffRoot?: string;
   reviewRunner?: ReviewRunner;
+  defaultReviewPolicy?: ReviewPolicy;
+  maxTokenBudget?: number;
   now?: () => number;
 }
 
@@ -92,10 +116,14 @@ function normalizeLines(values: readonly string[] | undefined): string[] {
   return (values ?? []).map((value) => value.trim()).filter((value) => value.length > 0);
 }
 
-function defaultRiskPolicy(level: RiskLevel): RiskPolicy {
+function defaultRiskPolicy(
+  level: RiskLevel,
+  reviewPolicyOverride?: ReviewPolicy,
+): RiskPolicy {
   const requireUserApproval = level === "high" || level === "critical";
   const reviewPolicy: ReviewPolicy =
-    level === "critical" ? "always" : level === "high" ? "high" : "medium";
+    reviewPolicyOverride ??
+    (level === "critical" ? "always" : level === "high" ? "high" : "medium");
   return {
     level,
     requireUserApproval,
@@ -340,8 +368,11 @@ export class GoalController {
   readonly cwd: string;
   readonly handoffRoot: string | undefined;
   readonly reviewRunner: ReviewRunner | undefined;
+  readonly defaultReviewPolicy: ReviewPolicy;
+  readonly maxTokenBudget: number | undefined;
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
+  #waitingUser = false;
 
   constructor(options: GoalControllerOptions) {
     this.repository = options.repository;
@@ -350,6 +381,8 @@ export class GoalController {
     this.cwd = options.cwd ?? process.cwd();
     this.handoffRoot = options.handoffRoot;
     this.reviewRunner = options.reviewRunner;
+    this.defaultReviewPolicy = options.defaultReviewPolicy ?? "medium";
+    this.maxTokenBudget = options.maxTokenBudget;
     this.#now = options.now ?? Date.now;
   }
 
@@ -593,6 +626,13 @@ export class GoalController {
     if (input.tokenBudget !== undefined && input.tokenBudget <= 0) {
       throw new Error("Goal token budget 必须大于 0");
     }
+    if (
+      input.tokenBudget !== undefined &&
+      this.maxTokenBudget !== undefined &&
+      input.tokenBudget > this.maxTokenBudget
+    ) {
+      throw new Error(`Goal token budget 不能超过配置上限 ${this.maxTokenBudget}`);
+    }
 
     const successCriteria: Criterion[] = successCriteriaText.map((text, index) => ({
       id: criterionId(index),
@@ -606,7 +646,8 @@ export class GoalController {
       successCriteria,
       constraints: normalizeLines(input.constraints),
       nonGoals: normalizeLines(input.nonGoals),
-      riskPolicy: input.riskPolicy ?? defaultRiskPolicy("medium"),
+      riskPolicy:
+        input.riskPolicy ?? defaultRiskPolicy("medium", this.defaultReviewPolicy),
       ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
       phase: "draft",
     });
@@ -852,6 +893,136 @@ export class GoalController {
 
   pause(reason?: string): Goal {
     return this.#userStatus("paused", reason);
+  }
+
+  progressFingerprint(): string {
+    const goal = this.currentGoal();
+    if (goal === undefined) return "none";
+    const checkpoints = this.repository
+      .listCheckpoints(goal.id)
+      .map((checkpoint) => `${checkpoint.id}:${checkpoint.status}`)
+      .join(",");
+    const todo = this.repository.latestTodoSnapshot(goal.id);
+    const reviews = this.repository
+      .listReviews(goal.id)
+      .map((review) => `${review.id}:${review.status}`)
+      .join(",");
+    const handoff = this.repository.getCanonicalHandoff(goal.id);
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          status: goal.status,
+          phase: goal.phase,
+          activeCheckpointId: goal.activeCheckpointId,
+          checkpoints,
+          todoRevision: todo?.revision ?? 0,
+          evidenceCount: this.repository.listEvidence(goal.id).length,
+          reviews,
+          handoffRevision: handoff?.revision ?? 0,
+        }),
+      )
+      .digest("hex");
+  }
+
+  deferForUser(): void {
+    this.#waitingUser = true;
+  }
+
+  clearUserDeferral(): void {
+    this.#waitingUser = false;
+  }
+
+  get waitingUser(): boolean {
+    return this.#waitingUser;
+  }
+
+  canAutoContinue(): { allowed: boolean; reason?: string } {
+    const goal = this.currentGoal();
+    if (goal === undefined) return { allowed: false, reason: "no goal" };
+    if (this.#waitingUser) return { allowed: false, reason: "waiting for user" };
+    if (goal.status !== "active") return { allowed: false, reason: `status=${goal.status}` };
+    if (goal.phase !== "executing" && goal.phase !== "ready") {
+      return { allowed: false, reason: `phase=${goal.phase}` };
+    }
+    if (goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget) {
+      this.repository.setGoalStatus(goal.id, "budget_limited");
+      return { allowed: false, reason: "budget limited" };
+    }
+    return { allowed: true };
+  }
+
+  beginContinuation(): GoalContinuationStart {
+    const check = this.canAutoContinue();
+    if (!check.allowed) throw new Error(`Goal 当前不能自动继续：${check.reason ?? "unknown"}`);
+    const goal = this.repository.incrementContinuation(this.requireCurrent().id);
+    const handoff = this.repository.getCanonicalHandoff(goal.id);
+    this.session.enqueueInjection(
+      [
+        renderContinuation(goal),
+        ...(handoff === undefined
+          ? []
+          : [`- Latest handoff revision: ${handoff.revision}`, `- Current state: ${handoff.currentState}`]),
+      ].join("\n"),
+      "goal",
+    );
+    return {
+      turnId: `goal-turn-${crypto.randomUUID()}`,
+      fingerprint: this.progressFingerprint(),
+    };
+  }
+
+  completeTurn(input: GoalTurnRecordInput): GoalTurnCompletion {
+    const goal = this.currentGoal();
+    if (goal === undefined) {
+      return { outcome: "progress", blockedStreak: 0, blocked: false, budgetLimited: false };
+    }
+    const fingerprintAfter = this.progressFingerprint();
+    const outcome =
+      input.outcome ??
+      (input.fingerprintBefore !== undefined && input.fingerprintBefore === fingerprintAfter
+        ? "no_progress"
+        : "progress");
+    this.repository.recordTurn(goal.id, {
+      turnId: input.turnId,
+      inputTokens: input.usage.input,
+      outputTokens: input.usage.output,
+      cachedTokens: input.usage.cached ?? 0,
+      activeSeconds: Math.max(0, Math.round((input.endedAt - input.startedAt) / 1000)),
+      outcome,
+      startedAt: input.startedAt,
+      endedAt: input.endedAt,
+    });
+
+    let blockedStreak = goal.blockedStreak;
+    let blocked = false;
+    if (outcome === "no_progress") {
+      blockedStreak += 1;
+      this.repository.setBlockedStreak(goal.id, blockedStreak);
+      if (blockedStreak >= 3) {
+        this.repository.setGoalStatus(goal.id, "blocked");
+        blocked = true;
+      }
+    } else if (outcome === "progress") {
+      blockedStreak = 0;
+      this.repository.setBlockedStreak(goal.id, 0);
+    }
+
+    const updated = this.requireCurrent();
+    const budgetLimited =
+      updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget;
+    if (budgetLimited && updated.status === "active") {
+      this.repository.setGoalStatus(goal.id, "budget_limited");
+    }
+    return { outcome, blockedStreak, blocked, budgetLimited };
+  }
+
+  markUsageLimited(reason?: string): Goal {
+    const goal = this.requireCurrent();
+    const updated = this.repository.setGoalStatus(goal.id, "usage_limited");
+    this.session.appendGoalContext(
+      `${renderGoalStatus(updated)}${reason === undefined ? "" : `\n- Reason: ${reason}`}`,
+    );
+    return updated;
   }
 
   resume(): Goal {

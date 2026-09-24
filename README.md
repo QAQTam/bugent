@@ -197,6 +197,14 @@ P4 已接线：
 - `/goal continue` 在安全边界创建新 branch，并注入 goal/plan/todo/handoff seed。
 - `get_handoff` 可读取 canonical 或指定 epoch 的 snapshot。
 
+P5 已接线（实验性，默认 `auto_continue = false`）：
+
+- 每个 Goal turn 记录 input/output/cached token 与 active time。
+- 用户消息、排队消息和 `waiting_user` 始终优先于 continuation。
+- 达到 token budget / provider usage limit 时停止自动推进。
+- 连续 3 个 Goal turn 没有权威状态变化时进入 `blocked`。
+- `max_consecutive_turns` 防止 continuation 无限循环。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |

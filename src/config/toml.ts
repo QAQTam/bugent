@@ -16,7 +16,7 @@ import type { PermissionDecision, PermissionRule } from "../permission/policy.ts
 import { isSandboxMode } from "../permission/mode.ts";
 import type { EndpointKind, ProviderConfig } from "../provider/registry.ts";
 import type { McpStdioServerConfig } from "../mcp/stdio.ts";
-import type { BugentConfig, McpConfig, SandboxConfig, SkillsConfig } from "./schema.ts";
+import type { BugentConfig, GoalsConfig, McpConfig, SandboxConfig, SkillsConfig } from "./schema.ts";
 
 export const CONFIG_DIR_NAME = ".bugent";
 export const CONFIG_FILE_NAME = "config.toml";
@@ -71,6 +71,14 @@ function asStringArray(value: unknown, field: string): string[] | undefined {
     throw new Error(`config.toml: ${field} 必须是字符串数组`);
   }
   return value as string[];
+}
+
+function asPositiveInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`config.toml: ${field} 必须是正整数`);
+  }
+  return value;
 }
 
 function asProxy(value: unknown, field: string): ProviderConfig["proxy"] {
@@ -315,6 +323,75 @@ function parseSkills(raw: unknown): SkillsConfig | undefined {
   };
 }
 
+function parseGoals(raw: unknown): GoalsConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config.toml: goals 必须是表");
+  }
+  const table = raw as Raw;
+  const enabled = asBool(table.enabled, "goals.enabled");
+  const autoContinue = asBool(
+    pick(table, "auto_continue", "autoContinue"),
+    "goals.auto_continue",
+  );
+  const maxConsecutiveTurns = asPositiveInteger(
+    pick(table, "max_consecutive_turns", "maxConsecutiveTurns"),
+    "goals.max_consecutive_turns",
+  );
+  const maxGoalTokenBudget = asPositiveInteger(
+    pick(table, "max_goal_token_budget", "maxGoalTokenBudget"),
+    "goals.max_goal_token_budget",
+  );
+  const contextRefresh = asString(
+    pick(table, "context_refresh", "contextRefresh"),
+    "goals.context_refresh",
+  );
+  if (
+    contextRefresh !== undefined &&
+    contextRefresh !== "checkpoint" &&
+    contextRefresh !== "threshold" &&
+    contextRefresh !== "manual"
+  ) {
+    throw new Error("config.toml: goals.context_refresh 必须是 checkpoint / threshold / manual");
+  }
+  const handoffInlineBytes = asPositiveInteger(
+    pick(table, "handoff_inline_bytes", "handoffInlineBytes"),
+    "goals.handoff_inline_bytes",
+  );
+  const reviewPolicy = asString(
+    pick(table, "review_policy", "reviewPolicy"),
+    "goals.review_policy",
+  );
+  if (
+    reviewPolicy !== undefined &&
+    reviewPolicy !== "off" &&
+    reviewPolicy !== "medium" &&
+    reviewPolicy !== "high" &&
+    reviewPolicy !== "always"
+  ) {
+    throw new Error("config.toml: goals.review_policy 必须是 off / medium / high / always");
+  }
+  const reviewModel = asString(
+    pick(table, "review_model", "reviewModel"),
+    "goals.review_model",
+  );
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(autoContinue !== undefined ? { autoContinue } : {}),
+    ...(maxConsecutiveTurns !== undefined ? { maxConsecutiveTurns } : {}),
+    ...(maxGoalTokenBudget !== undefined ? { maxGoalTokenBudget } : {}),
+    ...(contextRefresh !== undefined
+      ? { contextRefresh: contextRefresh as NonNullable<GoalsConfig["contextRefresh"]> }
+      : {}),
+    ...(handoffInlineBytes !== undefined ? { handoffInlineBytes } : {}),
+    ...(reviewPolicy !== undefined
+      ? { reviewPolicy: reviewPolicy as NonNullable<GoalsConfig["reviewPolicy"]> }
+      : {}),
+    ...(reviewModel !== undefined ? { reviewModel } : {}),
+  };
+}
+
 /** TOML 文本 -> BugentConfig。 */
 export function parseConfigToml(text: string): BugentConfig {
   const root = Bun.TOML.parse(text) as Raw;
@@ -334,6 +411,7 @@ export function parseConfigToml(text: string): BugentConfig {
   const sandboxTable = (pick(root, "sandbox") ?? {}) as Raw;
   const mcp = parseMcp(pick(root, "mcp"));
   const skills = parseSkills(pick(root, "skills"));
+  const goals = parseGoals(pick(root, "goals"));
 
   const rawRules = pick(permissionsTable, "rules") ?? [];
   if (!Array.isArray(rawRules)) {
@@ -387,6 +465,7 @@ export function parseConfigToml(text: string): BugentConfig {
     sandbox,
     ...(mcp !== undefined ? { mcp } : {}),
     ...(skills !== undefined ? { skills } : {}),
+    ...(goals !== undefined ? { goals } : {}),
   };
 }
 
@@ -430,6 +509,18 @@ writable_paths = []
 # 环境变量是**白名单制**：只保留 PATH/HOME/TERM/LANG 等少数几个，
 # 其余（含各种 API key）一律不传给子进程。需要什么在这里显式加。
 pass_env = []
+
+# ---- Goal Mode ----
+# P5 阶段仍默认关闭自动 continuation；显式 /goal 始终可用。
+[goals]
+enabled = false
+auto_continue = false
+max_consecutive_turns = 50
+max_goal_token_budget = 200000
+context_refresh = "checkpoint"
+handoff_inline_bytes = 32768
+review_policy = "medium"
+# review_model = "openai/deepseek-v4.1-flash"
 
 # ---- MCP ----
 # MCP stdio server 默认：工作区只读、私有 state 可写、断网、独立进程沙箱。

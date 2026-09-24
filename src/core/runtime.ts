@@ -107,8 +107,11 @@ export interface CreateSessionRuntimeOptions {
   mcpManager?: McpManager;
   /** Session-level MCP server allowlist. Undefined means all configured servers. */
   mcpServerIds?: readonly string[];
-  /** Process-shared skill manager. The runtime attaches/detaches its registry. */
+  /** Session-level skill manager. The runtime attaches/detaches its registry. */
   skillManager?: SkillManager;
+  /** Goal review policy / budget cap for this runtime. */
+  goalDefaultReviewPolicy?: import("../goal/types.ts").ReviewPolicy;
+  maxGoalTokenBudget?: number;
   cwd: string;
   store: SessionStore | undefined;
   /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
@@ -209,6 +212,12 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
           store: options.store,
           cwd: options.cwd,
           handoffRoot: defaultHandoffRoot(),
+          ...(options.goalDefaultReviewPolicy !== undefined
+            ? { defaultReviewPolicy: options.goalDefaultReviewPolicy }
+            : {}),
+          ...(options.maxGoalTokenBudget !== undefined
+            ? { maxTokenBudget: options.maxGoalTokenBudget }
+            : {}),
           reviewRunner: createReadOnlyReviewRunner({
             client: options.client,
             model: options.model,

@@ -14,7 +14,7 @@
  */
 
 import type { Usage } from "../provider/types.ts";
-import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
+import { combineHooks, runTurn, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
 import {
@@ -225,6 +225,10 @@ export interface TuiOptions {
   mode?: SandboxMode;
   /** 当前 session 的 Goal Contract controller；未持久化时省略。 */
   goalController?: GoalController;
+  /** 实验性自动 continuation；默认关闭。 */
+  goalAutoContinue?: boolean;
+  /** 单次 Goal 连续自动推进上限。 */
+  maxGoalContinuationTurns?: number;
   /** 当前 session 的审计流水；TUI hooks 会把它和渲染 hooks 合并。 */
   audit?: AuditTrail;
   /**
@@ -322,6 +326,9 @@ export class TuiApp implements TuiInteraction {
   #mode: SandboxMode = "workspace-write";
   #goalController: GoalController | undefined;
   #goalStatusLine: string | undefined;
+  #goalAutoContinue = false;
+  #maxGoalContinuationTurns = 50;
+  #goalContinuationStreak = 0;
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
@@ -399,6 +406,8 @@ export class TuiApp implements TuiInteraction {
     this.#audit = options.audit;
     this.#mode = options.mode ?? "workspace-write";
     this.#goalController = options.goalController;
+    this.#goalAutoContinue = options.goalAutoContinue ?? false;
+    this.#maxGoalContinuationTurns = options.maxGoalContinuationTurns ?? 50;
     this.#refreshGoalStatus();
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
@@ -1060,6 +1069,8 @@ export class TuiApp implements TuiInteraction {
     this.#input = "";
     this.#cursor = 0;
     this.#viewState = initialHistoryView();
+    this.#goalContinuationStreak = 0;
+    this.#goalController?.clearUserDeferral();
 
     // busy 时绝不启动第二个 runTurn：先排队，等当前 turn 正常结束后自动 drain。
     if (this.#busy || this.#session.hasOpenToolBatch()) {
@@ -2199,7 +2210,10 @@ export class TuiApp implements TuiInteraction {
   #adoptRuntime(runtime: SessionRuntime): void {
     this.#runtime?.dispose();
     this.#runtime = runtime;
-    if (runtime.session.id !== this.#session.id) this.#apiKeyOverride = undefined;
+    if (runtime.session.id !== this.#session.id) {
+      this.#apiKeyOverride = undefined;
+      this.#goalContinuationStreak = 0;
+    }
     this.#session = runtime.session;
     this.#tools = runtime.tools;
     this.#mode = runtime.mode;
@@ -2256,14 +2270,28 @@ export class TuiApp implements TuiInteraction {
 
   /* --------------------------- 对话推进 --------------------------- */
 
-  async #runTurn(input: string, retry = false): Promise<void> {
+  async #runTurn(
+    input: string | undefined,
+    retry = false,
+    options: {
+      appendUser?: boolean;
+      goalContinuation?: boolean;
+      fingerprintBefore?: string;
+      turnId?: string;
+    } = {},
+  ): Promise<void> {
     const controller = new AbortController();
+    const startedAt = Date.now();
+    const turnId = options.turnId ?? `turn-${crypto.randomUUID()}`;
+    const appendUser = options.appendUser ?? true;
     this.#busy = true;
     this.#abort = controller;
     this.#thinking.reset();
     this.#activity = retry
       ? { state: "retrying", detail: "重新请求" }
-      : { state: "waiting", detail: "连接模型" };
+      : options.goalContinuation
+        ? { state: "waiting", detail: "Goal continuation" }
+        : { state: "waiting", detail: "连接模型" };
     this.#stopThinkingAnimation();
     this.#syncThinkingAnimation();
     this.#render();
@@ -2307,8 +2335,13 @@ export class TuiApp implements TuiInteraction {
       },
       // 工具跑失败后请求一次性能力授权（如联网）—— 弹窗里带真实原因与报错
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
-      // ask_user：多页问答表单
-      onAskUser: (_call, questions) => this.askUser(questions),
+      // ask_user：多页问答表单；用户中止时暂停自动 continuation，直到下一条输入。
+      onAskUser: async (_call, questions) => {
+        const answers = await this.askUser(questions);
+        if (answers === undefined) this.#goalController?.deferForUser();
+        else this.#goalController?.clearUserDeferral();
+        return answers;
+      },
       onToolResult: (call, result, message) => {
         this.#transcript.finishTool(
           call.id,
@@ -2342,14 +2375,19 @@ export class TuiApp implements TuiInteraction {
 
     let completed = false;
     let failure: string | undefined;
+    let turnUsage: Usage = { input: 0, output: 0 };
     try {
-      // runUserTurn 负责把用户消息写进 session —— 不要绕过它直接调 runTurn
-      const result = await runUserTurn(this.#session, input, {
+      const runOptions = {
         tools: this.#tools,
         cwd: this.#cwd,
         hooks,
         signal: controller.signal,
-      });
+      };
+      const result =
+        appendUser && input !== undefined
+          ? await runUserTurn(this.#session, input, runOptions)
+          : await runTurn(this.#session, runOptions);
+      turnUsage = result.usage;
       completed = result.reason !== "error";
       if (!completed) failure = "请求未完成";
     } catch (error) {
@@ -2357,12 +2395,54 @@ export class TuiApp implements TuiInteraction {
       this.#transcript.pushError(failure);
     } finally {
       const aborted = controller.signal.aborted;
+      const endedAt = Date.now();
       this.#transcript.endAssistant();
       this.#thinking.reset();
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
       this.#goalController?.revokeCreateAuthorization();
+
+      const goal = this.#goalController?.currentGoal();
+      if (goal !== undefined) {
+        try {
+          const completion = this.#goalController!.completeTurn({
+            turnId,
+            startedAt,
+            endedAt,
+            usage: turnUsage,
+            ...(aborted
+              ? { outcome: "aborted" as const }
+              : failure !== undefined
+                ? { outcome: "error" as const }
+                : {}),
+            ...(options.fingerprintBefore !== undefined
+              ? { fingerprintBefore: options.fingerprintBefore }
+              : {}),
+          });
+          if (completion.blocked) {
+            this.#transcript.pushNotice("Goal 连续 3 轮无进展，已进入 blocked。");
+          } else if (completion.budgetLimited) {
+            this.#transcript.pushNotice("Goal 已达到 token budget，自动 continuation 已停止。");
+          }
+        } catch (error) {
+          this.#transcript.pushError(
+            `Goal usage 记账失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      if (
+        failure !== undefined &&
+        /usage limit|quota|rate limit|额度|配额/i.test(failure) &&
+        goal?.status === "active"
+      ) {
+        try {
+          this.#goalController?.markUsageLimited(failure);
+        } catch {
+          // 状态已被并发用户操作改变时不覆盖用户决定。
+        }
+      }
       this.#refreshGoalStatus();
 
       if (aborted) {
@@ -2380,8 +2460,44 @@ export class TuiApp implements TuiInteraction {
       }
       this.#render();
 
-      // 正常结束才自动 drain；abort / 错误后保留队列，由用户决定何时继续。
-      if (completed && !aborted) this.#drainQueuedUser();
+      // 用户输入始终优先于 Goal continuation。
+      if (completed && !aborted) {
+        if (this.#session.queuedUserCount > 0) this.#drainQueuedUser();
+        else if (failure === undefined) this.#maybeContinueGoal();
+      }
+    }
+  }
+
+  #maybeContinueGoal(): void {
+    if (!this.#goalAutoContinue || this.#busy || this.#session.hasOpenToolBatch()) return;
+    if (this.#session.queuedUserCount > 0) return;
+    if (this.#goalContinuationStreak >= this.#maxGoalContinuationTurns) {
+      this.#transcript.pushNotice(
+        `Goal 已达到连续自动推进上限 ${this.#maxGoalContinuationTurns}，等待用户输入。`,
+      );
+      this.#render();
+      return;
+    }
+    const controller = this.#goalController;
+    if (controller === undefined) return;
+    const check = controller.canAutoContinue();
+    if (!check.allowed) {
+      this.#refreshGoalStatus();
+      return;
+    }
+
+    try {
+      const start = controller.beginContinuation();
+      this.#goalContinuationStreak += 1;
+      void this.#runTurn(undefined, false, {
+        appendUser: false,
+        goalContinuation: true,
+        fingerprintBefore: start.fingerprint,
+        turnId: start.turnId,
+      });
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+      this.#render();
     }
   }
 
