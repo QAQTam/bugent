@@ -58,8 +58,8 @@ The transcript is projected through `StreamLedger` + `StreamWindow`; stable
 history can spill to `~/.bugent/butui/<session>/`. The experimental entry keeps
 the sidecars during the process and attempts cleanup on normal disposal.
 
-The sibling checkout is anchored to `QAQTam/buTUI@v0.2.3-exp`
-(`0919486`, `fix(renderer): align span writes and clear removed tails`). It is
+The sibling checkout is anchored to `QAQTam/buTUI@v0.2.4-exp`
+(`fc1bd02`, `fix(stream): snapshot tail during concurrent window reads`). It is
 not referenced through a GitHub package URL because `@butui/*` packages are
 still private workspace packages inside a monorepo; a repository-level git
 dependency cannot resolve those subpackages reliably.

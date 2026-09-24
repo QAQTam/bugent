@@ -24,7 +24,12 @@ import type { SandboxMode } from "../permission/mode.ts";
 import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
 import { PatchStreamProgress } from "../patch/streaming-progress.ts";
 import type { Hunk } from "../patch/types.ts";
-import { createBugentTranscript } from "./transcript.ts";
+import {
+  THINKING_FRAMES,
+  ThinkingBuffer,
+  tailToWidth,
+} from "../tui/thinking.ts";
+ import { createBugentTranscript } from "./transcript.ts";
 import {
   createBugentButuiRuntime,
   type BugentButuiInteraction,
@@ -60,12 +65,18 @@ const useMock = args.includes("--mock");
 const skipConfirmations = args.includes("--yes");
 const experimentalRuntime = process.env.BUGENT_BUTUI_V02 !== "0";
 
+type ActivityState = "idle" | "thinking" | "responding" | "tool" | "waiting" | "error";
+
 const [toolCards, setToolCards] = createSignal<ToolCard[]>([]);
 const [busy, setBusy] = createSignal(false);
-const [status, setStatus] = createSignal("starting");
+const [activity, setActivity] = createSignal<ActivityState>("idle");
+const [reasoning, setReasoning] = createSignal("");
+const [spinnerFrame, setSpinnerFrame] = createSignal(0);
 const [prompt, setPrompt] = createSignal<PendingPrompt>();
 const promptQueue: PendingPrompt[] = [];
 const patchStreams = new Map<string, PatchStreamProgress>();
+const thinking = new ThinkingBuffer();
+let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 let currentAbort: AbortController | undefined;
 let transcriptController: StreamWindowController | undefined;
 let app: TuiApp | undefined;
@@ -100,7 +111,52 @@ const agentRuntime = await createBugentButuiRuntime({
 });
 const transcript = createBugentTranscript({ sessionId: agentRuntime.session.id });
 transcript.appendBlock("buTUI 实验入口：真实 bugent session / tools / 权限桥接。");
-setStatus(`${agentRuntime.providerId}/${agentRuntime.model} · ready`);
+
+function syncSpinner(): void {
+  const active =
+    busy() && activity() !== "idle" && activity() !== "error";
+  if (!active) {
+    if (spinnerTimer !== undefined) {
+      clearInterval(spinnerTimer);
+      spinnerTimer = undefined;
+    }
+    setSpinnerFrame(0);
+    return;
+  }
+  if (spinnerTimer !== undefined) return;
+  spinnerTimer = setInterval(() => {
+    setSpinnerFrame(value => value + 1);
+    syncPaint();
+  }, 120);
+}
+
+function setActivityState(next: ActivityState): void {
+  setActivity(next);
+  syncSpinner();
+}
+
+function activityLabel(): string {
+  switch (activity()) {
+    case "thinking":
+      return "thinking";
+    case "responding":
+      return "responding";
+    case "tool":
+      return "tool";
+    case "waiting":
+      return "waiting";
+    case "error":
+      return "error";
+    case "idle":
+    default:
+      return "ready";
+  }
+}
+
+function spinnerGlyph(): string {
+  if (!busy() || activity() === "idle" || activity() === "error") return "·";
+  return THINKING_FRAMES[spinnerFrame() % THINKING_FRAMES.length]!;
+}
 
 function append(text: string): void {
   transcript.appendBlock(text);
@@ -239,7 +295,10 @@ async function submit(value: string): Promise<void> {
   append(`› ${text}`);
   setToolCards([]);
   setBusy(true);
-  setStatus("thinking…");
+  thinking.reset();
+  setReasoning("");
+  setActivityState("thinking");
+  syncSpinner();
 
   const controller = new AbortController();
   currentAbort = controller;
@@ -249,10 +308,18 @@ async function submit(value: string): Promise<void> {
       {
         onText: delta => {
           transcript.appendDelta(delta);
+          setActivityState("responding");
           syncPaint();
         },
-        onReasoning: () => {
-          setStatus("thinking…");
+        onReasoning: delta => {
+          thinking.push(delta);
+          setReasoning(thinking.current);
+          setActivityState("thinking");
+          syncPaint();
+        },
+        onAssistant: () => {
+          thinking.reset();
+          setReasoning("");
           syncPaint();
         },
         onToolCallDelta: delta => {
@@ -261,6 +328,7 @@ async function submit(value: string): Promise<void> {
             setToolCards([]);
             return;
           }
+          setActivityState("tool");
           if (delta.name !== APPLY_PATCH_TOOL_NAME) return;
           let stream = patchStreams.get(delta.id);
           if (stream === undefined) {
@@ -284,6 +352,7 @@ async function submit(value: string): Promise<void> {
           syncPaint();
         },
         onToolCall: call => {
+          setActivityState("tool");
           if (call.name !== APPLY_PATCH_TOOL_NAME) {
             append(`⚙ ${call.name} ${formatArgs(call.args)}`);
             return;
@@ -324,6 +393,7 @@ async function submit(value: string): Promise<void> {
           syncPaint();
         },
         onToolResult: (call, result) => {
+          setActivityState("waiting");
           if (call.name === APPLY_PATCH_TOOL_NAME) {
             updateToolCard(call.id, {
               status: result.ok ? "done" : "error",
@@ -334,26 +404,24 @@ async function submit(value: string): Promise<void> {
           }
           syncPaint();
         },
-        onUsage: usage => {
-          setStatus(
-            `tokens in=${usage.input} out=${usage.output}${
-              usage.cached !== undefined ? ` cached=${usage.cached}` : ""
-            }`,
-          );
+        onUsage: () => {
           syncPaint();
         },
       },
       controller.signal,
     );
     append("turn complete");
-    setStatus("ready");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     append(message);
-    setStatus("error");
+    setActivityState("error");
   } finally {
     currentAbort = undefined;
     setBusy(false);
+    thinking.reset();
+    setReasoning("");
+    setActivityState("idle");
+    syncSpinner();
     await transcript.flush().catch(() => {});
     syncPaint();
     await app?.waitUntilFrameFlushed(undefined, "accepted").catch(() => {});
@@ -409,7 +477,7 @@ const createdApp = createTuiApp({
             </text>
           </row>
           <text color="muted">
-            {runtimeProviderLabel()} · {runtimeTuningLabel()} · {status()}
+            {runtimeProviderLabel()} · {runtimeTuningLabel()}
           </text>
         </box>
 
@@ -417,7 +485,13 @@ const createdApp = createTuiApp({
           <StreamWindow
             ledger={transcript.ledger}
             streamId={transcript.streamId}
-            height={Math.max(5, tui.size().rows - 15 - Math.min(2, toolCards().length) * 7)}
+            height={Math.max(
+              5,
+              tui.size().rows -
+                15 -
+                Math.min(2, toolCards().length) * 7 -
+                (reasoning().length > 0 || busy() ? 1 : 0),
+            )}
             width={Math.max(20, width - 4)}
             follow
             revision={transcript.revision}
@@ -479,6 +553,14 @@ const createdApp = createTuiApp({
           </Show>
         </box>
 
+        <Show when={reasoning().length > 0 || busy()}>
+          <box width={width} padding={[0, 1]} height={1}>
+            <text color="muted">
+              {tailToWidth(reasoning(), Math.max(1, width - 4)).text}
+            </text>
+          </box>
+        </Show>
+
         <box
           border
           padding={[0, 1]}
@@ -500,7 +582,7 @@ const createdApp = createTuiApp({
 
         <text color="muted">
           {" "}
-          {busy() ? "running" : "ready"} · ctrl+c 退出 · {agentRuntime.mode}
+          {spinnerGlyph()} {activityLabel()} · ctrl+c 退出 · {agentRuntime.mode}
         </text>
       </box>
       <Show when={prompt()}>
