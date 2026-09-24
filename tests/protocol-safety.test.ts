@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { BranchService } from "../src/core/branch-service.ts";
 import { runTurn } from "../src/core/loop.ts";
-import { storedText } from "../src/core/message.ts";
+import { storedText, toChatMessage } from "../src/core/message.ts";
 import { openSession } from "../src/core/open-session.ts";
 import { AgentSession } from "../src/core/session.ts";
 import { createMockClient } from "../src/provider/adapters/mock.ts";
@@ -112,6 +112,14 @@ describe("P4 · tool batch 协议安全", () => {
     expect(storedText(session.messages[6]!)).toBe("排队注入");
     expect(session.queuedUserCount).toBe(1);
     expect(session.dequeueUserAfterTurn()).toBe("排队用户");
+  });
+
+  test("agent completion injection renders as developer delta", () => {
+    const session = makeSession();
+    session.enqueueInjection("subagent notification", "agent");
+    const message = session.messages.find((item) => item.injectionSource === "agent");
+    expect(message).toBeDefined();
+    expect(toChatMessage(message!).role).toBe("developer");
   });
 
   test("open batch 中 appendUser 直接失败，submitUser 只排队", () => {

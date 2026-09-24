@@ -37,6 +37,7 @@ function toolsFor(
   options: {
     parent?: AgentToolsOptions["parent"];
     idFactory?: AgentToolsOptions["idFactory"];
+    notifications?: AgentToolsOptions["notifications"];
   } = {},
 ): { tools: Map<string, Tool>; transport: ReturnType<typeof createInProcessTransport> } {
   const transport = createInProcessTransport({ executor });
@@ -45,6 +46,7 @@ function toolsFor(
     parent: options.parent ?? parent(),
     cwd: CTX.cwd,
     ...(options.idFactory !== undefined ? { idFactory: options.idFactory } : {}),
+    ...(options.notifications !== undefined ? { notifications: options.notifications } : {}),
   });
   return { tools: new Map(tools.map((tool) => [tool.name, tool])), transport };
 }
@@ -102,6 +104,49 @@ describe("agent model tools", () => {
     )) as Record<string, unknown>;
     expect(output.output).toEqual({ text: "review body" });
     expect(output.trust).toBe("untrusted-data");
+    await transport.dispose();
+  });
+
+  test("completion notification is a developer-safe summary, not the child output", async () => {
+    const notifications: { text: string; source: string }[] = [];
+    const executor: AgentExecutor = {
+      async run(context) {
+        return {
+          agentId: context.spec.identity.agentId,
+          status: "completed",
+          summary: "found one issue",
+          artifacts: [],
+          data: { text: "SECRET FULL OUTPUT" },
+        };
+      },
+    };
+    const { tools, transport } = toolsFor(executor, {
+      notifications: {
+        enqueueInjection(text, source) {
+          notifications.push({ text, source });
+        },
+      },
+      idFactory: (() => {
+        const values = ["agent-notify", "task-notify", "agent-session-notify"];
+        return () => values.shift()!;
+      })(),
+    });
+
+    await tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run(
+      { kind: "reviewer", task: "review this" },
+      CTX,
+    );
+    await tools.get(WAIT_SUBAGENT_TOOL_NAME)!.run(
+      { agent_id: "agent-notify" },
+      CTX,
+    );
+
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]?.source).toBe("agent");
+    expect(notifications[0]?.text).toContain("agent-notify");
+    expect(notifications[0]?.text).toContain("found one issue");
+    expect(notifications[0]?.text).toContain("untrusted-data");
+    expect(notifications[0]?.text).not.toContain("SECRET FULL OUTPUT");
     await transport.dispose();
   });
 

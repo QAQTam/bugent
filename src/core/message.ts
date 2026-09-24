@@ -26,6 +26,7 @@ export type InjectionSource =
   | "checkpoint"
   | "handoff"
   | "review"
+  | "agent"
   | "system"
   | "snapshot";
 
@@ -104,7 +105,8 @@ export function toChatMessage(
     msg.injectionSource === "plan" ||
     msg.injectionSource === "checkpoint" ||
     msg.injectionSource === "handoff" ||
-    msg.injectionSource === "review";
+    msg.injectionSource === "review" ||
+    msg.injectionSource === "agent";
   const role: Role = extension ? (options.extensionRole ?? "developer") : msg.role;
   const out: ChatMessage = { role, parts: [...msg.parts] };
   if (msg.reasoning !== undefined) out.reasoning = msg.reasoning;

@@ -483,6 +483,7 @@ async function main(): Promise<void> {
         capabilities: mainAgentCapabilities,
       },
       cwd: options.cwd,
+      notifications: session,
     },
   });
   if (goalController !== undefined) {

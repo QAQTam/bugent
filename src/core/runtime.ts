@@ -265,6 +265,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
         capabilities: mainAgentCapabilities,
       },
       cwd: options.cwd,
+      notifications: session,
     },
   });
   if (goalController !== undefined) {
