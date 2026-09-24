@@ -32,13 +32,21 @@ import { KeyDecoder, type Key } from "./keys.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { inputIndexAt, layoutInput } from "./input-view.ts";
+import {
+  composeScrollbar,
+  createScrollbarMetrics,
+  hitScrollbar,
+  scrollbarThumbAt,
+  scrollOffsetFromDrag,
+  type ScrollbarMetrics,
+} from "./scrollbar.ts";
 import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
 import { COLOR } from "./theme.ts";
 import { renderToolItem } from "./renderers.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel } from "./render-todo.ts";
 import { composeThinkingBlock, ThinkingBuffer, THINKING_BLOCK_ROWS } from "./thinking.ts";
-import { TranscriptLayout } from "./transcript-layout.ts";
+import { TranscriptLayout, maxScrollOffset } from "./transcript-layout.ts";
 import { composeCenteredButton, composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
 import { hitTest, type HitRegion } from "./hit.ts";
 import {
@@ -280,6 +288,10 @@ export class TuiApp implements TuiInteraction {
   #lastLayoutTotal = 0;
   /** 上一次消息区高度，供滚动和历史上限计算。 */
   #bodyHeight = 1;
+  /** 当前消息区右侧滚动条几何；无回看空间时为空。 */
+  #scrollbar: ScrollbarMetrics | undefined;
+  /** 正在拖动滚动条时保存轨道快照，避免内容变化导致跳变。 */
+  #scrollbarDrag: { metrics: ScrollbarMetrics; grabOffset: number } | undefined;
   /** body 顶部是否有非内容行（“查看更多消息”按钮）；鼠标命中要扣掉。 */
   #bodyContentOffset = 0;
   /** 消息区顶部“查看更多消息”的鼠标命中区间（row 相对 body，0-based）。 */
@@ -513,6 +525,7 @@ export class TuiApp implements TuiInteraction {
       offResize();
       setHighlightReadyHandler(undefined);
       this.#abort?.abort();
+      this.#scrollbarDrag = undefined;
       this.#terminal.exit();
     }
   }
@@ -669,6 +682,19 @@ export class TuiApp implements TuiInteraction {
 
   /** 处理鼠标事件：左键点击按钮/折叠行，右键打开消息操作，滚轮滚动视窗。 */
   #handleMouse(key: Extract<Key, { type: "mouse" }>): void {
+    if (this.#scrollbarDrag !== undefined) {
+      if (key.button !== "left") return;
+      if (key.motion) {
+        this.#dragScrollbarTo(key.y);
+        return;
+      }
+      if (!key.pressed) {
+        this.#scrollbarDrag = undefined;
+        this.#render();
+        return;
+      }
+    }
+
     if (key.button === "wheelUp") {
       if (
         this.#pendingMessageMenu !== undefined ||
@@ -691,6 +717,14 @@ export class TuiApp implements TuiInteraction {
       }
       if (this.#viewState.historyOpen) this.#scrollHistoryBy(-3);
       else this.#scrollBy(-3);
+      return;
+    }
+    if (
+      key.button === "left" &&
+      key.pressed &&
+      hitScrollbar(this.#scrollbar, key.x, key.y)
+    ) {
+      this.#beginScrollbarDrag(key.y);
       return;
     }
     // 鼠标移动：只更新悬停按钮，不触发点击。
@@ -867,6 +901,32 @@ export class TuiApp implements TuiInteraction {
   #scrollBy(delta: number): void {
     this.#viewState = scrollMainView(this.#viewState, delta, this.#layout.totalLines, this.#bodyHeight);
     this.#render();
+  }
+
+  #setScrollOffset(offset: number): void {
+    const delta = offset - this.#viewState.scrollOffset;
+    this.#viewState = scrollMainView(
+      this.#viewState,
+      delta,
+      this.#layout.totalLines,
+      this.#bodyHeight,
+    );
+    this.#render();
+  }
+
+  #beginScrollbarDrag(y: number): void {
+    const metrics = this.#scrollbar;
+    if (metrics === undefined) return;
+    const onThumb = scrollbarThumbAt(metrics, y);
+    const grabOffset = onThumb ? y - metrics.thumbTop : Math.floor(metrics.thumbHeight / 2);
+    this.#scrollbarDrag = { metrics, grabOffset };
+    this.#setScrollOffset(scrollOffsetFromDrag(metrics, y, grabOffset));
+  }
+
+  #dragScrollbarTo(y: number): void {
+    const drag = this.#scrollbarDrag;
+    if (drag === undefined) return;
+    this.#setScrollOffset(scrollOffsetFromDrag(drag.metrics, y, drag.grabOffset));
   }
 
   #scrollHistoryBy(delta: number): void {
@@ -2275,6 +2335,22 @@ export class TuiApp implements TuiInteraction {
             height - 2 - (INPUT_ROWS - 1) - todoPanel.length - thinkingBlock.length,
           );
     const body = this.#composeBody(width, bodyHeight);
+    const scrollbarViewportHeight = Math.max(1, bodyHeight - this.#bodyContentOffset);
+    this.#scrollbar = this.#viewState.historyOpen
+      ? undefined
+      : createScrollbarMetrics({
+          trackTop: 2 + this.#bodyContentOffset,
+          trackHeight: scrollbarViewportHeight,
+          trackColumn: width,
+          totalLines: this.#layout.totalLines,
+          viewportHeight: scrollbarViewportHeight,
+          scrollOffset: this.#viewState.scrollOffset,
+          maxOffset: maxScrollOffset(this.#layout.totalLines, bodyHeight),
+        });
+    const bodyView =
+      this.#scrollbar === undefined
+        ? body
+        : composeScrollbar(body, width, this.#scrollbar, 2);
 
     if (dialogRows > 0) {
       // 0-based 屏幕行号；鼠标命中与 ask_user 点击都用它换算。
@@ -2315,7 +2391,7 @@ export class TuiApp implements TuiInteraction {
       } else {
         this.#inputCursorRow = undefined;
       }
-      return [this.#composeStatus(width), ...body, ...todoPanel, ...dialogBlock];
+      return [this.#composeStatus(width), ...bodyView, ...todoPanel, ...dialogBlock];
     }
 
     const inputTopRow = bodyHeight + todoPanel.length + thinkingBlock.length + 2;
@@ -2327,7 +2403,7 @@ export class TuiApp implements TuiInteraction {
 
     return [
       this.#composeStatus(width),
-      ...body,
+      ...bodyView,
       ...todoPanel,
       ...thinkingBlock,
       ...inputRows,

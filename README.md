@@ -62,6 +62,7 @@ provider 解包到 `~/.bugent/runtime/0.0.0/lib/`，因此 MCP 沙箱不依赖�
 
 TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可用 `--resume` 回去）。
 输入框支持多行：`Enter` 发送，`Ctrl+J` / `Alt+Enter` 换行；超过 4 行时视窗跟随光标滚动。
+主消息区右侧提供可拖动 scrollback 条，拖动时 chat 区域实时同步滚动。
 
 ### 配置与数据
 

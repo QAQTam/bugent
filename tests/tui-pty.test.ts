@@ -411,6 +411,51 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
+    "右侧 scrollback 拖动时同步滚动 chat",
+    async () => {
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 60,
+        rows: 14,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, TERM: "xterm-256color" },
+        terminal,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write(
+          Array.from({ length: 10 }, (_, index) => `drag-${index + 1}`).join("\r") + "\r",
+        );
+        await waitFor(() => output, (text) => strip(text).includes("turn 10"));
+
+        // Bottom thumb occupies rows 6-7. Drag it to the top track cell.
+        output = "";
+        terminal.write("\x1b[<0;60;6M");
+        terminal.write("\x1b[<32;60;2M");
+        terminal.write("\x1b[<0;60;2m");
+        await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
     "滚到三屏上限可打开历史抽屉并回到最新",
     async () => {
       let output = "";

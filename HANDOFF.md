@@ -11,7 +11,7 @@
 
 ```bash
 bun test
-# 507 pass / 0 fail
+# 512 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -519,10 +519,10 @@ bun run package:bugent
 
 ```text
 dist/bugent/bugent-0.0.0-linux-x64/bugent
-sha256: 1d5d7dee89b6a9457fdf48282c1385467b87fb08ff71baa33758b0850d0ff54e
+sha256: f93a5478f544e768ed9334958821e6cc7e764d5080d7900f4d7214e52196946e
 
 dist/bugent/bugent-0.0.0-linux-x64.tar.gz
-sha256: a5ccee471b78e1242e045a0317d10e6fdcb9a9e0bfc9bd84d8c5ae96eb5edbbb
+sha256: a8d7f7f43d87585050fcdafef9fd1e1fa3d58aed5f65bb4c5645caa898f24813
 ```
 
 构建工具链注意：
@@ -584,7 +584,7 @@ MCP 接线：
 
 ```text
 bun test
-# 507 pass / 0 fail
+# 512 pass / 0 fail
 
 bun run typecheck
 # clean
@@ -656,7 +656,28 @@ disabled = ["legacy-skill"]
 - `tests/tui-pty.test.ts` 验证真实 PTY 中多行输入与一次提交；
 - `tests/ask-user.test.ts` 验证输入态暴露硬件光标位置。
 
-## 10.5 buTUI experimental entry
+## 10.5 旧 TUI scrollback 拖动
+
+主消息区最右列现在是滚动条：
+
+- 轨道只覆盖主消息视口，不覆盖状态栏、输入框或历史抽屉；
+- thumb 高度按 `viewportHeight / (viewportHeight + maxOffset)` 计算；
+- `scrollOffset=0` 时 thumb 贴底并继续 follow tail，最大 offset 时贴顶；
+- 点击轨道会把 thumb 中心移动到点击位置；
+- 拖动 thumb 时保存 `grabOffset`，后续鼠标 motion 只按绝对 `y` 映射，不要求指针仍在轨道内；
+- 拖动和滚轮、PageUp/PageDown 都最终走 `scrollMainView()`，不会出现条和 chat 状态分叉；
+- 主区最大回看仍受三屏限制，更早内容继续通过历史抽屉查看。
+
+实现：
+
+```text
+src/tui/scrollbar.ts      几何、命中、拖动映射、轨道合成
+src/tui/app.ts            mouse capture / drag lifecycle / 同一 scrollOffset
+tests/scrollbar.test.ts   纯数学与渲染回归
+tests/tui-pty.test.ts     真实 SGR 拖动后 chat 到达“查看更多消息”
+```
+
+## 10.6 buTUI experimental entry
 
 已引入独立实验入口，现有 `src/tui` 仍为默认 UI，两套 UI 并行维护：
 
