@@ -56,7 +56,7 @@ export interface GitWorktreeManagerOptions {
 export interface ProbeGitOptions {
   /** Test/override hook. Defaults to Bun.which("git"). */
   readonly binary?: string;
-  readonly timeoutMs?: number;
+  readonly timeoutMs?: number | undefined;
 }
 
 const MINIMUM_GIT_VERSION = [2, 5] as const;
