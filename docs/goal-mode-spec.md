@@ -228,19 +228,31 @@ Evidence 必须指向当前状态：
 
 ### 4.6 Handoff
 
+Handoff 不是“每轮生成一次的 LLM 总结”，而是每个 Goal 一份持续演进的权威工作文档。
+
 ```ts
 interface Handoff {
   id: string;
   goalId: string;
-  checkpointId?: string;
-  epochId: string;
-  markdown: string;
-  summary: string;
+  revision: number;
+  status: "active" | "frozen" | "archived";
+  updatedBy: "system" | "worker" | "reviewer" | "user";
+  currentState: string;
+  markdownPath: string;
+  snapshotHash?: string;
+  supersedesRevision?: number;
   createdAt: number;
+  updatedAt: number;
 }
 ```
 
-Handoff 由系统收集事实，模型补充解释与下一步建议。
+规则：
+
+- 默认只有一个 canonical handoff：`HANDOFF.md`。
+- 每轮结束只更新必要章节，不重新生成整份文档。
+- 事实章节由系统维护；模型只能通过结构化 patch 补写、订正和追加。
+- 每个 Context Epoch 使用一个不可变 snapshot；canonical handoff 继续演进。
+- 删除事实不是允许的操作；订正通过 `supersedes` / `corrects` 表达。
 
 ### 4.7 Context Epoch
 
@@ -553,48 +565,321 @@ checkpoint.completed
   -> 激活下一个 Checkpoint
 ```
 
-## 8. Handoff 与 Context Epoch
+## 8. Living Handoff 与 Context Epoch
 
-### 8.1 Handoff 触发
+### 8.1 Handoff 模型
 
-- Checkpoint 完成；
-- context 使用达到阈值；
-- 用户暂停后恢复；
-- 出现重要 blocker；
-- 即将进入高风险阶段；
-- 用户编辑 Goal objective。
-
-Checkpoint 完成必须写 Handoff。是否立即刷新 Context 由策略决定：
-
-```toml
-[goals]
-context_refresh = "checkpoint" # checkpoint | threshold | manual
-```
-
-### 8.2 Handoff 内容
+Handoff 不是“每轮重新生成的 LLM 总结”，而是一个 Goal 一份持续演进的权威工作文档：
 
 ```text
-Goal objective / status / phase
-Checkpoint 状态与证据
-Plan 当前 revision
-Todo 当前快照
-修改文件与 git diff 摘要
-测试命令与结果
-阻塞 / 风险 / open questions
-token / time budget
-下一步建议
+canonical HANDOFF.md
+  -> 持续补登、订正、更新状态
+  -> 每个 Context Epoch 从它生成不可变 snapshot
 ```
 
-Handoff 不应包含 API key、token、私钥或其他 secret。
+三个层次必须分开：
 
-### 8.3 Context Epoch 创建
+| 层次 | 内容 | 可变性 |
+| --- | --- | --- |
+| 系统事实 | Goal、Checkpoint、Evidence、Todo、usage、git、test | 系统维护，不靠模型记忆 |
+| 模型叙事 | 判断、决策、原因、下一步、风险解释 | 模型通过 patch 更新 |
+| Epoch snapshot | 某个时间点的完整 Handoff | 不可变，供恢复和审计 |
+
+禁止：
+
+- 每轮把旧 Handoff 交给 LLM 重新总结；
+- 用一段自由文本覆盖完整事实；
+- 删除旧事实；
+- 让模型重写系统生成的证据和计数。
+
+### 8.2 更新触发
+
+不是每轮都创建 Handoff，而是只在有意义的事件更新：
+
+- Goal 初始化完成；
+- Checkpoint 开始；
+- 完成一个 Todo 并增加 Evidence；
+- 重要决策；
+- 新 blocker / open question；
+- Review 完成；
+- Checkpoint 完成；
+- Context 使用达到阈值；
+- 用户暂停/恢复/编辑目标；
+- Goal 完成或 blocked。
+
+普通 turn 没有状态变化时，只更新 `Last Activity`，不重写文档。
+
+### 8.3 标准 Markdown 格式
+
+canonical 文件：
+
+```text
+~/.bugent/handoffs/<session_id>/<goal_id>/HANDOFF.md
+```
+
+snapshot：
+
+```text
+~/.bugent/handoffs/<session_id>/<goal_id>/epochs/<epoch_id>.md
+```
+
+建议模板：
+
+```markdown
+---
+handoff_version: 1
+goal_id: goal_...
+session_id: sess_...
+status: active
+phase: executing
+current_checkpoint: CP-003
+revision: 12
+updated_at: 2026-09-24T08:00:00Z
+updated_by: worker
+snapshot_hash: sha256:...
+---
+
+# Goal Handoff: <objective title>
+
+> 这是持续维护的权威工作文档。事实章节由系统维护；叙事章节由 worker/reviewer 通过 patch 补登和订正。不要删除旧条目，使用 supersedes/corrects 记录变更。
+
+## 1. Goal Contract
+
+### Objective
+
+<完整 objective>
+
+### Success Criteria
+
+| ID | Criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| SC-001 | ... | proven / partial / missing | E-... |
+
+### Constraints
+
+- C-...
+
+### Non-goals
+
+- NG-...
+
+### Budget
+
+| Item | Used | Limit | Remaining |
+| --- | --- | --- | --- |
+| Tokens | 12.5K | 50K | 37.5K |
+| Active time | 18m | - | - |
+
+## 2. Current State
+
+- Goal status: active
+- Phase: executing
+- Current checkpoint: CP-003
+- Current todo: T-004
+- Last verified revision: <commit/diff hash>
+- Next action: ...
+- Blockers: B-...
+- Open questions: Q-...
+
+## 3. Checkpoints
+
+| ID | Order | Title | Status | Acceptance | Evidence | Review |
+| --- | --- | --- | --- | --- | --- | --- |
+| CP-001 | 1 | ... | completed | ... | E-001 | R-001 |
+| CP-002 | 2 | ... | completed | ... | E-003 | R-002 |
+| CP-003 | 3 | ... | active | ... | - | - |
+
+## 4. Plan
+
+### Revision 3
+
+| Phase | Checkpoints | Status | Notes |
+| --- | --- | --- | --- |
+| P1 | CP-001..CP-002 | completed | ... |
+| P2 | CP-003..CP-004 | active | ... |
+
+### Assumptions
+
+- A-...
+
+## 5. Todo Snapshot
+
+| ID | Checkpoint | Task | Status | Evidence |
+| --- | --- | --- | --- | --- |
+| T-001 | CP-003 | ... | completed | E-... |
+| T-002 | CP-003 | ... | in_progress | - |
+
+## 6. Evidence Ledger
+
+| ID | Checkpoint | Kind | Command / Artifact | Result | Digest | Created |
+| --- | --- | --- | --- | --- | --- | --- |
+| E-001 | CP-001 | test | `bun test ...` | exit 0 | sha256:... | ... |
+| E-002 | CP-001 | file | `src/...` | present | sha256:... | ... |
+
+## 7. Work Log
+
+> 只追加，不覆盖。订正使用 C-* 条目并引用被订正条目。
+
+### W-0001 · 2026-09-24T...
+
+- Actor: worker
+- Action: ...
+- Result: ...
+- Evidence: E-...
+- Next: ...
+
+### W-0002 · ...
+
+## 8. Decisions
+
+### D-0001 · <decision title>
+
+- Status: accepted / superseded
+- Context: ...
+- Decision: ...
+- Rationale: ...
+- Consequences: ...
+- Evidence: E-...
+- Supersedes: D-...
+
+## 9. Risks and Blockers
+
+| ID | Severity | Status | Risk / Blocker | Mitigation | Next Check |
+| --- | --- | --- | --- | --- | --- |
+| B-001 | high | open | ... | ... | ... |
+
+## 10. Open Questions
+
+| ID | Question | Needed For | Asked To | Status | Answer |
+| --- | --- | --- | --- | --- | --- |
+| Q-001 | ... | CP-003 | user | open | - |
+
+## 11. File / Artifact Map
+
+| Path / Artifact | Purpose | State | Hash / Revision |
+| --- | --- | --- | --- |
+| `src/...` | ... | changed | sha256:... |
+
+## 12. Verification
+
+| Check | Scope | Command | Last Result | Revision |
+| --- | --- | --- | --- | --- |
+| tests | auth | `bun test tests/auth.test.ts` | pass | abc123 |
+
+## 13. Review History
+
+| Round | Checkpoint | Verdict | Findings | Resolution |
+| --- | --- | --- | --- | --- |
+| R-001 | CP-001 | approve | 0 high | - |
+| R-002 | CP-002 | changes_requested | 1 high | fixed |
+
+## 14. Context Epoch Index
+
+| Epoch | Branch | Reason | Snapshot | Resume Point |
+| --- | --- | --- | --- | --- |
+| EP-001 | branch_... | checkpoint CP-002 | epoch_...md | CP-003 |
+
+## 15. Revision History
+
+| Revision | Time | Actor | Operation | Snapshot |
+| --- | --- | --- | --- | --- |
+| 11 | ... | system | checkpoint completed | sha256:... |
+| 12 | ... | worker | current state update | sha256:... |
+```
+
+### 8.4 章节可变性
+
+| 章节 | 规则 |
+| --- | --- |
+| Goal Contract | 系统事实，objective 修改需用户确认 |
+| Current State | 可更新，但保留 revision |
+| Checkpoints | 状态由系统状态机更新 |
+| Plan | 版本化，不覆盖旧 revision |
+| Todo Snapshot | 当前快照可替换，历史保留 revision |
+| Evidence Ledger | 只追加 |
+| Work Log | 只追加 |
+| Decisions | 只追加，supersede 旧决策 |
+| Risks / Blockers | 可更新状态，不删除历史 |
+| Open Questions | 可更新答案，不删除问题 |
+| File Map | 可更新当前状态，保留 revision |
+| Verification | 只追加结果 |
+| Review History | 只追加 |
+| Context Epoch Index | 只追加 |
+| Revision History | 系统生成，只追加 |
+
+### 8.5 订正规则
+
+禁止直接改掉旧事实。
+
+订正必须表达：
+
+```text
+corrects: W-0007
+reason: ...
+old_value: ...
+new_value: ...
+evidence: E-...
+```
+
+如果订正影响已完成 Checkpoint：
+
+- Checkpoint 回到 `verifying`；
+- 关联 Review 标记 `stale`；
+- 重新验证；
+- 生成新 Handoff revision。
+
+### 8.6 Handoff Patch API
+
+模型不能整文件覆写，使用结构化 patch：
+
+```ts
+type HandoffPatch =
+  | { op: "set_current_state"; value: CurrentState }
+  | { op: "upsert_checkpoint"; checkpoint: Checkpoint }
+  | { op: "append_work_log"; entry: WorkLogEntry }
+  | { op: "append_evidence"; evidence: Evidence }
+  | { op: "append_decision"; decision: Decision }
+  | { op: "update_question"; id: string; status: string; answer?: string }
+  | { op: "update_blocker"; id: string; status: string; nextCheck?: string }
+  | { op: "correct_entry"; targetId: string; reason: string; patch: unknown }
+  | { op: "set_next_action"; value: string };
+
+interface HandoffUpdate {
+  baseRevision: number;
+  actor: "system" | "worker" | "reviewer" | "user";
+  patches: HandoffPatch[];
+}
+```
+
+规则：
+
+- `baseRevision` 过期则拒绝；
+- patch 必须通过 schema 校验；
+- 系统事实章节不能被 worker patch 覆盖；
+- 每次成功 patch 产生新 revision；
+- revision 只追加，不覆盖历史。
+
+### 8.7 Epoch Snapshot
+
+创建 Context Epoch 时：
+
+```text
+canonical HANDOFF.md revision N
+  -> 生成 epoch snapshot
+  -> snapshot 不可变
+  -> Epoch 记录 snapshot_hash
+```
+
+之后 canonical Handoff 可以继续更新，但已创建的 Epoch 永远引用它创建时的 snapshot。
+
+### 8.8 Context Epoch 创建
 
 只能在安全边界创建：
 
 - 无 open ToolBatch；
 - 无排队 user message；
 - 无正在执行的工具；
-- 已完成 Handoff。
+- 已完成 Handoff snapshot。
 
 创建流程：
 
@@ -606,7 +891,7 @@ Handoff 不应包含 API key、token、私钥或其他 secret。
 5. 旧 branch 保留
 ```
 
-### 8.4 Epoch Seed 顺序
+### 8.9 Epoch Seed 顺序
 
 新 session：
 
@@ -616,7 +901,7 @@ msgid1 MCP manifest
 msgid2 skills manifest
 msgid3 goal contract
 msgid4 checkpoint/plan/todo snapshot
-msgid5 handoff
+msgid5 handoff snapshot
 msgid6 continuation steering
 ```
 
@@ -627,17 +912,16 @@ msgid6 continuation steering
 - 语义顺序保持一致；
 - 旧 msgid1/2 不被改写。
 
-### 8.5 Handoff 读取
+### 8.10 Handoff 读取
 
-- Handoff ≤ 32 KiB：直接作为 developer message 注入。
-- Handoff > 32 KiB：注入摘要，并要求新 epoch 第一个工具调用为 `get_handoff`。
-- `get_handoff` 返回完整 Handoff。
+- snapshot ≤ 32 KiB：直接作为 developer message 注入。
+- snapshot > 32 KiB：注入 `Current State + Checkpoints + Open Questions + Next Action`，并要求新 epoch 第一个工具调用为 `get_handoff`。
+- `get_handoff` 默认返回 canonical 最新 revision，也可按 epoch 返回 snapshot。
+- 新 epoch 的 developer instruction 必须声明：
 
-新 epoch 的 developer instruction 必须声明：
+> Handoff snapshot 与当前工作区是权威状态；不要把旧记忆当成当前事实。不要重新总结 Handoff，除非发现事实错误并通过 correction patch 记录。
 
-> Handoff 与当前工作区是权威状态；不要把旧记忆当成当前事实。
-
-### 8.6 Todo 注入
+### 8.11 Todo 注入
 
 - 新 Epoch 只注入当前 Todo 快照一次。
 - 之后 Todo 变化作为 developer delta 追加。
@@ -898,7 +1182,26 @@ exit_code INTEGER
 created_at INTEGER NOT NULL
 ```
 
-### 13.4 goal_epochs
+### 13.4 goal_handoffs
+
+```text
+handoff_id TEXT PRIMARY KEY
+goal_id TEXT NOT NULL
+revision INTEGER NOT NULL
+status TEXT NOT NULL
+updated_by TEXT NOT NULL
+current_state TEXT NOT NULL
+markdown_path TEXT NOT NULL
+snapshot_hash TEXT
+supersedes_revision INTEGER
+created_at INTEGER NOT NULL
+updated_at INTEGER NOT NULL
+UNIQUE(goal_id, revision)
+```
+
+canonical `HANDOFF.md` 是当前工作文档；每个 revision 可生成不可变 snapshot。数据库保存 revision 元数据和结构化事实，Markdown 保存人类可读版本。
+
+### 13.5 goal_epochs
 
 ```text
 epoch_id TEXT PRIMARY KEY
@@ -907,6 +1210,8 @@ branch_id TEXT NOT NULL
 parent_epoch_id TEXT
 checkpoint_id TEXT
 handoff_id TEXT NOT NULL
+handoff_revision INTEGER NOT NULL
+handoff_snapshot_hash TEXT NOT NULL
 reason TEXT NOT NULL
 created_at INTEGER NOT NULL
 ```
@@ -961,7 +1266,7 @@ Goal continuation 由 `GoalController` 调用 `runTurn()`，不要让 loop 直�
 GoalController
 GoalStore
 ReviewRunner
-HandoffBuilder
+LivingHandoffBuilder
 ContextEpochManager
 ```
 
@@ -1067,7 +1372,19 @@ remaining_risk[]
 
 ### 15.7 `get_handoff`
 
-返回当前或指定 epoch 的完整 handoff。
+返回 canonical 最新 revision，或按 epoch 返回不可变 snapshot。返回内容包含 revision、snapshot hash 和完整 Markdown。
+
+### 15.8 `handoff_update`
+
+通过结构化 patch 更新 canonical handoff：
+
+```text
+base_revision
+actor
+patches[]
+```
+
+不允许整文件覆盖；系统事实章节由系统维护；worker 只能更新叙事、决策、风险、问题、下一步等允许章节。
 
 ## 16. UI / UX
 
