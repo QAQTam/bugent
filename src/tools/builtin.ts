@@ -15,6 +15,7 @@ import { createTodoWriteTool } from "./todo.ts";
 import { createAskUserTool } from "./ask_user.ts";
 import { ToolRegistry } from "./types.ts";
 import type { PermissionRule } from "../permission/policy.ts";
+import type { GoalController } from "../goal/controller.ts";
 import { MODES, type SandboxMode } from "../permission/mode.ts";
 import { createSandboxedShellRunner, isSandboxAvailable } from "../sandbox/bwrap.ts";
 
@@ -27,6 +28,8 @@ export interface DefaultToolsOptions {
   passEnv?: readonly string[];
   /** 直接覆盖执行层（测试用，优先级最高）。 */
   runner?: ShellRunner;
+  /** 持久化 session 的 Goal controller；存在时 todo_write 进入 Goal 校验模式。 */
+  goalController?: GoalController;
 }
 
 export interface ToolsSetup {
@@ -59,7 +62,13 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     .register(createReadFileTool())
     .register(createWriteFileTool())
     .register(createEditFileTool())
-    .register(createTodoWriteTool())
+    .register(
+      createTodoWriteTool(
+        options.goalController !== undefined
+          ? { goalController: options.goalController }
+          : {},
+      ),
+    )
     .register(createAskUserTool());
 
   let runner: ShellRunner;

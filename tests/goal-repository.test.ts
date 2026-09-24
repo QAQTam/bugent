@@ -211,6 +211,50 @@ describe("Goal P0 · repository", () => {
     expect(repository.listCheckpoints("goal1")).toHaveLength(0);
   });
 
+  test("初始 Plan 与 Checkpoint 原子写入，非法 DAG 不留下半成品", async () => {
+    const store = await makeStore();
+    const repository = new GoalRepository(store.db);
+    createGoal(repository);
+
+    expect(() =>
+      repository.createInitialPlan("goal1", {
+        phases: [
+          {
+            id: "p1",
+            title: "基础",
+            objective: "完成 P0",
+            checkpointIds: ["a", "b"],
+            dependsOn: [],
+            risks: [],
+            verification: ["bun test"],
+          },
+        ],
+        checkpoints: [
+          {
+            id: "a",
+            order: 1,
+            title: "A",
+            deliverable: "A",
+            acceptanceCriteria: ["a"],
+            evidenceRequired: ["test"],
+            dependsOn: ["b"],
+          },
+          {
+            id: "b",
+            order: 2,
+            title: "B",
+            deliverable: "B",
+            acceptanceCriteria: ["b"],
+            evidenceRequired: ["test"],
+            dependsOn: ["a"],
+          },
+        ],
+      }),
+    ).toThrow("存在环");
+    expect(repository.listPlanRevisions("goal1")).toHaveLength(0);
+    expect(repository.listCheckpoints("goal1")).toHaveLength(0);
+  });
+
   test("Plan revision 不覆盖旧版本，Todo 完成必须带证据", async () => {
     const store = await makeStore();
     const repository = new GoalRepository(store.db);

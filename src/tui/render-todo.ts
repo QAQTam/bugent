@@ -82,9 +82,14 @@ export function renderTodoLine(todo: Todo, width: number, options: TodoLineOptio
   const color = STATUS_COLOR[todo.status];
   const baseText =
     todo.status === "in_progress" && todo.activeForm !== undefined ? todo.activeForm : todo.content;
+  const completion =
+    todo.completion ??
+    (todo.completionEvidence !== undefined && todo.completionEvidence.length > 0
+      ? todo.completionEvidence.join("; ")
+      : undefined);
   const text =
-    todo.status === "completed" && todo.completion !== undefined
-      ? `${baseText} — ${todo.completion}`
+    todo.status === "completed" && completion !== undefined
+      ? `${baseText} — ${completion}`
       : baseText;
   const available = Math.max(1, width - 4);
 

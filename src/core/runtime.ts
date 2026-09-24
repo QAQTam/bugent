@@ -211,6 +211,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     mode,
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
+    ...(goalController !== undefined ? { goalController } : {}),
   });
   if (goalController !== undefined) {
     for (const tool of createGoalTools(goalController)) setup.registry.register(tool);

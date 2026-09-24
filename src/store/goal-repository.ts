@@ -131,6 +131,11 @@ export interface PlanRevisionInput {
   now?: number;
 }
 
+export interface InitialPlanInput extends PlanRevisionInput {
+  checkpoints: readonly CheckpointDefinition[];
+  planId?: string;
+}
+
 export interface TodoSnapshotInput {
   id?: string;
   checkpointId: string;
@@ -889,6 +894,9 @@ export class GoalRepository {
   ): Checkpoint[] {
     this.requireGoal(goalId);
     if (definitions.length === 0) throw new GoalRepositoryError("Checkpoint 不能为空");
+    if (definitions.length > 20) {
+      throw new GoalRepositoryError("单个 Goal 最多 20 个 Checkpoint；请合并微步骤");
+    }
 
     const ids = definitions.map((definition) => definition.id ?? newId("cp"));
     const idSet = new Set<string>();
@@ -1088,6 +1096,134 @@ export class GoalRepository {
 
   /* --------------------------- plans --------------------------- */
 
+  /**
+   * 初始 Plan 与 Checkpoint 必须原子写入。
+   *
+   * 如果先写 checkpoints、后写 plan，中间 crash 会留下没有策略依据的孤立阶段；
+   * 这里用一个 immediate transaction 消除该状态。
+   */
+  createInitialPlan(
+    goalId: string,
+    input: InitialPlanInput,
+  ): { plan: PlanRevision; checkpoints: Checkpoint[] } {
+    this.requireGoal(goalId);
+    if (this.listPlanRevisions(goalId).length > 0) {
+      throw new GoalRepositoryError("初始 Plan 已存在；后续变化请使用 appendPlanRevision");
+    }
+    if (this.listCheckpoints(goalId).length > 0) {
+      throw new GoalRepositoryError("Goal 已有 Checkpoint，不能再创建初始 Plan");
+    }
+    if (input.phases.length === 0) throw new GoalRepositoryError("Plan 至少需要一个 phase");
+    if (input.checkpoints.length === 0) throw new GoalRepositoryError("Checkpoint 不能为空");
+    if (input.checkpoints.length > 20) {
+      throw new GoalRepositoryError("单个 Goal 最多 20 个 Checkpoint；请合并微步骤");
+    }
+
+    const checkpointIds = input.checkpoints.map(
+      (definition) => definition.id ?? newId("cp"),
+    );
+    const checkpointIdSet = new Set<string>();
+    const checkpointOrderSet = new Set<number>();
+    for (let index = 0; index < input.checkpoints.length; index += 1) {
+      const checkpointId = checkpointIds[index]!;
+      const definition = input.checkpoints[index]!;
+      if (checkpointIdSet.has(checkpointId)) {
+        throw new GoalRepositoryError(`Checkpoint id 重复：${checkpointId}`);
+      }
+      checkpointIdSet.add(checkpointId);
+      if (!Number.isInteger(definition.order) || definition.order <= 0) {
+        throw new GoalRepositoryError("Checkpoint order 必须是正整数");
+      }
+      if (checkpointOrderSet.has(definition.order)) {
+        throw new GoalRepositoryError(`Checkpoint order 重复：${definition.order}`);
+      }
+      checkpointOrderSet.add(definition.order);
+      nonEmpty(definition.title, "checkpoint.title");
+      nonEmpty(definition.deliverable, "checkpoint.deliverable");
+      nonEmptyList(definition.acceptanceCriteria, "acceptance_criteria");
+      nonEmptyList(definition.evidenceRequired, "evidence_required");
+    }
+    const checkpointById = new Map(
+      checkpointIds.map((checkpointId, index) => [checkpointId, input.checkpoints[index]!]),
+    );
+    assertAcyclic(
+      checkpointIds,
+      (checkpointId) => checkpointById.get(checkpointId)?.dependsOn ?? [],
+      "Checkpoint",
+    );
+
+    const phaseIds = input.phases.map((phase) => phase.id);
+    if (new Set(phaseIds).size !== phaseIds.length) {
+      throw new GoalRepositoryError("Plan phase id 重复");
+    }
+    for (const phase of input.phases) {
+      nonEmpty(phase.id, "plan_phase.id");
+      nonEmpty(phase.title, "plan_phase.title");
+      nonEmpty(phase.objective, "plan_phase.objective");
+      nonEmptyList(phase.verification, "plan_phase.verification");
+      if (phase.checkpointIds.length === 0) {
+        throw new GoalRepositoryError(`Plan phase ${phase.id} 至少需要关联一个 Checkpoint`);
+      }
+      for (const checkpointId of phase.checkpointIds) {
+        if (!checkpointIdSet.has(checkpointId)) {
+          throw new GoalRepositoryError(
+            `Plan phase ${phase.id} 引用了不存在的 Checkpoint：${checkpointId}`,
+          );
+        }
+      }
+    }
+    const phaseById = new Map(input.phases.map((phase) => [phase.id, phase]));
+    assertAcyclic(phaseIds, (phaseId) => phaseById.get(phaseId)?.dependsOn ?? [], "Plan phase");
+
+    const now = input.now ?? Date.now();
+    const planId = input.id ?? newId("plan");
+    const tx = this.#db.transaction(() => {
+      for (let index = 0; index < input.checkpoints.length; index += 1) {
+        const definition = input.checkpoints[index]!;
+        this.#db
+          .query(
+            `INSERT INTO goal_checkpoints
+             (checkpoint_id, goal_id, ordinal, title, deliverable, acceptance_criteria,
+              evidence_required, depends_on, status, created_at, completed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+          )
+          .run(
+            checkpointIds[index]!,
+            goalId,
+            definition.order,
+            definition.title.trim(),
+            definition.deliverable.trim(),
+            JSON.stringify(definition.acceptanceCriteria),
+            JSON.stringify(definition.evidenceRequired),
+            JSON.stringify(definition.dependsOn ?? []),
+            now,
+          );
+      }
+      this.#db
+        .query(
+          `INSERT INTO goal_plan_revisions
+           (plan_id, goal_id, revision, phases, assumptions, created_at)
+           VALUES (?, ?, 1, ?, ?, ?)`,
+        )
+        .run(
+          planId,
+          goalId,
+          JSON.stringify(input.phases),
+          JSON.stringify(input.assumptions ?? []),
+          now,
+        );
+      this.#db
+        .query("UPDATE session_goals SET updated_at = ? WHERE goal_id = ?")
+        .run(now, goalId);
+    });
+    tx.immediate();
+
+    return {
+      plan: this.requirePlanRevision(planId),
+      checkpoints: checkpointIds.map((checkpointId) => this.requireCheckpoint(checkpointId)),
+    };
+  }
+
   appendPlanRevision(goalId: string, input: PlanRevisionInput): PlanRevision {
     this.requireGoal(goalId);
     if (input.phases.length === 0) throw new GoalRepositoryError("Plan 至少需要一个 phase");
@@ -1097,6 +1233,10 @@ export class GoalRepository {
       nonEmpty(phase.id, "plan_phase.id");
       nonEmpty(phase.title, "plan_phase.title");
       nonEmpty(phase.objective, "plan_phase.objective");
+      nonEmptyList(phase.verification, "plan_phase.verification");
+      if (phase.checkpointIds.length === 0) {
+        throw new GoalRepositoryError(`Plan phase ${phase.id} 至少需要关联一个 Checkpoint`);
+      }
       for (const checkpointId of phase.checkpointIds) {
         const checkpoint = this.requireCheckpoint(checkpointId);
         if (checkpoint.goalId !== goalId) {

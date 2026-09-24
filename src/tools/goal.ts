@@ -15,6 +15,7 @@ import type { Tool, ToolCtx } from "./types.ts";
 export const GET_GOAL_TOOL_NAME = "get_goal";
 export const CREATE_GOAL_TOOL_NAME = "create_goal";
 export const UPDATE_GOAL_TOOL_NAME = "update_goal";
+export const UPDATE_PLAN_TOOL_NAME = "update_plan";
 
 const RISK_LEVELS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
 const UPDATE_STATUSES = ["paused", "blocked", "complete"] as const;
@@ -44,6 +45,34 @@ function optionalStrings(source: Record<string, unknown>, key: string): string[]
     }
     return item.trim();
   });
+}
+
+function requiredStrings(source: Record<string, unknown>, key: string): string[] {
+  const values = optionalStrings(source, key);
+  if (values === undefined || values.length === 0) {
+    throw new Error(`${key} 至少需要一项`);
+  }
+  return values;
+}
+
+function objects(source: Record<string, unknown>, key: string): Record<string, unknown>[] {
+  const value = source[key];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} 必须是非空数组`);
+  }
+  return value.map((item, index) => record(item, `${key}[${index}]`));
+}
+
+function optionalObjects(
+  source: Record<string, unknown>,
+  key: string,
+): Record<string, unknown>[] | undefined {
+  const value = source[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} 必须是非空数组`);
+  }
+  return value.map((item, index) => record(item, `${key}[${index}]`));
 }
 
 function riskPolicy(source: Record<string, unknown>): RiskPolicy | undefined {
@@ -113,6 +142,54 @@ const UPDATE_GOAL_PARAMETERS: JSONSchema = {
     reason: { type: "string", description: "状态变更原因，可选" },
   },
   required: ["status"],
+};
+
+const UPDATE_PLAN_PARAMETERS: JSONSchema = {
+  type: "object",
+  properties: {
+    phases: {
+      type: "array",
+      description: "策略阶段；每个阶段至少关联一个 Checkpoint",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          objective: { type: "string" },
+          checkpoint_ids: { type: "array", items: { type: "string" } },
+          depends_on: { type: "array", items: { type: "string" } },
+          risks: { type: "array", items: { type: "string" } },
+          verification: { type: "array", items: { type: "string" } },
+        },
+        required: ["id", "title", "objective", "checkpoint_ids", "verification"],
+      },
+    },
+    checkpoints: {
+      type: "array",
+      description: "首次 update_plan 必须提供；后续策略 revision 省略并复用已冻结的 Checkpoint",
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          order: { type: "integer" },
+          title: { type: "string" },
+          deliverable: { type: "string" },
+          acceptance_criteria: { type: "array", items: { type: "string" } },
+          evidence_required: { type: "array", items: { type: "string" } },
+          depends_on: { type: "array", items: { type: "string" } },
+        },
+        required: [
+          "order",
+          "title",
+          "deliverable",
+          "acceptance_criteria",
+          "evidence_required",
+        ],
+      },
+    },
+    assumptions: { type: "array", items: { type: "string" } },
+  },
+  required: ["phases"],
 };
 
 export function createGoalTools(controller: GoalController): Tool[] {
@@ -226,5 +303,88 @@ export function createGoalTools(controller: GoalController): Tool[] {
     },
   };
 
-  return [getGoal, createGoal, updateGoal];
+  const updatePlan: Tool<unknown, unknown> = {
+    name: UPDATE_PLAN_TOOL_NAME,
+    description: [
+      "为当前 Goal 提交 Plan revision 与 Checkpoint DAG。",
+      "首次调用必须同时提供 checkpoints；后续 revision 只能更新 phases/assumptions。",
+      "Checkpoint 必须是可验证的阶段结果，不能是“运行一次测试”这类微步骤。",
+    ].join("\n"),
+    parameters: UPDATE_PLAN_PARAMETERS,
+    defaultPermission: "allow",
+    resources() {
+      return [{ key: "goal", access: "write" }];
+    },
+    describe(input: unknown) {
+      const source = record(input, "update_plan input");
+      const phaseCount = Array.isArray(source.phases) ? source.phases.length : 0;
+      const checkpointCount = Array.isArray(source.checkpoints)
+        ? source.checkpoints.length
+        : 0;
+      return {
+        resource: "current goal plan",
+        summary: `更新 Goal Plan（${phaseCount} phases / ${checkpointCount} checkpoints）`,
+      };
+    },
+    async run(input: unknown, _ctx: ToolCtx): Promise<unknown> {
+      const source = record(input, "update_plan input");
+      const phases = objects(source, "phases").map((phase, index) => ({
+        id: requiredString(phase, "id"),
+        title: requiredString(phase, "title"),
+        objective: requiredString(phase, "objective"),
+        checkpointIds: requiredStrings(phase, "checkpoint_ids"),
+        dependsOn: optionalStrings(phase, "depends_on") ?? [],
+        risks: optionalStrings(phase, "risks") ?? [],
+        verification: requiredStrings(phase, "verification"),
+      }));
+      const rawCheckpoints = optionalObjects(source, "checkpoints");
+      const checkpoints =
+        rawCheckpoints === undefined
+          ? undefined
+          : rawCheckpoints.map((checkpoint, index) => {
+              const order = checkpoint.order;
+              if (typeof order !== "number" || !Number.isInteger(order) || order <= 0) {
+                throw new Error(`checkpoints[${index}].order 必须是正整数`);
+              }
+              const id = checkpoint.id;
+              if (id !== undefined && typeof id !== "string") {
+                throw new Error(`checkpoints[${index}].id 必须是字符串`);
+              }
+              return {
+                ...(typeof id === "string" && id.trim().length > 0 ? { id: id.trim() } : {}),
+                order,
+                title: requiredString(checkpoint, "title"),
+                deliverable: requiredString(checkpoint, "deliverable"),
+                acceptanceCriteria: requiredStrings(checkpoint, "acceptance_criteria"),
+                evidenceRequired: requiredStrings(checkpoint, "evidence_required"),
+                dependsOn: optionalStrings(checkpoint, "depends_on") ?? [],
+              };
+            });
+      const assumptions = optionalStrings(source, "assumptions");
+      const applied = controller.applyPlan({
+        phases,
+        ...(checkpoints !== undefined ? { checkpoints } : {}),
+        ...(assumptions !== undefined ? { assumptions } : {}),
+      });
+      const firstPending = applied.checkpoints.find(
+        (checkpoint) => checkpoint.status === "pending",
+      );
+      return {
+        planId: applied.plan.id,
+        revision: applied.plan.revision,
+        checkpoints: applied.checkpoints.map((checkpoint) => ({
+          id: checkpoint.id,
+          order: checkpoint.order,
+          status: checkpoint.status,
+        })),
+        next: {
+          action: "todo_write",
+          checkpointId: firstPending?.id ?? null,
+          note: "只为该 Checkpoint 生成 Todo；completed 项必须带 completionEvidence。",
+        },
+      };
+    },
+  };
+
+  return [getGoal, createGoal, updateGoal, updatePlan];
 }

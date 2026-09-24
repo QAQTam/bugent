@@ -175,6 +175,13 @@ P1 已接线：
 只有 `/goal` 会授予一次性的 `create_goal` 权限；普通对话不能自行创建 Goal。
 创建后的 contract 作为 developer context 在 tool batch 结束后的安全边界注入。
 
+P2 已接线：
+
+- `update_plan` 原子创建 Plan revision + Checkpoint DAG，校验依赖无环。
+- `todo_write` 在 Goal 模式下必须关联当前 Checkpoint。
+- Goal Todo 标记 completed 必须提供 `completionEvidence`。
+- Plan / Checkpoint / Todo 变化只追加 developer delta，不改写旧 msgid。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |

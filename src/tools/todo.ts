@@ -15,6 +15,7 @@
 
 import type { JSONSchema } from "../provider/types.ts";
 import type { StoredMessage } from "../core/message.ts";
+import type { GoalController } from "../goal/controller.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 
 export const TODO_TOOL_NAME = "todo_write";
@@ -30,6 +31,10 @@ export interface Todo {
   activeForm?: string;
   /** 完成描述或证据（可选），只在 completed 时展示。 */
   completion?: string;
+  /** Goal 模式下所属 Checkpoint。 */
+  checkpointId?: string;
+  /** Goal 模式下 completed 必须提供的结构化证据。 */
+  completionEvidence?: string[];
   status: TodoStatus;
 }
 
@@ -48,6 +53,10 @@ export const TODO_PARAMETERS: JSONSchema = {
       type: "string",
       description: "整份计划的一句话摘要，可选",
     },
+    checkpoint_id: {
+      type: "string",
+      description: "Goal 模式下当前 Checkpoint ID；清单内各项也可以分别提供 checkpointId",
+    },
     todos: {
       type: "array",
       description: "完整的待办清单（整写覆盖，不是增量）",
@@ -63,6 +72,15 @@ export const TODO_PARAMETERS: JSONSchema = {
           completion: {
             type: "string",
             description: "完成描述或证据，可选；仅 completed 项使用",
+          },
+          checkpointId: {
+            type: "string",
+            description: "Goal 模式下所属 Checkpoint；通常由顶层 checkpoint_id 统一提供",
+          },
+          completionEvidence: {
+            type: "array",
+            description: "Goal 模式下 completed 项必须提供；每项应是可核验的产物或命令结果",
+            items: { type: "string" },
           },
           status: {
             type: "string",
@@ -148,6 +166,27 @@ export function parseTodos(raw: unknown): Todo[] {
       throw new Error(`${at}.completion 只能用于 completed 项`);
     }
 
+    const checkpointId = record.checkpointId;
+    if (checkpointId !== undefined && typeof checkpointId !== "string") {
+      throw new Error(`${at}.checkpointId 必须是字符串`);
+    }
+
+    let completionEvidence: string[] | undefined;
+    if (record.completionEvidence !== undefined) {
+      if (!Array.isArray(record.completionEvidence)) {
+        throw new Error(`${at}.completionEvidence 必须是字符串数组`);
+      }
+      completionEvidence = record.completionEvidence.map((evidence, evidenceIndex) => {
+        if (typeof evidence !== "string" || evidence.trim().length === 0) {
+          throw new Error(`${at}.completionEvidence[${evidenceIndex}] 必须是非空字符串`);
+        }
+        return evidence.trim();
+      });
+    }
+    if (status === "completed" && completionEvidence !== undefined && completionEvidence.length === 0) {
+      throw new Error(`${at}.completionEvidence 不能为空数组`);
+    }
+
     let id: string;
     const rawId = record.id;
     if (typeof rawId === "string" && rawId.trim().length > 0) {
@@ -175,6 +214,10 @@ export function parseTodos(raw: unknown): Todo[] {
       ...(typeof completion === "string" && completion.trim().length > 0
         ? { completion: completion.trim() }
         : {}),
+      ...(typeof checkpointId === "string" && checkpointId.trim().length > 0
+        ? { checkpointId: checkpointId.trim() }
+        : {}),
+      ...(completionEvidence !== undefined ? { completionEvidence } : {}),
     });
   }
 
@@ -285,6 +328,7 @@ export function countTodos(todos: readonly Todo[]): Record<TodoStatus, number> {
 
 export interface TodoWriteInput {
   summary?: unknown;
+  checkpoint_id?: unknown;
   todos?: unknown;
 }
 
@@ -313,10 +357,27 @@ const DESCRIPTION = [
   "- completed 项尽量写一句 completion，让用户知道结果，不要只留一个勾",
 ].join("\n");
 
-export function createTodoWriteTool(): Tool<TodoWriteInput, string> {
+export interface TodoWriteToolOptions {
+  /** Goal 模式下把整写校验与状态推进交给 GoalController。 */
+  goalController?: GoalController;
+}
+
+export function createTodoWriteTool(
+  options: TodoWriteToolOptions = {},
+): Tool<TodoWriteInput, string> {
   return {
     name: TODO_TOOL_NAME,
-    description: DESCRIPTION,
+    description:
+      options.goalController === undefined
+        ? DESCRIPTION
+        : [
+            DESCRIPTION,
+            "",
+            "Goal 模式扩展：",
+            "- 必须用 checkpoint_id 指定当前 Checkpoint",
+            "- completed 项必须提供 completionEvidence",
+            "- 只能为当前 Checkpoint 写 Todo，不能提前生成后续阶段清单",
+          ].join("\n"),
     parameters: TODO_PARAMETERS,
     // 无副作用，只改显示状态 —— 不该为它打断用户
     needsSandbox: false,
@@ -341,6 +402,39 @@ export function createTodoWriteTool(): Tool<TodoWriteInput, string> {
         typeof input.summary === "string" && input.summary.trim().length > 0
           ? input.summary.trim()
           : undefined;
+
+      const currentGoal = options.goalController?.currentGoal();
+      const goal = currentGoal?.status === "complete" ? undefined : currentGoal;
+      if (goal !== undefined) {
+        const topLevelCheckpoint =
+          typeof input.checkpoint_id === "string" && input.checkpoint_id.trim().length > 0
+            ? input.checkpoint_id.trim()
+            : undefined;
+        const checkpointIds = new Set(
+          todos
+            .map((todo) => todo.checkpointId ?? topLevelCheckpoint)
+            .filter((value): value is string => value !== undefined),
+        );
+        if (checkpointIds.size !== 1) {
+          throw new Error("Goal 模式下必须提供唯一的 checkpoint_id");
+        }
+        const checkpointId = [...checkpointIds][0]!;
+        const snapshot = options.goalController!.writeTodos({
+          checkpointId,
+          ...(summary !== undefined ? { summary } : {}),
+          todos: todos.map(({ checkpointId: _checkpointId, ...todo }) => todo),
+        });
+        return [
+          `Goal Checkpoint：${checkpointId}`,
+          `Todo snapshot revision：${snapshot.revision}`,
+          `共 ${todos.length} 项`,
+          counts.completed > 0 ? `${counts.completed} 已完成（含 evidence）` : "",
+          counts.in_progress > 0 ? `${counts.in_progress} 进行中` : "",
+          counts.pending > 0 ? `${counts.pending} 待办` : "",
+        ]
+          .filter((line) => line.length > 0)
+          .join("\n");
+      }
 
       const parts = [`共 ${todos.length} 项`];
       if (counts.completed > 0) parts.push(`${counts.completed} 已完成`);

@@ -2297,7 +2297,9 @@ export class TuiApp implements TuiInteraction {
         if (
           call.name === "get_goal" ||
           call.name === "create_goal" ||
-          call.name === "update_goal"
+          call.name === "update_goal" ||
+          call.name === "update_plan" ||
+          call.name === "todo_write"
         ) {
           this.#refreshGoalStatus();
         }

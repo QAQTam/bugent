@@ -7,14 +7,22 @@
  */
 
 import type { AgentSession } from "../core/session.ts";
-import type { GoalRepository } from "../store/goal-repository.ts";
 import type {
+  CheckpointDefinition,
+  GoalRepository,
+} from "../store/goal-repository.ts";
+import type {
+  Checkpoint,
   Criterion,
   Goal,
   GoalStatus,
+  GoalTodo,
+  PlanPhase,
+  PlanRevision,
   RiskLevel,
   RiskPolicy,
   ReviewPolicy,
+  TodoSnapshot,
 } from "./types.ts";
 
 export interface GoalContractInput {
@@ -25,6 +33,18 @@ export interface GoalContractInput {
   nonGoals?: readonly string[];
   riskPolicy?: RiskPolicy;
   tokenBudget?: number;
+}
+
+export interface GoalPlanInput {
+  phases: readonly PlanPhase[];
+  checkpoints?: readonly CheckpointDefinition[];
+  assumptions?: readonly string[];
+}
+
+export interface GoalTodoInput {
+  checkpointId: string;
+  summary?: string;
+  todos: readonly Omit<GoalTodo, "checkpointId">[];
 }
 
 export interface GoalControllerOptions {
@@ -112,6 +132,78 @@ function renderGoalStatus(goal: Goal): string {
   ].join("\n");
 }
 
+function renderPlan(plan: PlanRevision, checkpoints: readonly Checkpoint[]): string {
+  const phases = plan.phases
+    .map((phase) => {
+      const checkpointList = phase.checkpointIds.join(", ") || "(none)";
+      return `- ${phase.id} · ${phase.title}: ${phase.objective}\n  Checkpoints: ${checkpointList}\n  Verification: ${
+        phase.verification.join("; ") || "(pending)"
+      }`;
+    })
+    .join("\n");
+  const checkpointList = checkpoints
+    .map(
+      (checkpoint) =>
+        `- ${checkpoint.order}. ${checkpoint.title} [${checkpoint.status}]\n` +
+        `  Deliverable: ${checkpoint.deliverable}\n` +
+        `  Acceptance: ${checkpoint.acceptanceCriteria.join("; ")}\n` +
+        `  Evidence required: ${checkpoint.evidenceRequired.join("; ")}`,
+    )
+    .join("\n");
+
+  return [
+    "# Goal Plan",
+    "",
+    `- Goal ID: ${plan.goalId}`,
+    `- Plan revision: ${plan.revision}`,
+    "",
+    "## Phases",
+    "",
+    phases,
+    "",
+    "## Checkpoints",
+    "",
+    checkpointList,
+    "",
+    "## Assumptions",
+    "",
+    plan.assumptions.length > 0
+      ? plan.assumptions.map((assumption) => `- ${assumption}`).join("\n")
+      : "- (none)",
+  ].join("\n");
+}
+
+function renderCheckpointTodo(
+  checkpoint: Checkpoint,
+  snapshot: TodoSnapshot,
+): string {
+  const todos = snapshot.todos
+    .map((todo) => {
+      const evidence =
+        todo.completionEvidence === undefined || todo.completionEvidence.length === 0
+          ? ""
+          : ` · evidence: ${todo.completionEvidence.join("; ")}`;
+      return `- [${todo.status}] ${todo.id}: ${todo.content}${evidence}`;
+    })
+    .join("\n");
+  return [
+    "# Current Goal Checkpoint",
+    "",
+    `- Checkpoint ID: ${checkpoint.id}`,
+    `- Order: ${checkpoint.order}`,
+    `- Title: ${checkpoint.title}`,
+    `- Deliverable: ${checkpoint.deliverable}`,
+    `- Acceptance: ${checkpoint.acceptanceCriteria.join("; ")}`,
+    `- Evidence required: ${checkpoint.evidenceRequired.join("; ")}`,
+    "",
+    `## Todo Snapshot ${snapshot.revision}`,
+    "",
+    todos,
+    "",
+    "Todo 完成不等于 Checkpoint 完成；Checkpoint 仍需 verifier/review。",
+  ].join("\n");
+}
+
 export const GOAL_INITIALIZATION_INSTRUCTION = [
   "# Explicit Goal Initialization",
   "",
@@ -159,6 +251,41 @@ export class GoalController {
         message.parts.some((part) => part.type === "text" && part.text.includes(marker)),
     );
     if (!present) this.session.appendGoalContext(renderGoalContract(goal));
+
+    const plan = this.repository.latestPlanRevision(goal.id);
+    if (plan !== undefined) {
+      const planMarker = `- Plan revision: ${plan.revision}`;
+      const planPresent = this.session.messages.some(
+        (message) =>
+          message.injectionSource === "plan" &&
+          message.parts.some((part) => part.type === "text" && part.text.includes(planMarker)),
+      );
+      if (!planPresent) {
+        this.session.enqueueInjection(
+          renderPlan(plan, this.repository.listCheckpoints(goal.id)),
+          "plan",
+        );
+      }
+    }
+
+    const checkpoint =
+      goal.activeCheckpointId === undefined
+        ? undefined
+        : this.repository.getCheckpoint(goal.activeCheckpointId);
+    if (checkpoint === undefined) return;
+    const todo = this.repository.latestTodoSnapshot(goal.id, checkpoint.id);
+    if (todo === undefined) return;
+    const checkpointMarker = `## Todo Snapshot ${todo.revision}`;
+    const checkpointPresent = this.session.messages.some(
+      (message) =>
+        message.injectionSource === "checkpoint" &&
+        message.parts.some(
+          (part) => part.type === "text" && part.text.includes(checkpointMarker),
+        ),
+    );
+    if (!checkpointPresent) {
+      this.session.enqueueInjection(renderCheckpointTodo(checkpoint, todo), "checkpoint");
+    }
   }
 
   authorizeCreate(ttlMs = DEFAULT_CREATE_AUTHORIZATION_MS): void {
@@ -223,6 +350,87 @@ export class GoalController {
     this.session.appendGoalContext(renderGoalContract(planning));
     this.revokeCreateAuthorization();
     return planning;
+  }
+
+  /**
+   * 第一次 update_plan 原子创建 Plan + Checkpoint DAG，后续 revision 只能
+   * 在尚未执行时重写策略；Checkpoint 集合当前不可中途替换。
+   */
+  applyPlan(input: GoalPlanInput): { plan: PlanRevision; checkpoints: Checkpoint[] } {
+    const goal = this.requireCurrent();
+    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.phase !== "planning" && goal.phase !== "ready") {
+      throw new Error(`只有 planning/ready 阶段可以更新 Plan，当前为 ${goal.phase}`);
+    }
+
+    const existing = this.repository.latestPlanRevision(goal.id);
+    let plan: PlanRevision;
+    let checkpoints: Checkpoint[];
+    if (existing === undefined) {
+      if (input.checkpoints === undefined || input.checkpoints.length === 0) {
+        throw new Error("首次 update_plan 必须提供 checkpoints");
+      }
+      const created = this.repository.createInitialPlan(goal.id, {
+        phases: input.phases,
+        checkpoints: input.checkpoints,
+        ...(input.assumptions !== undefined ? { assumptions: input.assumptions } : {}),
+      });
+      plan = created.plan;
+      checkpoints = created.checkpoints;
+      this.repository.setGoalPhase(goal.id, "ready");
+    } else {
+      if (input.checkpoints !== undefined) {
+        throw new Error("Checkpoint 集合已冻结；后续 update_plan 只能更新 phases/assumptions");
+      }
+      plan = this.repository.appendPlanRevision(goal.id, {
+        phases: input.phases,
+        ...(input.assumptions !== undefined ? { assumptions: input.assumptions } : {}),
+      });
+      checkpoints = this.repository.listCheckpoints(goal.id);
+    }
+
+    this.session.enqueueInjection(renderPlan(plan, checkpoints), "plan");
+    return { plan, checkpoints };
+  }
+
+  /**
+   * Goal 模式 todo 只写当前 Checkpoint。第一次写入会激活第一个 Checkpoint，
+   * 并把 Goal 从 ready 推进到 executing。
+   */
+  writeTodos(input: GoalTodoInput): TodoSnapshot {
+    const goal = this.requireCurrent();
+    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.phase !== "ready" && goal.phase !== "executing") {
+      throw new Error(`只有 ready/executing 阶段可以写 Todo，当前为 ${goal.phase}`);
+    }
+    const plan = this.repository.latestPlanRevision(goal.id);
+    if (plan === undefined) throw new Error("写 Todo 前必须先建立 Plan");
+
+    const checkpoint = this.repository.requireCheckpoint(input.checkpointId);
+    if (checkpoint.goalId !== goal.id) {
+      throw new Error(`Checkpoint ${checkpoint.id} 不属于当前 Goal`);
+    }
+    if (goal.activeCheckpointId === undefined) {
+      const firstPending = this.repository
+        .listCheckpoints(goal.id)
+        .find((candidate) => candidate.status === "pending");
+      if (firstPending?.id !== checkpoint.id) {
+        throw new Error(`Todo 必须属于第一个可执行 Checkpoint：${firstPending?.id ?? "(none)"}`);
+      }
+      this.repository.activateCheckpoint(checkpoint.id);
+      this.repository.setGoalPhase(goal.id, "executing");
+    } else if (goal.activeCheckpointId !== checkpoint.id) {
+      throw new Error(`Todo 只能写入当前 Checkpoint：${goal.activeCheckpointId}`);
+    }
+
+    const snapshot = this.repository.replaceTodoSnapshot(goal.id, {
+      checkpointId: checkpoint.id,
+      ...(input.summary !== undefined ? { summary: input.summary } : {}),
+      todos: input.todos,
+    });
+    const current = this.repository.requireCheckpoint(checkpoint.id);
+    this.session.enqueueInjection(renderCheckpointTodo(current, snapshot), "checkpoint");
+    return snapshot;
   }
 
   pause(reason?: string): Goal {

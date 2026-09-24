@@ -8,6 +8,7 @@ import { createMockClient } from "../src/provider/adapters/mock.ts";
 import { GoalRepository } from "../src/store/goal-repository.ts";
 import { SessionStore } from "../src/store/repository.ts";
 import { createGoalTools } from "../src/tools/goal.ts";
+import { createTodoWriteTool } from "../src/tools/todo.ts";
 import { ToolRegistry } from "../src/tools/types.ts";
 
 const stores: SessionStore[] = [];
@@ -128,6 +129,124 @@ describe("Goal P1 · controller", () => {
     expect(session.messages).toHaveLength(3);
   });
 
+  test("Plan 与 Checkpoint 原子创建，Todo 只属于当前 Checkpoint", async () => {
+    const { session, controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "实现 Goal",
+      objective: "实现完整 Goal",
+      successCriteria: ["测试通过"],
+    });
+
+    const applied = controller.applyPlan({
+      phases: [
+        {
+          id: "phase-1",
+          title: "基础",
+          objective: "完成持久化",
+          checkpointIds: ["cp1", "cp2"],
+          dependsOn: [],
+          risks: [],
+          verification: ["bun test"],
+        },
+      ],
+      checkpoints: [
+        {
+          id: "cp1",
+          order: 1,
+          title: "仓储",
+          deliverable: "GoalRepository",
+          acceptanceCriteria: ["迁移与仓储测试通过"],
+          evidenceRequired: ["test"],
+        },
+        {
+          id: "cp2",
+          order: 2,
+          title: "接线",
+          deliverable: "工具与运行时",
+          acceptanceCriteria: ["组合测试通过"],
+          evidenceRequired: ["test"],
+          dependsOn: ["cp1"],
+        },
+      ],
+    });
+    expect(applied.plan.revision).toBe(1);
+    expect(controller.currentGoal()?.phase).toBe("ready");
+    expect(
+      session.messages.some((message) => message.injectionSource === "plan"),
+    ).toBe(true);
+
+    const registry = new ToolRegistry().register(createTodoWriteTool({ goalController: controller }));
+    const ctx = {
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callId: "todo-1",
+      sessionId: "s1",
+    };
+    const missingCheckpoint = await registry.execute(
+      {
+        id: "todo-1",
+        name: "todo_write",
+        args: { todos: [{ id: "t1", content: "写测试", status: "in_progress" }] },
+      },
+      ctx,
+    );
+    expect(missingCheckpoint.ok).toBe(false);
+    expect(missingCheckpoint.output).toContain("checkpoint_id");
+
+    const noEvidence = await registry.execute(
+      {
+        id: "todo-2",
+        name: "todo_write",
+        args: {
+          checkpoint_id: "cp1",
+          todos: [{ id: "t1", content: "写测试", status: "completed" }],
+        },
+      },
+      ctx,
+    );
+    expect(noEvidence.ok).toBe(false);
+    expect(noEvidence.output).toContain("completionEvidence");
+
+    const created = await registry.execute(
+      {
+        id: "todo-3",
+        name: "todo_write",
+        args: {
+          checkpoint_id: "cp1",
+          todos: [
+            {
+              id: "t1",
+              content: "写测试",
+              status: "completed",
+              completionEvidence: ["tests/goal-controller.test.ts"],
+            },
+            { id: "t2", content: "跑测试", status: "in_progress" },
+          ],
+        },
+      },
+      ctx,
+    );
+    expect(created.ok).toBe(true);
+    expect(created.output).toContain("Todo snapshot revision：1");
+    expect(controller.currentGoal()?.phase).toBe("executing");
+    expect(controller.currentGoal()?.activeCheckpointId).toBe("cp1");
+
+    const wrongCheckpoint = await registry.execute(
+      {
+        id: "todo-4",
+        name: "todo_write",
+        args: {
+          checkpoint_id: "cp2",
+          todos: [{ id: "t3", content: "提前做", status: "pending" }],
+        },
+      },
+      ctx,
+    );
+    expect(wrongCheckpoint.ok).toBe(false);
+    expect(wrongCheckpoint.output).toContain("当前 Checkpoint");
+  });
+
   test("pause/resume 是用户控制；模型 complete 仍受 final audit 门禁", async () => {
     const { controller } = await setup();
     controller.authorizeCreate();
@@ -177,6 +296,63 @@ describe("Goal P1 · tools", () => {
     const repeated = await registry.execute({ id: "c3", name: "create_goal", args: input }, ctx);
     expect(repeated.ok).toBe(false);
     expect(repeated.output).toContain("没有一次性创建授权");
+  });
+
+  test("update_plan 工具创建 Plan 并返回首个 Checkpoint", async () => {
+    const { controller } = await setup();
+    const registry = new ToolRegistry();
+    for (const tool of createGoalTools(controller)) registry.register(tool);
+    const ctx = {
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callId: "c1",
+      sessionId: "s1",
+    };
+    controller.authorizeCreate();
+    await registry.execute(
+      {
+        id: "c1",
+        name: "create_goal",
+        args: {
+          raw_intent: "实现 Goal",
+          objective: "实现完整 Goal",
+          success_criteria: ["测试通过"],
+        },
+      },
+      ctx,
+    );
+
+    const result = await registry.execute(
+      {
+        id: "c2",
+        name: "update_plan",
+        args: {
+          phases: [
+            {
+              id: "p1",
+              title: "基础",
+              objective: "完成 P0",
+              checkpoint_ids: ["cp1"],
+              verification: ["bun test"],
+            },
+          ],
+          checkpoints: [
+            {
+              id: "cp1",
+              order: 1,
+              title: "仓储",
+              deliverable: "GoalRepository",
+              acceptance_criteria: ["测试通过"],
+              evidence_required: ["test"],
+            },
+          ],
+        },
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('"checkpointId": "cp1"');
+    expect(controller.currentGoal()?.phase).toBe("ready");
   });
 
   test("get_goal/update_goal 返回持久状态", async () => {

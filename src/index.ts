@@ -398,13 +398,6 @@ async function main(): Promise<void> {
   const mode: SandboxMode =
     options.mode ?? (options.noSandbox ? "no-sandbox" : undefined) ?? config.sandbox?.mode ?? "workspace-write";
 
-  const tools = createDefaultTools({
-    mode,
-    ...(config.sandbox?.writablePaths !== undefined
-      ? { writablePaths: config.sandbox.writablePaths }
-      : {}),
-    ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
-  });
   const goalController =
     store === undefined
       ? undefined
@@ -413,6 +406,15 @@ async function main(): Promise<void> {
           session,
         });
   goalController?.ensureContext();
+
+  const tools = createDefaultTools({
+    mode,
+    ...(config.sandbox?.writablePaths !== undefined
+      ? { writablePaths: config.sandbox.writablePaths }
+      : {}),
+    ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
+    ...(goalController !== undefined ? { goalController } : {}),
+  });
   if (goalController !== undefined) {
     for (const tool of createGoalTools(goalController)) tools.registry.register(tool);
   }
