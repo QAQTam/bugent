@@ -19,6 +19,8 @@ import {
   type AgentStatus,
   type AgentTaskId,
   type AgentBudget,
+  type AgentAuthority,
+  type AgentCapability,
 } from "./model.ts";
 import type { AgentSandboxSpec } from "./sandbox.ts";
 
@@ -85,6 +87,21 @@ export interface AgentSpec {
   readonly task: AgentTask;
   readonly budget: AgentBudget;
   readonly sandbox: AgentSandboxSpec;
+  /**
+   * Explicit policy for a parent that lives outside this supervisor (for
+   * example the interactive main agent). Without this, a missing parent is an
+   * error; the supervisor never trusts a child spec to authorize itself.
+   */
+  readonly externalParent?: ExternalAgentParent;
+}
+
+export interface ExternalAgentParent {
+  readonly agentId: AgentId;
+  readonly rootId: AgentId;
+  readonly authority: AgentAuthority;
+  readonly capabilities: readonly AgentCapability[];
+  readonly depth: number;
+  readonly maxDepth: number;
 }
 
 export interface AgentExecutionContext {
@@ -323,20 +340,33 @@ export class AgentSupervisorImpl implements AgentSupervisor {
     let depth = 0;
     if (identity.parentId !== undefined) {
       const parent = this.#agents.get(identity.parentId);
-      if (parent === undefined) {
-        throw new Error(`agent supervisor: 父 agent 不存在：${identity.parentId}`);
-      }
-      if (identity.rootId !== parent.spec.identity.rootId) {
-        throw new Error("agent supervisor: 子 agent rootId 必须与父 agent 一致");
-      }
-      if (identity.sessionId === parent.spec.identity.sessionId) {
-        throw new Error("agent supervisor: 子 agent 不能复用父 session");
-      }
-      assertAuthorityAttenuation(spec.sandbox.authority, parent.spec.sandbox.authority);
-      assertCapabilityAttenuation(spec.sandbox.capabilities, parent.spec.sandbox.capabilities);
-      depth = parent.depth + 1;
-      if (depth > parent.spec.sandbox.maxDepth) {
-        throw new Error(`agent supervisor: 超过父 agent maxDepth=${parent.spec.sandbox.maxDepth}`);
+      if (parent !== undefined) {
+        if (identity.rootId !== parent.spec.identity.rootId) {
+          throw new Error("agent supervisor: 子 agent rootId 必须与父 agent 一致");
+        }
+        if (identity.sessionId === parent.spec.identity.sessionId) {
+          throw new Error("agent supervisor: 子 agent 不能复用父 session");
+        }
+        assertAuthorityAttenuation(spec.sandbox.authority, parent.spec.sandbox.authority);
+        assertCapabilityAttenuation(spec.sandbox.capabilities, parent.spec.sandbox.capabilities);
+        depth = parent.depth + 1;
+        if (depth > parent.spec.sandbox.maxDepth) {
+          throw new Error(`agent supervisor: 超过父 agent maxDepth=${parent.spec.sandbox.maxDepth}`);
+        }
+      } else {
+        const external = spec.externalParent;
+        if (external === undefined || external.agentId !== identity.parentId) {
+          throw new Error(`agent supervisor: 父 agent 不存在：${identity.parentId}`);
+        }
+        if (identity.rootId !== external.rootId) {
+          throw new Error("agent supervisor: 子 agent rootId 必须与外部父 agent 一致");
+        }
+        assertAuthorityAttenuation(spec.sandbox.authority, external.authority);
+        assertCapabilityAttenuation(spec.sandbox.capabilities, external.capabilities);
+        depth = external.depth + 1;
+        if (depth > external.maxDepth) {
+          throw new Error(`agent supervisor: 超过外部父 agent maxDepth=${external.maxDepth}`);
+        }
       }
     } else if (identity.rootId !== identity.agentId) {
       throw new Error("agent supervisor: 根 agent 的 rootId 必须等于 agentId");
@@ -710,6 +740,23 @@ export class AgentSupervisorImpl implements AgentSupervisor {
     }
     if (identity.taskId !== undefined && identity.taskId !== spec.task.id) {
       throw new Error("agent supervisor: identity.taskId 必须与 task.id 一致");
+    }
+    if (spec.externalParent !== undefined) {
+      if (identity.parentId === undefined) {
+        throw new Error("agent supervisor: externalParent 只能用于有 parentId 的 agent");
+      }
+      if (spec.externalParent.agentId !== identity.parentId) {
+        throw new Error("agent supervisor: externalParent.agentId 必须等于 identity.parentId");
+      }
+      requireNonEmpty(spec.externalParent.rootId, "externalParent.rootId");
+      if (
+        !Number.isSafeInteger(spec.externalParent.depth) ||
+        spec.externalParent.depth < 0 ||
+        !Number.isSafeInteger(spec.externalParent.maxDepth) ||
+        spec.externalParent.maxDepth < 0
+      ) {
+        throw new Error("agent supervisor: externalParent depth/maxDepth 必须是非负安全整数");
+      }
     }
   }
 }

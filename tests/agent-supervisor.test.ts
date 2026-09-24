@@ -244,6 +244,31 @@ describe("P7-B · AgentSupervisor / Handle / EventBus", () => {
     await supervisor.dispose();
   });
 
+  test("an external parent must be declared explicitly and still attenuates", async () => {
+    const supervisor = createAgentSupervisor();
+    const child = makeSpec("reviewer-ext", "reviewer", {
+      parentId: "main-ext",
+      rootId: "main-ext",
+    });
+
+    await expect(supervisor.spawn(child)).rejects.toThrow(/父 agent 不存在/);
+
+    const handle = await supervisor.spawn({
+      ...child,
+      externalParent: {
+        agentId: "main-ext",
+        rootId: "main-ext",
+        authority: "read-only",
+        capabilities: ["fs.read", "process.exec"],
+        depth: 0,
+        maxDepth: 1,
+      },
+    });
+    expect(handle.parentId).toBe("main-ext");
+    expect(handle.status).toBe("running");
+    await supervisor.dispose();
+  });
+
   test("maxDepth is enforced recursively", async () => {
     const supervisor = createAgentSupervisor();
     await supervisor.spawn(makeSpec("main-1", "main"));
