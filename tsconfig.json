@@ -28,5 +28,5 @@
     }
   },
   "include": ["src", "tests", "runtime", "*.ts", "*.tsx"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "src/butui"]
 }

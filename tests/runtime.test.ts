@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createSessionRuntime, type SessionInteraction } from "../src/core/runtime.ts";
+import type { McpManager } from "../src/mcp/manager.ts";
+import type { SkillManager } from "../src/skills/manager.ts";
 import { PermissionPolicy } from "../src/permission/policy.ts";
 import { createMockClient } from "../src/provider/adapters/mock.ts";
 import { SessionStore } from "../src/store/repository.ts";
@@ -166,5 +168,123 @@ describe("SessionRuntime 隔离", () => {
 
     expect(restored.session.branchId).toBe(fork);
     expect(restored.session.messages.map((message) => message.msgid)).toEqual([0, 1]);
+  });
+
+  test("createSessionRuntime 会挂接共享 MCP registry，并在 manifest 变化时排队 developer delta", () => {
+    const store = makeStore();
+    const first = makeRuntime(store, "workspace-write");
+    first.session.appendUser("u1");
+    first.session.appendAssistant("a1");
+
+    let attachedRegistry: unknown;
+    let detachedRegistry: unknown;
+    let attachedIds: readonly string[] | undefined;
+    let manifestIds: readonly string[] | undefined;
+    const manager = {
+      manifest: (ids?: readonly string[]) => {
+        manifestIds = ids;
+        return "# MCP servers\n\n## fake\n\n- `mcp__fake__echo`";
+      },
+      status: () => ({ servers: [] }),
+      deltaFrom: (previous: string, ids?: readonly string[]) =>
+        previous === "# MCP servers\n\n(none)" && ids?.includes("fake")
+          ? "# MCP manifest update\n\n- `mcp__fake__echo`"
+          : undefined,
+      attach: (registry: unknown, ids?: readonly string[]) => {
+        attachedRegistry = registry;
+        attachedIds = ids;
+        return ["mcp__fake__echo"];
+      },
+      detach: (registry: unknown) => {
+        detachedRegistry = registry;
+      },
+    } as unknown as McpManager;
+
+    const restored = createSessionRuntime({
+      sessionId: first.id,
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      providerId: "test",
+      systemPrompt: "SYS",
+      cwd: "/tmp",
+      store,
+      mode: "workspace-write",
+      policy: new PermissionPolicy({ default: "allow" }),
+      interaction,
+      mcpManager: manager,
+      mcpServerIds: ["fake"],
+    });
+
+    expect(restored.mcpTools).toEqual(["mcp__fake__echo"]);
+    expect(attachedRegistry).toBe(restored.tools);
+    expect(attachedIds).toEqual(["fake"]);
+    expect(manifestIds).toEqual(["fake"]);
+    expect(
+      restored.session.messages.some(
+        (message) =>
+          message.injectionSource === "mcp" &&
+          message.parts.some((part) => part.type === "text" && part.text.includes("MCP manifest update")),
+      ),
+    ).toBe(true);
+
+    restored.dispose();
+    expect(detachedRegistry).toBe(restored.tools);
+  });
+
+  test("createSessionRuntime 会挂接共享 skills registry，并把 catalog 变化排成 skill delta", () => {
+    const store = makeStore();
+    const first = makeRuntime(store, "workspace-write");
+    first.session.appendUser("u1");
+    first.session.appendAssistant("a1");
+
+    let attachedRegistry: unknown;
+    let detachedRegistry: unknown;
+    const manager = {
+      manifest: () => "# Skills\n\n- `skill__review__load`: Review code.",
+      status: () => ({ skills: [{ name: "review", tool: "skill__review__load" }] }),
+      deltaFrom: (previous: string) =>
+        previous === "# Skills\n\n(none)"
+          ? "# Skills manifest update\n\n- `skill__review__load`: Review code."
+          : undefined,
+      attach: (registry: unknown) => {
+        attachedRegistry = registry;
+        return ["skill__review__load"];
+      },
+      detach: (registry: unknown) => {
+        detachedRegistry = registry;
+      },
+    } as unknown as SkillManager;
+
+    const restored = createSessionRuntime({
+      sessionId: first.id,
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      providerId: "test",
+      systemPrompt: "SYS",
+      cwd: "/tmp",
+      store,
+      mode: "workspace-write",
+      policy: new PermissionPolicy({ default: "allow" }),
+      interaction,
+      skillManager: manager,
+    });
+
+    expect(restored.skillTools).toEqual(["skill__review__load"]);
+    expect(restored.skillStatus).toEqual({
+      skills: [{ name: "review", tool: "skill__review__load" }],
+    });
+    expect(attachedRegistry).toBe(restored.tools);
+    expect(
+      restored.session.messages.some(
+        (message) =>
+          message.injectionSource === "skill" &&
+          message.parts.some(
+            (part) => part.type === "text" && part.text.includes("Skills manifest update"),
+          ),
+      ),
+    ).toBe(true);
+
+    restored.dispose();
+    expect(detachedRegistry).toBe(restored.tools);
   });
 });

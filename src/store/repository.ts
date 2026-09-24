@@ -40,6 +40,11 @@ export interface BranchRecord {
   title?: string;
 }
 
+export interface SessionMcpState {
+  serverId: string;
+  enabled: boolean;
+}
+
 export type AuditEventKind =
   | "turn_start"
   | "turn_end"
@@ -105,6 +110,13 @@ interface SessionProviderRow {
   session_id: string;
   provider_id: string;
   config: string;
+  updated_at: number;
+}
+
+interface SessionMcpRow {
+  session_id: string;
+  server_id: string;
+  enabled: number;
   updated_at: number;
 }
 
@@ -311,6 +323,44 @@ export class SessionStore {
     this.#db
       .query("DELETE FROM session_providers WHERE session_id = ? AND provider_id = ?")
       .run(sessionId, providerId);
+  }
+
+  /**
+   * Session-level MCP enablement.
+   *
+   * Absence means "use the global config default", i.e. enabled. We persist
+   * explicit false rows so a session can opt out without modifying config.
+   */
+  listMcpServerStates(sessionId: string): SessionMcpState[] {
+    const rows = this.#db
+      .query("SELECT * FROM session_mcp WHERE session_id = ? ORDER BY server_id ASC")
+      .all(sessionId) as SessionMcpRow[];
+    return rows.map((row) => ({
+      serverId: row.server_id,
+      enabled: row.enabled !== 0,
+    }));
+  }
+
+  isMcpServerEnabled(sessionId: string, serverId: string): boolean {
+    const row = this.#db
+      .query("SELECT enabled FROM session_mcp WHERE session_id = ? AND server_id = ?")
+      .get(sessionId, serverId) as { enabled: number } | null;
+    return row === null ? true : row.enabled !== 0;
+  }
+
+  setMcpServerEnabled(sessionId: string, serverId: string, enabled: boolean): void {
+    this.#db
+      .query(
+        `INSERT INTO session_mcp (session_id, server_id, enabled, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id, server_id)
+         DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, serverId, enabled ? 1 : 0, Date.now());
+  }
+
+  enabledMcpServerIds(sessionId: string, serverIds: readonly string[]): string[] {
+    return serverIds.filter((serverId) => this.isMcpServerEnabled(sessionId, serverId));
   }
 
   /** 更新 session 级沙箱档位；后续 runtime 重建/恢复都以它为准。 */

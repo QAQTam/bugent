@@ -69,4 +69,16 @@ export default defineConfig({
     // 需要写 $HOME 下缓存时显式放行（默认 HOME 是只读的）
     writablePaths: [],
   },
+
+  /**
+   * Skills 采用渐进披露：
+   *   - msgid2 只注入 name + description + load 工具名；
+   *   - 模型匹配任务后才调用 skill__<name>__load 读取 SKILL.md 正文。
+   *
+   * 默认发现 ~/.bugent/skills、~/.agents/skills 和项目内同名目录。
+   */
+  skills: {
+    paths: [],
+    disabled: [],
+  },
 });

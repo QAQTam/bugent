@@ -8,6 +8,7 @@
 import type { ProviderConfig } from "../provider/registry.ts";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import type { SandboxMode } from "../permission/mode.ts";
+import type { McpStdioServerConfig } from "../mcp/stdio.ts";
 
 export interface AgentConfig {
   /** system prompt Markdown 文件；相对路径按 cwd 解析，支持 ~。 */
@@ -37,6 +38,20 @@ export interface SandboxConfig {
   passEnv?: string[];
 }
 
+export interface McpConfig {
+  /** Stdio MCP servers. Each server receives a separate capability grant. */
+  servers?: McpStdioServerConfig[];
+}
+
+export interface SkillsConfig {
+  /** Additional skill roots. Defaults still apply unless disableDefaults is true. */
+  paths?: string[];
+  /** Use only `paths` instead of ~/.bugent/skills, ~/.agents/skills, and project roots. */
+  disableDefaults?: boolean;
+  /** Skill names omitted after root precedence is resolved. */
+  disabled?: string[];
+}
+
 export interface BugentConfig {
   /** 形如 "openai/gpt-4o-mini"。 */
   defaultModel: string;
@@ -44,6 +59,8 @@ export interface BugentConfig {
   agent?: AgentConfig;
   permissions?: PermissionsConfig;
   sandbox?: SandboxConfig;
+  mcp?: McpConfig;
+  skills?: SkillsConfig;
 }
 
 export function defineConfig(config: BugentConfig): BugentConfig {

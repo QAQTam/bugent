@@ -1,6 +1,10 @@
 node_modules/
 dist/
 build/
+runtime/bun/bin/
+runtime/bun/lib/
+runtime/bun/include/
+runtime/bun/runtime.json
 .bugent/
 *.log
 .env

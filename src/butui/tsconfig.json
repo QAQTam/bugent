@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "customConditions": ["browser"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "@butui/solid",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": false,
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@butui/solid/jsx-runtime": ["./jsx-runtime.ts"],
+      "@butui/solid/jsx-dev-runtime": ["./jsx-runtime.ts"],
+      "@butui/solid/plugin": ["../../../buTUI/packages/solid/src/plugin.ts"],
+      "@butui/solid": ["../../../buTUI/packages/solid/src/index.ts"],
+      "@butui/*": ["../../../buTUI/packages/*/src/index.ts"],
+      "solid-js": ["./vendor/solid-js"]
+    }
+  },
+  "include": ["*.ts", "*.tsx"]
+}

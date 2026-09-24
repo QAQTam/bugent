@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -73,6 +73,15 @@ CREATE TABLE IF NOT EXISTS session_providers (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS session_mcp (
+  session_id TEXT NOT NULL,
+  server_id  TEXT NOT NULL,
+  enabled    INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, server_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
@@ -87,6 +96,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, msgid);
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_providers_session ON session_providers(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
 `;
 
@@ -216,6 +226,20 @@ function migrate(db: Database): void {
 
   if (version < 8) {
     ensureColumn(db, "messages", "injection_source", "TEXT");
+  }
+
+  if (version < 9) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session_mcp (
+        session_id TEXT NOT NULL,
+        server_id  TEXT NOT NULL,
+        enabled    INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, server_id),
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp(session_id);
+    `);
   }
 }
 

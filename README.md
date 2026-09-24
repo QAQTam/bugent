@@ -16,6 +16,12 @@ Phase 10. 消息落盘，进行第一轮安全审计。
 ## 快速开始
 
 ```bash
+# 安装当前 checkout 的 Bugent Bun fork 到 runtime/bun/
+bun run runtime:install
+
+# 可选：备份现有 ~/.bun/bin/bun 后替换为 fork
+bun run runtime:install -- --global
+
 bun install
 
 # 无需网络与密钥，验证链路
@@ -73,6 +79,61 @@ base_url = "http://127.0.0.1:8787/v1"
 extra_body = { reasoning_effort = "high" }
 ```
 
+## MCP 与 Skills
+
+上下文按固定前缀只追加：
+
+```text
+msgid0  system prompt
+msgid1  MCP catalog（存储为 system，默认以 developer 渲染）
+msgid2  skills catalog（存储为 system，默认以 developer 渲染）
+msgid3+ 对话与工具消息
+```
+
+MCP 工具命名是 `mcp__<server>__<tool>`。stdio server 在 Linux 上由 Bun
+fork 的 `Bun.spawn({ sandbox })` + `libbugent-sandbox.so` 启动，默认工作区
+只读、私有 state 可写、断网，且没有无沙箱降级路径。
+
+Skills 使用标准目录结构：
+
+```text
+skills/review/
+└── SKILL.md
+```
+
+`SKILL.md` 必须有 YAML frontmatter：
+
+```markdown
+---
+name: review
+description: Review code changes for correctness and regressions.
+---
+
+# Review
+
+Read the diff, inspect tests, and report concrete findings.
+```
+
+msgid2 只包含 `name + description + skill__<name>__load`，正文只在模型匹配任务后
+通过 load 工具进入 tool result。默认发现 `~/.bugent/skills`、`~/.agents/skills`
+以及项目内同名目录；项目 skill 覆盖用户 skill。
+
+```toml
+[skills]
+# paths = ["~/.config/my-skills"]
+# disable_defaults = false
+# disabled = ["legacy-skill"]
+
+# [[mcp.servers]]
+# id = "filesystem"
+# cmd = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+# workspace_read = true
+# workspace_write = false
+# network = "none"
+```
+
+MCP / skills catalog 变化不会改写旧 msgid，只在安全消息边界追加 developer delta。
+
 ## 当前进度
 
 | Phase | 状态 | 说明 |
@@ -88,7 +149,7 @@ extra_body = { reasoning_effort = "high" }
 | P9 多 session | ✅ | `SessionRegistry` + 并发锁：不同会话真并行，同一会话重复进入抛 `SessionBusyError`；TUI `/new` 开新对话；多进程共写同一库已回归测试 |
 | P10 落盘与审计 | ✅ | bun:sqlite + WAL；消息即时落盘、`--resume` 恢复；审计流水含工具调用与权限决策 |
 
-已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter。
+已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter、MCP stdio、Skills、Linux 原生 sandbox provider。
 待实现：`openai-responses`、`anthropic-messages`。
 
 ## 权限模型：档位即授权
@@ -175,6 +236,8 @@ decision = "ask"
 | `edit_file` | 精确字符串替换，不唯一时报错而非猜测 | 路径约束 |
 | `todo_write` | 带 summary/id/completion 的待办清单，sticky 面板实时显示，进行中项带 shimmer | 无副作用，默认放行 |
 | `ask_user` | 分页问答表单（最多 5 题，选项 A~D + 自由回答） | 无副作用，默认放行 |
+| `skill__<name>__load` | 按需加载一个已发现 skill 的 `SKILL.md` 正文 | 固定只读 skill 文件，默认放行 |
+| `mcp__<server>__<tool>` | 调用 MCP server 暴露的工具 | 独立进程，由原生 sandbox capability grant 约束 |
 
 ### 输出折叠
 

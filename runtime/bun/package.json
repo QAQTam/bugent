@@ -1,6 +1,6 @@
 {
   "name": "@bugent/bun-runtime",
-  "version": "1.4.3-bugent.1",
+  "version": "1.4.3-bugent.3",
   "private": true,
   "type": "module",
   "description": "Bugent's Bun fork runtime and native sandbox provider SDK",
@@ -10,11 +10,13 @@
   "exports": {
     ".": "./src/index.ts",
     "./sandbox-abi.h": "./include/bun_spawn_sandbox.h",
+    "./libbugent-sandbox.so": "./lib/libbugent-sandbox.so",
     "./package.json": "./package.json"
   },
   "files": [
     "bin",
     "include",
+    "lib",
     "src",
     "types",
     "README.md",

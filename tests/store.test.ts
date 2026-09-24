@@ -125,6 +125,7 @@ describe("P10 · 数据库", () => {
     expect(sessionColumns.map((column) => column.name)).toContain("sandbox_mode");
     expect(sessionColumns.map((column) => column.name)).toContain("provider_config");
     expect(tables.map((table) => table.name)).toContain("session_providers");
+    expect(tables.map((table) => table.name)).toContain("session_mcp");
     expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
     upgraded.close();
   });
@@ -206,6 +207,27 @@ describe("P10 · 会话与消息持久化", () => {
 
     store.setSandboxMode("s1", "no-sandbox");
     expect(store.getSession("s1")?.sandboxMode).toBe("no-sandbox");
+  });
+
+  test("session 级 MCP server 启停持久化，缺省视为启用", async () => {
+    const store = await makeStore();
+    store.createSession(makeSessionRecord("s1"));
+
+    expect(store.isMcpServerEnabled("s1", "filesystem")).toBe(true);
+    expect(store.enabledMcpServerIds("s1", ["filesystem", "git"])).toEqual([
+      "filesystem",
+      "git",
+    ]);
+
+    store.setMcpServerEnabled("s1", "git", false);
+    expect(store.isMcpServerEnabled("s1", "git")).toBe(false);
+    expect(store.listMcpServerStates("s1")).toEqual([
+      { serverId: "git", enabled: false },
+    ]);
+    expect(store.enabledMcpServerIds("s1", ["filesystem", "git"])).toEqual(["filesystem"]);
+
+    store.setMcpServerEnabled("s1", "git", true);
+    expect(store.isMcpServerEnabled("s1", "git")).toBe(true);
   });
 
   test("session 级 provider profiles 持久化，并强制剔除 apiKey", async () => {

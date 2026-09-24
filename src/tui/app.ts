@@ -17,6 +17,8 @@ import type { Usage } from "../provider/types.ts";
 import { combineHooks, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
+import type { McpStatus } from "../mcp/manager.ts";
+import type { SkillStatus } from "../skills/manager.ts";
 import { BranchService } from "../core/branch-service.ts";
 import { applyWorkspaceUndo, planWorkspaceUndo } from "../core/workspace-undo.ts";
 import type { MsgId, StoredMessage } from "../core/message.ts";
@@ -126,6 +128,8 @@ export interface RuntimeRequest {
   apiKey?: string;
   /** 非敏感 provider 配置覆盖（endpoint/baseUrl 等）。 */
   providerConfig?: PersistedProviderConfig;
+  /** Session-level MCP server allowlist. */
+  mcpServerIds?: readonly string[];
 }
 
 function oneLine(text: string, max = 64): string {
@@ -168,6 +172,16 @@ export interface TuiOptions {
   cwd: string;
   /** 当前 session 的 provider id，用于 /context 展示。 */
   providerId?: string;
+  /** MCP status for /context. `disabledReason` is set on unsupported platforms. */
+  mcp?: McpStatus & { disabledReason?: string };
+  /** All configured MCP servers and their current session enablement. */
+  mcpServers?: readonly { id: string; enabled: boolean }[];
+  /** Skill catalog available to the current session. */
+  skillStatus?: SkillStatus;
+  /** Re-scan skill roots and update all attached registries. */
+  reloadSkills?: () => Promise<SkillStatus>;
+  /** Reload a configured MCP server's tool snapshot. */
+  reloadMcp?: (serverId: string) => Promise<void>;
   /** 可切换的 provider id 列表。 */
   providers?: readonly string[];
   /** 当前 session 的非敏感 provider 配置。 */
@@ -211,6 +225,11 @@ export class TuiApp implements TuiInteraction {
   #tools: ToolRegistry;
   #cwd: string;
   #providerId: string;
+  #mcp: (McpStatus & { disabledReason?: string }) | undefined;
+  #mcpServers: readonly { id: string; enabled: boolean }[] = [];
+  #skillStatus: SkillStatus | undefined;
+  #reloadSkills: (() => Promise<SkillStatus>) | undefined;
+  #reloadMcp: ((serverId: string) => Promise<void>) | undefined;
   #providerIds: readonly string[];
   #registeredProviderIds: ReadonlySet<string>;
   /** 当前 provider 的非敏感配置；API key 不在其中。 */
@@ -228,6 +247,8 @@ export class TuiApp implements TuiInteraction {
     | ((interaction: TuiInteraction, request?: RuntimeRequest) => SessionRuntime)
     | undefined;
   #createSession: (() => AgentSession) | undefined;
+  /** 最近一次由 createRuntime 创建的 runtime；切换时负责释放其 MCP attachments。 */
+  #runtime: SessionRuntime | undefined;
   #branchService: BranchService | undefined;
   #audit: AuditTrail | undefined;
   /** 最近一条 assistant 消息；工具卡片用它建立可点击目标。 */
@@ -310,6 +331,11 @@ export class TuiApp implements TuiInteraction {
     this.#tools = options.tools;
     this.#cwd = options.cwd;
     this.#providerId = options.providerId ?? options.session.client.id.split("/")[0] ?? "unknown";
+    this.#mcp = options.mcp;
+    this.#mcpServers = options.mcpServers ?? [];
+    this.#skillStatus = options.skillStatus;
+    this.#reloadSkills = options.reloadSkills;
+    this.#reloadMcp = options.reloadMcp;
     const savedProviderConfigs = options.providerConfigs ?? [];
     for (const config of savedProviderConfigs) this.#providerConfigs.set(config.id, config);
     if (options.providerConfig !== undefined) {
@@ -964,6 +990,24 @@ export class TuiApp implements TuiInteraction {
 
   /** `/context`：展示当前 session 的 effective config，并提供配置入口。 */
   async #openContextDialog(): Promise<void> {
+    const mcpStatus = new Map(
+      (this.#mcp?.servers ?? []).map((server) => [server.id, server.tools.length]),
+    );
+    const mcpLines =
+      this.#mcp?.disabledReason !== undefined
+        ? [`MCP       ${this.#mcp.disabledReason}`]
+        : this.#mcpServers.length > 0
+          ? this.#mcpServers.map(
+              (server) =>
+                `MCP       ${server.id} · ${
+                  server.enabled ? `${mcpStatus.get(server.id) ?? 0} tools` : "disabled"
+                }`,
+            )
+          : ["MCP       (none)"];
+    const skillLines =
+      this.#skillStatus !== undefined && this.#skillStatus.skills.length > 0
+        ? this.#skillStatus.skills.map((skill) => `Skill     ${skill.name} · load tool`)
+        : ["Skill     (none)"];
     const openMenu = await this.#openDialog({
       title: "会话上下文",
       body: [
@@ -975,6 +1019,8 @@ export class TuiApp implements TuiInteraction {
         `endpoint  ${this.#providerConfig?.endpoint ?? "(registry)"}`,
         `baseUrl   ${this.#providerConfig?.baseUrl ?? "(registry)"}`,
         `sandbox   ${this.#mode}`,
+        ...mcpLines,
+        ...skillLines,
         `API key   ${this.#apiKeyOverride !== undefined ? "已设置（keychain / 内存）" : "使用 provider 配置"}`,
         `持久化    ${this.#createRuntime === undefined ? "关闭" : "开启"}`,
       ],
@@ -994,6 +1040,15 @@ export class TuiApp implements TuiInteraction {
       { label: "切换 provider", run: () => this.#chooseProvider() },
       { label: "切换模型", run: () => this.#promptModel() },
       { label: "设置 API key", run: () => this.#promptApiKey() },
+      ...(this.#mcpServers.length > 0
+        ? [
+            { label: "启停 MCP server", run: () => this.#chooseMcpServer() },
+            { label: "重载 MCP 工具", run: () => this.#chooseMcpReload() },
+          ]
+        : []),
+      ...(this.#reloadSkills !== undefined
+        ? [{ label: "重载 skills", run: () => this.#reloadSkillCatalog() }]
+        : []),
     ] as const;
 
     const answers = await this.askUser([
@@ -1005,6 +1060,92 @@ export class TuiApp implements TuiInteraction {
     const selected = answers?.[0]?.selected[0];
     if (selected === undefined) return;
     await actions[selected]?.run();
+  }
+
+  /** 切换当前 session 的 MCP server 启停状态。 */
+  async #chooseMcpServer(): Promise<void> {
+    const answers = await this.askUser([
+      {
+        question: "选择要启停的 MCP server",
+        options: this.#mcpServers.map(
+          (server) => `${server.enabled ? "停用" : "启用"} — ${server.id}`,
+        ),
+      },
+    ]);
+    const index = answers?.[0]?.selected[0];
+    if (index === undefined) return;
+    const selected = this.#mcpServers[index];
+    if (selected === undefined) return;
+    const next = this.#mcpServers.map((server) =>
+      server.id === selected.id ? { ...server, enabled: !server.enabled } : server,
+    );
+    const enabledIds = next.filter((server) => server.enabled).map((server) => server.id);
+    if (this.#reconfigureRuntime({ mcpServerIds: enabledIds })) {
+      this.#transcript.pushNotice(
+        `MCP server ${selected.id} 已${selected.enabled ? "停用" : "启用"}（当前 session）`,
+      );
+      this.#render(true);
+    }
+  }
+
+  /** 重载当前 session 可用的 MCP server 工具快照。 */
+  async #chooseMcpReload(): Promise<void> {
+    if (this.#busy) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再重载 MCP");
+      this.#render(true);
+      return;
+    }
+    if (this.#reloadMcp === undefined) {
+      this.#transcript.pushError("当前没有可用的 MCP 重载入口");
+      this.#render(true);
+      return;
+    }
+    const enabled = this.#mcpServers.filter((server) => server.enabled);
+    if (enabled.length === 0) {
+      this.#transcript.pushError("当前 session 没有启用的 MCP server");
+      this.#render(true);
+      return;
+    }
+    const answers = await this.askUser([
+      {
+        question: "选择要重载的 MCP server",
+        options: enabled.map((server) => server.id),
+      },
+    ]);
+    const index = answers?.[0]?.selected[0];
+    if (index === undefined) return;
+    const server = enabled[index];
+    if (server === undefined) return;
+    try {
+      await this.#reloadMcp(server.id);
+      this.#transcript.pushNotice(`MCP server ${server.id} 工具列表已重载`);
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+    }
+    this.#render(true);
+  }
+
+  /** 重载 skill catalog，并在安全边界追加 developer delta。 */
+  async #reloadSkillCatalog(): Promise<void> {
+    if (this.#busy) {
+      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再重载 skills");
+      this.#render(true);
+      return;
+    }
+    if (this.#reloadSkills === undefined) {
+      this.#transcript.pushError("当前没有可用的 skills 重载入口");
+      this.#render(true);
+      return;
+    }
+    try {
+      this.#skillStatus = await this.#reloadSkills();
+      this.#transcript.pushNotice(
+        `skills 已重载：当前 ${this.#skillStatus.skills.length} 个可用`,
+      );
+    } catch (error) {
+      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
+    }
+    this.#render(true);
   }
 
   /** 用单选表单切换当前 session 的沙箱档位。 */
@@ -1394,11 +1535,15 @@ export class TuiApp implements TuiInteraction {
       apiKey?: string;
       clearApiKey?: boolean;
       providerConfig?: PersistedProviderConfig;
+      mcpServerIds?: readonly string[];
     } = {},
   ): boolean {
     const mode = overrides.mode ?? this.#mode;
     const providerId = overrides.providerId ?? this.#providerId;
     const model = overrides.model ?? this.#session.model;
+    const mcpServerIds =
+      overrides.mcpServerIds ??
+      this.#mcpServers.filter((server) => server.enabled).map((server) => server.id);
     const providerChanged = providerId !== this.#providerId;
     const providerConfig =
       overrides.providerConfig ?? (providerChanged ? undefined : this.#providerConfig);
@@ -1412,7 +1557,8 @@ export class TuiApp implements TuiInteraction {
       model === this.#session.model &&
       overrides.apiKey === undefined &&
       overrides.clearApiKey !== true &&
-      overrides.providerConfig === undefined
+      overrides.providerConfig === undefined &&
+      overrides.mcpServerIds === undefined
     ) {
       this.#transcript.pushNotice("当前 session 配置没有变化");
       this.#render(true);
@@ -1443,6 +1589,7 @@ export class TuiApp implements TuiInteraction {
         model,
         ...(providerConfig !== undefined ? { providerConfig } : {}),
         ...(apiKey !== undefined ? { apiKey } : {}),
+        mcpServerIds,
       });
       this.#adoptRuntime(runtime);
       if (overrides.clearApiKey === true) this.#apiKeyOverride = undefined;
@@ -1766,12 +1913,23 @@ export class TuiApp implements TuiInteraction {
   }
 
   #adoptRuntime(runtime: SessionRuntime): void {
+    this.#runtime?.dispose();
+    this.#runtime = runtime;
     if (runtime.session.id !== this.#session.id) this.#apiKeyOverride = undefined;
     this.#session = runtime.session;
     this.#tools = runtime.tools;
     this.#mode = runtime.mode;
     this.#audit = runtime.audit;
     this.#providerId = runtime.providerId;
+    if (runtime.mcpStatus !== undefined) {
+      this.#mcp = runtime.mcpStatus;
+      const enabled = new Set(runtime.mcpStatus.servers.map((server) => server.id));
+      this.#mcpServers = this.#mcpServers.map((server) => ({
+        ...server,
+        enabled: enabled.has(server.id),
+      }));
+    } else if (this.#mcp?.disabledReason === undefined) this.#mcp = undefined;
+    this.#skillStatus = runtime.skillStatus;
     this.#lastAssistantMsgid = undefined;
   }
 

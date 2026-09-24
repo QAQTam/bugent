@@ -15,7 +15,8 @@ import { dirname } from "node:path";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import { isSandboxMode } from "../permission/mode.ts";
 import type { EndpointKind, ProviderConfig } from "../provider/registry.ts";
-import type { BugentConfig, SandboxConfig } from "./schema.ts";
+import type { McpStdioServerConfig } from "../mcp/stdio.ts";
+import type { BugentConfig, McpConfig, SandboxConfig, SkillsConfig } from "./schema.ts";
 
 export const CONFIG_DIR_NAME = ".bugent";
 export const CONFIG_FILE_NAME = "config.toml";
@@ -172,6 +173,148 @@ function parseRule(raw: unknown, index: number): PermissionRule {
   return { tool, decision, ...(resource !== undefined ? { resource } : {}) };
 }
 
+function parseMcpLimits(raw: unknown, field: string): McpStdioServerConfig["limits"] | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`config.toml: ${field} 必须是表`);
+  }
+  const table = raw as Raw;
+  const limits: NonNullable<McpStdioServerConfig["limits"]> = {};
+  const fields: Array<[keyof NonNullable<McpStdioServerConfig["limits"]>, string, string[]]> = [
+    ["cpuSeconds", "cpu_seconds", ["cpu_seconds", "cpuSeconds"]],
+    ["addressSpaceBytes", "address_space_bytes", ["address_space_bytes", "addressSpaceBytes"]],
+    ["fileSizeBytes", "file_size_bytes", ["file_size_bytes", "fileSizeBytes"]],
+    ["openFiles", "open_files", ["open_files", "openFiles"]],
+    ["processes", "processes", ["processes"]],
+  ];
+  for (const [key, fieldName, names] of fields) {
+    const value = pick(table, ...names);
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`config.toml: ${field}.${fieldName} 必须是正的安全整数`);
+    }
+    limits[key] = value;
+  }
+  return Object.keys(limits).length > 0 ? limits : undefined;
+}
+
+function parseMcpServer(raw: unknown, index: number): McpStdioServerConfig {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`config.toml: mcp.servers[${index}] 必须是表`);
+  }
+  const table = raw as Raw;
+  const at = `mcp.servers[${index}]`;
+
+  const id = asString(pick(table, "id", "name"), `${at}.id`);
+  if (id === undefined) throw new Error(`config.toml: ${at}.id 必填`);
+  const cmd = asStringArray(table.cmd, `${at}.cmd`);
+  if (cmd === undefined || cmd.length === 0) {
+    throw new Error(`config.toml: ${at}.cmd 必须是非空字符串数组`);
+  }
+
+  const cwd = asString(table.cwd, `${at}.cwd`);
+  const env = asStringArray(table.env, `${at}.env`);
+  const read = asStringArray(table.read, `${at}.read`);
+  const write = asStringArray(table.write, `${at}.write`);
+  const exec = asStringArray(table.exec, `${at}.exec`);
+  const networkAllow = asStringArray(
+    pick(table, "network_allow", "networkAllow"),
+    `${at}.network_allow`,
+  );
+  const stateDir = asString(pick(table, "state_dir", "stateDir"), `${at}.state_dir`);
+  const workspaceRead = asBool(
+    pick(table, "workspace_read", "workspaceRead"),
+    `${at}.workspace_read`,
+  );
+  const rawWorkspaceWrite = pick(table, "workspace_write", "workspaceWrite");
+  let workspaceWrite: boolean | string[] | undefined;
+  if (rawWorkspaceWrite !== undefined) {
+    if (typeof rawWorkspaceWrite === "boolean") {
+      workspaceWrite = rawWorkspaceWrite;
+    } else {
+      workspaceWrite = asStringArray(rawWorkspaceWrite, `${at}.workspace_write`);
+    }
+  }
+
+  const network = asString(table.network, `${at}.network`) as
+    | McpStdioServerConfig["network"]
+    | undefined;
+  if (
+    network !== undefined &&
+    network !== "none" &&
+    network !== "allowlist" &&
+    network !== "all"
+  ) {
+    throw new Error(`config.toml: ${at}.network 必须是 none / allowlist / all`);
+  }
+  const limits = parseMcpLimits(table.limits, `${at}.limits`);
+  const stderrLimitBytes = pick(table, "stderr_limit_bytes", "stderrLimitBytes");
+  if (
+    stderrLimitBytes !== undefined &&
+    (typeof stderrLimitBytes !== "number" ||
+      !Number.isSafeInteger(stderrLimitBytes) ||
+      stderrLimitBytes <= 0)
+  ) {
+    throw new Error(`config.toml: ${at}.stderr_limit_bytes 必须是正整数`);
+  }
+
+  return {
+    id,
+    cmd,
+    ...(cwd !== undefined ? { cwd } : {}),
+    ...(env !== undefined ? { env } : {}),
+    ...(read !== undefined ? { read } : {}),
+    ...(write !== undefined ? { write } : {}),
+    ...(exec !== undefined ? { exec } : {}),
+    ...(network !== undefined ? { network } : {}),
+    ...(networkAllow !== undefined ? { networkAllow } : {}),
+    ...(stateDir !== undefined ? { stateDir } : {}),
+    ...(workspaceRead !== undefined ? { workspaceRead } : {}),
+    ...(workspaceWrite !== undefined ? { workspaceWrite } : {}),
+    ...(limits !== undefined ? { limits } : {}),
+    ...(stderrLimitBytes !== undefined ? { stderrLimitBytes } : {}),
+  };
+}
+
+function parseMcp(raw: unknown): McpConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config.toml: mcp 必须是表");
+  }
+  const table = raw as Raw;
+  const servers = pick(table, "servers", "server");
+  if (servers === undefined) return {};
+  if (!Array.isArray(servers)) {
+    throw new Error("config.toml: mcp.servers 必须是数组（用 [[mcp.servers]]）");
+  }
+  const parsed = servers.map(parseMcpServer);
+  const ids = new Set<string>();
+  for (const server of parsed) {
+    if (ids.has(server.id)) throw new Error(`config.toml: MCP server id 重复：${server.id}`);
+    ids.add(server.id);
+  }
+  return { servers: parsed };
+}
+
+function parseSkills(raw: unknown): SkillsConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config.toml: skills 必须是表");
+  }
+  const table = raw as Raw;
+  const paths = asStringArray(table.paths, "skills.paths");
+  const disabled = asStringArray(table.disabled, "skills.disabled");
+  const disableDefaults = asBool(
+    pick(table, "disable_defaults", "disableDefaults"),
+    "skills.disable_defaults",
+  );
+  return {
+    ...(paths !== undefined ? { paths } : {}),
+    ...(disableDefaults !== undefined ? { disableDefaults } : {}),
+    ...(disabled !== undefined ? { disabled } : {}),
+  };
+}
+
 /** TOML 文本 -> BugentConfig。 */
 export function parseConfigToml(text: string): BugentConfig {
   const root = Bun.TOML.parse(text) as Raw;
@@ -189,6 +332,8 @@ export function parseConfigToml(text: string): BugentConfig {
   const agentTable = (pick(root, "agent") ?? {}) as Raw;
   const permissionsTable = (pick(root, "permissions") ?? {}) as Raw;
   const sandboxTable = (pick(root, "sandbox") ?? {}) as Raw;
+  const mcp = parseMcp(pick(root, "mcp"));
+  const skills = parseSkills(pick(root, "skills"));
 
   const rawRules = pick(permissionsTable, "rules") ?? [];
   if (!Array.isArray(rawRules)) {
@@ -240,6 +385,8 @@ export function parseConfigToml(text: string): BugentConfig {
       rules: rawRules.map(parseRule),
     },
     sandbox,
+    ...(mcp !== undefined ? { mcp } : {}),
+    ...(skills !== undefined ? { skills } : {}),
   };
 }
 
@@ -283,6 +430,30 @@ writable_paths = []
 # 环境变量是**白名单制**：只保留 PATH/HOME/TERM/LANG 等少数几个，
 # 其余（含各种 API key）一律不传给子进程。需要什么在这里显式加。
 pass_env = []
+
+# ---- MCP ----
+# MCP stdio server 默认：工作区只读、私有 state 可写、断网、独立进程沙箱。
+# 当前原生沙箱只支持 Linux；其他平台会明确关闭 MCP，不会无沙箱启动。
+#
+# [[mcp.servers]]
+# id = "filesystem"
+# cmd = ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+# workspace_read = true
+# workspace_write = false
+# network = "none"
+# read = []
+# write = []
+# exec = []
+# env = []
+# limits = { cpu_seconds = 30, address_space_bytes = 536870912, open_files = 256, processes = 64 }
+
+# ---- Skills ----
+# 默认发现 ~/.bugent/skills、~/.agents/skills 以及项目内同名目录。
+# 每个 skill 是一个包含 SKILL.md 的目录；YAML frontmatter 必须提供 name/description。
+[skills]
+# paths = ["~/.config/my-skills"]
+# disable_defaults = false
+# disabled = ["legacy-skill"]
 
 # ---- provider ----
 # 任何 OpenAI 兼容端点都能这样接

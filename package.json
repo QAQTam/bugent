@@ -15,6 +15,10 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit",
+    "butui": "cd src/butui && bun --conditions=browser run main.tsx",
+    "butui:typecheck": "cd ../buTUI && bun --conditions=browser x tsc --noEmit -p ../bugent/src/butui/tsconfig.typecheck.json",
+    "build:sandbox": "bun run scripts/build-sandbox.ts",
+    "runtime:install": "bun run scripts/install-bun-runtime.ts",
     "package:bun-runtime": "bun run runtime/bun/scripts/package.ts"
   },
   "type": "module",

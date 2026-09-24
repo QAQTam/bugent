@@ -2,8 +2,8 @@
 
 > 更新时间：2026-09-24  
 > 分支：`master`  
-> 基线提交：`5e82597 feat(provider): 支持 reasoning replay`
-> 当前状态：Phase A / B / C 已实现，尚未提交
+> 基线提交：`f04a60d feat: 强化会话运行时并接入 Bun sandbox SDK`
+> 当前状态：Linux 原生 sandbox provider、MCP、skills、Bun fork runtime 与 buTUI 独立实验入口已完成；当前工作树待拆分提交
 
 ## 1. 当前状态
 
@@ -11,10 +11,19 @@
 
 ```bash
 bun test
-# 465 pass / 0 fail
+# 493 pass / 0 fail
 
 bun run typecheck
 # clean
+```
+
+当前全局 `bun` 已替换为 Bugent Bun fork：
+
+```text
+/home/qaqtamsy/.bun/bin/bun
+version 1.4.3
+upstream backup: /home/qaqtamsy/.bun/bin/bun-upstream-1.4.2
+project runtime: runtime/bun/bin/bugent-bun
 ```
 
 真实 provider 冒烟已通过（本地 wbproxy，允许的模型）：
@@ -69,7 +78,7 @@ reasoning_replay = "reasoning"
 当前 schema 版本：
 
 ```text
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 ```
 
 ### 2.2 思考链路 UI
@@ -434,8 +443,19 @@ sandbox: {
 - release 二进制：`build/release/bun`，约 78MB；
 - release 版本：`1.4.3`，revision `6d504dd983`；
 - 真实 provider 测试通过：允许路径返回 0，provider 返回 `EACCES` 时 spawn 正确失败；
-- bugent 测试：465 pass / 0 fail；
+- bugent 测试：493 pass / 0 fail；
 - bugent typecheck 通过。
+
+安装当前 checkout 的 fork：
+
+```bash
+bun run runtime:install
+bun run runtime:install -- --global
+```
+
+`--global` 会保留 `~/.bun/bin/bun-upstream-<version>`，再原子替换
+`~/.bun/bin/bun`，并创建 `bugent-bun` alias。runtime 校验同时接受路径相同或
+字节内容相同的二进制，因此全局副本与 `runtime/bun/bin/bugent-bun` 都被认可。
 
 bugent runtime SDK：
 
@@ -461,14 +481,15 @@ bun run package:bun-runtime
 当前 artifact：
 
 ```text
-dist/bun-runtime/bugent-bun-runtime-1.4.3-bugent.1-linux-x64.tar.gz
-sha256: a2629771c2b7cb261b81abd46f7980bcf5e85d02e8debc7d50fcda237f32b250
+dist/bun-runtime/bugent-bun-runtime-1.4.3-bugent.3-linux-x64.tar.gz
+sha256: 12590fd2efbfdd9d9ab69cf09663fd248e49fd23dcd79a98c3b61953b463473c
 ```
 
 包内运行时：
 
 ```text
 bugent-bun-runtime/bin/bugent-bun
+bugent-bun-runtime/lib/libbugent-sandbox.so
 bugent-bun-runtime/include/bun_spawn_sandbox.h
 bugent-bun-runtime/src/index.ts
 bugent-bun-runtime/types/bun-spawn-sandbox.d.ts
@@ -483,12 +504,150 @@ bugent-bun-runtime/runtime.json
 - `nasm` 缓存在 `/home/qaqtamsy/.cache/bugent-tools/nasm-3.02`；
 - WebKit prebuilt 使用 gh-proxy 镜像下载到 Bun build cache。
 
-尚未实现：
+## 10.2 Native sandbox + MCP（本次实现）
 
-- bugent 自己的 Landlock/seccomp provider；
-- sandbox policy 编译器；
-- MCP server capability grant 与 spawn 接入；
-- Windows sandbox provider。
+新增文件：
+
+```text
+native/sandbox/provider.c
+native/sandbox/Makefile
+native/sandbox/README.md
+scripts/build-sandbox.ts
+src/sandbox/policy.ts
+src/mcp/stdio.ts
+src/mcp/tools.ts
+src/mcp/manager.ts
+```
+
+Linux provider 在 `apply()` 中只使用 syscall：
+
+- `PR_SET_NO_NEW_PRIVS`；
+- Landlock filesystem allowlist（deny by default）；
+- `network=none` 时安装 seccomp filter，禁止 socket/socketpair/connect/bind/listen/accept/io_uring；
+- 可选 `prlimit64` CPU / address-space / file-size / open-files / process limits；
+- `close_range(3, ~0, CLOSE_RANGE_UNSHARE)`，只保留 stdin/stdout/stderr。
+
+安全语义：
+
+- MCP stdio 没有“无沙箱降级”路径；必须运行在 Bugent Bun fork 上，否则 fail closed；
+- 默认工作区只读、私有 state 目录可写、断网、环境变量白名单；
+- `workspaceWrite` 默认 false，可传 `true` 或显式路径数组；
+- 读路径、写路径、执行路径均为显式能力；Landlock execute 以目录规则实现；
+- Bun/JSC 启动需要读 `/proc`，因此默认 runtime read roots 含 `/proc`；这是有意的只读权衡；
+- seccomp 不允许创建新 socket，但允许已有 fd 上的 stdio `recvfrom`/`sendmsg`，否则 Bun stdin 会收到 `EPERM`。
+
+MCP 接线：
+
+- `McpStdioClient` 实现 JSON-RPC stdio、initialize、tools/list、tools/call、超时/关闭和 stderr 诊断；
+- `createMcpTool()` 把工具注册成 `mcp__<server>__<tool>`，所有调用仍必须经过 `ToolRegistry.execute()`；
+- `McpManager` 负责 server 生命周期和工具快照 reload，并可同时挂接到多个 session runtime；
+- `startConfiguredMcp()` 从 `[[mcp.servers]]` 启动 server，生成稳定 manifest；
+- `createSessionRuntime()` 自动 attach/detach MCP registry；恢复旧 session 时保留 msgid1，不重写历史，只把变化的完整目录作为 developer delta 注入；
+- `McpManager.onToolsChanged` 已接到 CLI：工具目录变化时按安全边界 enqueue developer delta；
+- `/context` 会显示每个 MCP server 的工具数量、启用/停用状态，非 Linux 显示关闭原因；
+- `/context` 二级菜单支持重载 MCP 工具、启停当前 session 的 MCP server；
+- session 级启停持久化在 `session_mcp` 表（schema v9）；缺省视为启用；
+- runtime 重建时 MCP client 复用，不重启 server；TUI 切换 runtime 会释放旧 registry attachment；
+- `[[mcp.servers]]` 字段：`id/cmd/cwd/env/workspace_read/workspace_write/read/write/exec/network/state_dir/limits`；
+- 非 Linux 平台配置 MCP 时明确返回“MCP 已关闭”，不会以无沙箱方式启动。
+
+当前验证：
+
+```text
+bun test
+# 493 pass / 0 fail
+
+bun run typecheck
+# clean
+```
+
+后续：
+
+- 增加 session 级 capability grant 覆盖；MCP 进程必须按 grant fingerprint 分池，不能共享成权限并集；
+- 在 `/context` 里增加 MCP server 的新增/删除入口；
+- HTTP MCP 只做 endpoint allowlist、credential 隔离和 audit，不伪装成 OS 沙箱；
+- 用同一 policy compiler 给 bash 增加 strict profile；bwrap 先保留兼容；
+- Windows/macOS provider 暂未实现，当前 MCP 在这些平台明确关闭。
+
+## 10.3 Skills
+
+实现位置：
+
+- `src/skills/loader.ts`：发现并解析 `SKILL.md`；
+- `src/skills/tools.ts`：`skill__<name>__load` 工具适配；
+- `src/skills/manager.ts`：catalog、registry attachment、reload、manifest/delta；
+- `src/skills/runtime.ts`：从 `[skills]` 配置启动发现；
+- `src/core/runtime.ts`：attach/detach、msgid2 快照与安全边界 delta。
+
+语义：
+
+- `SKILL.md` 必须有 YAML frontmatter 的 `name` / `description`；
+- 正文只在模型调用 `skill__<name>__load` 时进入 tool result；
+- 默认 roots：`~/.bugent/skills`、`~/.agents/skills`、项目内同名目录；
+- roots 从低到高，项目覆盖用户；`disabled` 最后过滤；
+- msgid2 只包含 tool 名和 description，不包含正文、绝对路径或环境值；
+- `SkillManager.reload()` 原子替换 attached registry，并返回 added/removed 供 developer delta；
+- skill loader 仍走 `ToolRegistry.execute()`，因此权限、并发锁、abort 和 ToolBatch 顺序一致。
+
+配置：
+
+```toml
+[skills]
+paths = ["~/.config/my-skills"]
+disable_defaults = false
+disabled = ["legacy-skill"]
+```
+
+## 10.4 buTUI experimental entry
+
+已引入独立实验入口，现有 `src/tui` 仍为默认 UI，两套 UI 并行维护：
+
+```bash
+bun run butui
+bun run butui:typecheck
+```
+
+目录：
+
+```text
+src/butui/
+├── bunfig.toml
+├── tsconfig.json
+├── preload.ts
+├── jsx-runtime.ts
+├── main.tsx
+└── README.md
+```
+
+约束：
+
+- `src/butui` 已从 bugent 根 `tsconfig.json` exclude；
+- 必须使用 `--conditions=browser`；
+- 必须 preload `@butui/solid/plugin`；
+- `jsxImportSource = "@butui/solid"`；
+- 通过 sibling `/home/qaqtamsy/项目/buTUI` 的源码路径解析 `@butui/*`，不复制 buTUI 源码；
+- `src/butui/vendor/solid-js` 只用于锁定 browser runtime，避免 Bun 错解析到 `solid-js` 的 server 构建；
+- 最小工作状态已接入真实 `AgentSession`、`runUserTurn`、真实 `ToolRegistry`、权限/升档/联网授权、流式文本和工具事件；
+- `bun run butui -- --mock` 可做无 key 冒烟；`Esc` abort 当前 turn；`Ctrl+C` 恢复终端。
+
+下一步接入顺序：
+
+1. `src/butui/bridge.ts` 继续扩展 branch / retry / undo；
+2. 工具 diff 和 artifact；
+3. MCP/session context 面板；
+4. 命令面板和多页 ask_user。
+
+buTUI 当前基线：
+
+```text
+bun --conditions=browser test
+# 611 pass / 0 fail
+
+bun --conditions=browser x tsc --noEmit
+# clean
+```
+
+2026-09-24 修复了 `measureStreamNode` 的 committed/render cache 污染：tail 行定稿时不再丢结尾字符，也不会残留旧 tail 形成重复行。
 
 ## 11. 不要做的事
 

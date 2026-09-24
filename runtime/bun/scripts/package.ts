@@ -28,12 +28,17 @@ function run(command: string[]): string {
   return result.stdout.toString().trim();
 }
 
+run([process.execPath, "run", resolve(repoRoot, "scripts", "build-sandbox.ts")]);
+
 await rm(staging, { recursive: true, force: true });
 await mkdir(join(packageRoot, "bin"), { recursive: true });
 await mkdir(join(packageRoot, "include"), { recursive: true });
+await mkdir(join(packageRoot, "lib"), { recursive: true });
 
 await copyFile(binaryPath, join(packageRoot, "bin", "bugent-bun"));
 await chmod(join(packageRoot, "bin", "bugent-bun"), 0o755);
+const sandboxLibrary = resolve(repoRoot, "native", "sandbox", "build", "libbugent-sandbox.so");
+await copyFile(sandboxLibrary, join(packageRoot, "lib", "libbugent-sandbox.so"));
 await copyFile(
   join(forkDir, "src", "spawn", "sandbox_abi.h"),
   join(packageRoot, "include", "bun_spawn_sandbox.h"),
@@ -48,6 +53,8 @@ const binaryVersion = run([binaryPath, "--version"]);
 const revision = run(["git", "-C", forkDir, "rev-parse", "--short", "HEAD"]);
 const binaryBytes = await readFile(binaryPath);
 const binarySha256 = new Bun.CryptoHasher("sha256").update(binaryBytes).digest("hex");
+const sandboxBytes = await readFile(sandboxLibrary);
+const sandboxSha256 = new Bun.CryptoHasher("sha256").update(sandboxBytes).digest("hex");
 const metadata = {
   name: "@bugent/bun-runtime",
   version,
@@ -58,6 +65,8 @@ const metadata = {
   arch: process.arch,
   binary: "bin/bugent-bun",
   sha256: binarySha256,
+  sandboxLibrary: "lib/libbugent-sandbox.so",
+  sandboxSha256,
 };
 await writeFile(
   join(packageRoot, "runtime.json"),

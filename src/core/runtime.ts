@@ -14,6 +14,8 @@ import type { AuditTrail } from "../store/audit.ts";
 import type { ModelClient } from "../provider/types.ts";
 import type { PersistedProviderConfig } from "../provider/registry.ts";
 import type { SessionStore } from "../store/repository.ts";
+import type { McpManager, McpStatus } from "../mcp/manager.ts";
+import type { SkillManager, SkillStatus } from "../skills/manager.ts";
 import { PermissionGate as Gate } from "../permission/gate.ts";
 import { AuditTrail as Audit } from "../store/audit.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
@@ -27,6 +29,12 @@ export class SessionRuntime {
   readonly sandboxNote: string;
   readonly audit: AuditTrail | undefined;
   readonly providerId: string;
+  readonly mcpTools: readonly string[];
+  readonly mcpStatus: McpStatus | undefined;
+  readonly skillTools: readonly string[];
+  readonly skillStatus: SkillStatus | undefined;
+  #dispose: (() => void) | undefined;
+  #disposed = false;
 
   constructor(options: {
     session: AgentSession;
@@ -35,6 +43,11 @@ export class SessionRuntime {
     sandboxNote: string;
     audit: AuditTrail | undefined;
     providerId: string;
+    mcpTools?: readonly string[];
+    mcpStatus?: McpStatus;
+    skillTools?: readonly string[];
+    skillStatus?: SkillStatus;
+    dispose?: () => void;
   }) {
     this.id = options.session.id;
     this.session = options.session;
@@ -43,6 +56,18 @@ export class SessionRuntime {
     this.sandboxNote = options.sandboxNote;
     this.audit = options.audit;
     this.providerId = options.providerId;
+    this.mcpTools = options.mcpTools ?? [];
+    this.mcpStatus = options.mcpStatus;
+    this.skillTools = options.skillTools ?? [];
+    this.skillStatus = options.skillStatus;
+    this.#dispose = options.dispose;
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#dispose?.();
+    this.#dispose = undefined;
   }
 
   /** 当前权限档位；直接跟随 gate，避免 runtime.mode 与 gate.mode 分叉。 */
@@ -69,6 +94,12 @@ export interface CreateSessionRuntimeOptions {
   systemPrompt: string;
   mcpManifest?: string;
   skillsManifest?: string;
+  /** Process-shared MCP manager. The runtime attaches/detaches its registry. */
+  mcpManager?: McpManager;
+  /** Session-level MCP server allowlist. Undefined means all configured servers. */
+  mcpServerIds?: readonly string[];
+  /** Process-shared skill manager. The runtime attaches/detaches its registry. */
+  skillManager?: SkillManager;
   cwd: string;
   store: SessionStore | undefined;
   /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
@@ -77,6 +108,52 @@ export interface CreateSessionRuntimeOptions {
   passEnv?: readonly string[];
   policy: import("../permission/policy.ts").PermissionPolicy;
   interaction: SessionInteraction;
+}
+
+/**
+ * Preserve the frozen msgid1 snapshot and append a developer delta when the
+ * live MCP catalog differs. Callers must invoke this only outside an open tool
+ * batch; enqueueInjection itself also enforces the safe-boundary contract.
+ */
+export function syncMcpManifest(
+  session: AgentSession,
+  manager: McpManager,
+  currentManifest = manager.manifest(),
+  serverIds?: readonly string[],
+): void {
+  const storedMcpManifest = session.messages.find((message) => message.msgid === 1);
+  const storedText =
+    storedMcpManifest?.parts
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("") ?? "";
+  if (storedText.length === 0) return;
+  const delta = manager.deltaFrom(storedText, serverIds);
+  if (delta !== undefined && currentManifest !== storedText) {
+    session.enqueueInjection(delta, "mcp");
+  }
+}
+
+/**
+ * Preserve the frozen msgid2 snapshot and append a developer delta when the
+ * live skill catalog differs.
+ */
+export function syncSkillManifest(
+  session: AgentSession,
+  manager: SkillManager,
+  currentManifest = manager.manifest(),
+): void {
+  const storedSkillsManifest = session.messages.find((message) => message.msgid === 2);
+  const storedText =
+    storedSkillsManifest?.parts
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("") ?? "";
+  if (storedText.length === 0) return;
+  const delta = manager.deltaFrom(storedText);
+  if (delta !== undefined && currentManifest !== storedText) {
+    session.enqueueInjection(delta, "skill");
+  }
 }
 
 /**
@@ -90,6 +167,9 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     options.mode ??
     options.store?.getSession(options.sessionId)?.sandboxMode ??
     "workspace-write";
+  const mcpManifest =
+    options.mcpManifest ?? options.mcpManager?.manifest(options.mcpServerIds);
+  const skillsManifest = options.skillsManifest ?? options.skillManager?.manifest();
 
   const session = openSession({
     store: options.store,
@@ -99,8 +179,8 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     model: options.model,
     providerId: options.providerId,
     systemPrompt: options.systemPrompt,
-    ...(options.mcpManifest !== undefined ? { mcpManifest: options.mcpManifest } : {}),
-    ...(options.skillsManifest !== undefined ? { skillsManifest: options.skillsManifest } : {}),
+    ...(mcpManifest !== undefined ? { mcpManifest } : {}),
+    ...(skillsManifest !== undefined ? { skillsManifest } : {}),
     cwd: options.cwd,
   });
 
@@ -116,6 +196,23 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
   });
+  let mcpTools: string[] = [];
+  let skillTools: string[] = [];
+  try {
+    mcpTools = options.mcpManager?.attach(setup.registry, options.mcpServerIds) ?? [];
+    skillTools = options.skillManager?.attach(setup.registry) ?? [];
+  } catch (error) {
+    options.skillManager?.detach(setup.registry);
+    options.mcpManager?.detach(setup.registry);
+    throw error;
+  }
+
+  if (options.mcpManager !== undefined && mcpManifest !== undefined) {
+    syncMcpManifest(session, options.mcpManager, mcpManifest, options.mcpServerIds);
+  }
+  if (options.skillManager !== undefined && skillsManifest !== undefined) {
+    syncSkillManifest(session, options.skillManager, skillsManifest);
+  }
 
   const audit =
     options.store === undefined
@@ -143,5 +240,21 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     sandboxNote: setup.sandbox.note,
     audit,
     providerId: options.providerId,
+    mcpTools,
+    ...(options.mcpManager !== undefined
+      ? { mcpStatus: options.mcpManager.status(options.mcpServerIds) }
+      : {}),
+    skillTools,
+    ...(options.skillManager !== undefined
+      ? { skillStatus: options.skillManager.status() }
+      : {}),
+    ...(options.mcpManager !== undefined || options.skillManager !== undefined
+      ? {
+          dispose: () => {
+            options.mcpManager?.detach(setup.registry);
+            options.skillManager?.detach(setup.registry);
+          },
+        }
+      : {}),
   });
 }

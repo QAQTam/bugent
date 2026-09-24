@@ -19,7 +19,12 @@ import { loadSystemPrompt } from "./config/system-prompt.ts";
 import type { BugentConfig } from "./config/schema.ts";
 import { TuiApp, type RuntimeRequest, type TuiInteraction } from "./tui/app.ts";
 import { openSession } from "./core/open-session.ts";
-import { createSessionRuntime, type SessionRuntime } from "./core/runtime.ts";
+import { createSessionRuntime, syncMcpManifest, syncSkillManifest, type SessionRuntime } from "./core/runtime.ts";
+import type { AgentSession } from "./core/session.ts";
+import { startConfiguredMcp } from "./mcp/runtime.ts";
+import type { McpManager } from "./mcp/manager.ts";
+import { startConfiguredSkills } from "./skills/runtime.ts";
+import type { SkillManager } from "./skills/manager.ts";
 import { BranchService } from "./core/branch-service.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
@@ -292,6 +297,11 @@ async function main(): Promise<void> {
   const effectiveProviderId = storedSession?.providerId ?? ref.provider;
   const effectiveModel = storedSession?.model ?? ref.model;
   const effectiveProviderConfig = storedSession?.providerConfig;
+  const configuredMcpServerIds = config.mcp?.servers?.map((server) => server.id) ?? [];
+  const initialMcpServerIds =
+    storedSession !== undefined && store !== undefined
+      ? store.enabledMcpServerIds(sessionId, configuredMcpServerIds)
+      : configuredMcpServerIds;
   const credentials = createCredentialStore();
   const storedApiKey = await credentials.get(sessionId, effectiveProviderId);
   const client = registry.resolve(
@@ -302,6 +312,48 @@ async function main(): Promise<void> {
     },
   );
 
+  let activeSession: AgentSession | undefined;
+  let mcpManagerRef: McpManager | undefined;
+  let lastMcpManifest: string | undefined;
+  let lastSkillsManifest: string | undefined;
+  let activeMcpServerIds: readonly string[] = initialMcpServerIds;
+  let mcpChangePending = false;
+  const flushMcpChanges = (): void => {
+    const manager = mcpManagerRef;
+    const session = activeSession;
+    if (!mcpChangePending || manager === undefined || session === undefined) return;
+    const current = manager.manifest(activeMcpServerIds);
+    const previous = lastMcpManifest ?? current;
+    const delta = manager.deltaFrom(previous, activeMcpServerIds);
+    if (delta !== undefined && current !== previous) {
+      session.enqueueInjection(delta, "mcp");
+    }
+    lastMcpManifest = current;
+    mcpChangePending = false;
+  };
+
+  const startedMcp = await startConfiguredMcp({
+    config: config.mcp,
+    cwd: options.cwd,
+    onToolsChanged: () => {
+      mcpChangePending = true;
+      flushMcpChanges();
+    },
+  });
+  mcpManagerRef = startedMcp.manager;
+  const initialMcpManifest =
+    startedMcp.manager?.manifest(initialMcpServerIds) ?? startedMcp.manifest;
+  lastMcpManifest = startedMcp.manager?.manifest(initialMcpServerIds);
+  if (startedMcp.disabledReason !== undefined) {
+    process.stderr.write(`${startedMcp.disabledReason}\n`);
+  }
+
+  const startedSkills = await startConfiguredSkills({
+    config: config.skills,
+    cwd: options.cwd,
+  });
+  lastSkillsManifest = startedSkills.manifest;
+
   const session = openSession({
     store,
     sessionId,
@@ -309,8 +361,17 @@ async function main(): Promise<void> {
     model: effectiveModel,
     providerId: effectiveProviderId,
     systemPrompt,
+    ...(initialMcpManifest !== undefined ? { mcpManifest: initialMcpManifest } : {}),
+    skillsManifest: startedSkills.manifest,
     cwd: options.cwd,
   });
+  activeSession = session;
+  if (startedMcp.manager !== undefined) {
+    syncMcpManifest(session, startedMcp.manager, initialMcpManifest, initialMcpServerIds);
+    lastMcpManifest = startedMcp.manager.manifest(initialMcpServerIds);
+    flushMcpChanges();
+  }
+  syncSkillManifest(session, startedSkills.manager, startedSkills.manifest);
 
   // 档位：CLI > 配置 > 默认 workspace-write
   const mode: SandboxMode =
@@ -323,22 +384,26 @@ async function main(): Promise<void> {
       : {}),
     ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
   });
+  const initialMcpTools =
+    startedMcp.manager?.attach(tools.registry, initialMcpServerIds) ?? [];
+  const initialSkillTools = startedSkills.manager.attach(tools.registry);
 
   // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底
   const policy = new PermissionPolicy(
-    options.yes ? ALLOW_ALL_POLICY : composePolicy(config.permissions, tools.defaultPermissionRules),
+    options.yes
+      ? ALLOW_ALL_POLICY
+      : composePolicy(config.permissions, tools.registry.defaultPermissionRules()),
   );
 
   // 审计流水：工具调用、权限决策、每轮起止，全部落盘可回放
   // 用 activeSession 而非固定 session —— 用户 /new 换会话后审计要跟着切
-  let activeSession = session;
   const audit =
     store === undefined
       ? undefined
       : new AuditTrail({
           store,
-          sessionId: () => activeSession.id,
-          turn: () => activeSession.turn,
+          sessionId: () => activeSession!.id,
+          turn: () => activeSession!.turn,
         });
 
   // 能力授权（联网）的交互入口在两条路径下不同：TUI 用弹窗，CLI 用 stdin。
@@ -401,11 +466,45 @@ async function main(): Promise<void> {
         deleteApiKey: (sessionId: string, providerId: string) =>
           credentials.delete(sessionId, providerId),
         mode: tools.mode,
+        ...(startedMcp.manager !== undefined
+          ? { mcp: startedMcp.manager.status(initialMcpServerIds) }
+          : startedMcp.disabledReason !== undefined
+            ? { mcp: { servers: [], disabledReason: startedMcp.disabledReason } }
+            : {}),
+        skillStatus: startedSkills.manager.status(),
+        reloadSkills: async () => {
+          await startedSkills.manager.reload();
+          const current = startedSkills.manager.manifest();
+          const previous = lastSkillsManifest ?? current;
+          const delta = startedSkills.manager.deltaFrom(previous);
+          if (delta !== undefined && activeSession !== undefined) {
+            activeSession.enqueueInjection(delta, "skill");
+          }
+          lastSkillsManifest = current;
+          return startedSkills.manager.status();
+        },
+        ...(configuredMcpServerIds.length > 0
+          ? {
+              mcpServers: configuredMcpServerIds.map((id) => ({
+                id,
+                enabled: initialMcpServerIds.includes(id),
+              })),
+            }
+          : {}),
+        ...(startedMcp.manager !== undefined
+          ? { reloadMcp: (id: string) => startedMcp.manager!.reload(id).then(() => undefined) }
+          : {}),
         banner: [
           `**bugent** 已就绪 · \`${client.id}\``,
           "",
           `会话：\`${sessionId}\`${store === undefined ? "（未持久化）" : ""}`,
           `档位：**${tools.mode}** · ${tools.sandbox.note}`,
+          ...(startedMcp.manager !== undefined
+            ? [`MCP：**${initialMcpTools.length}** 个工具 · Linux 原生沙箱`]
+            : startedMcp.disabledReason !== undefined
+              ? [`MCP：${startedMcp.disabledReason}`]
+              : []),
+          `Skills：**${initialSkillTools.length}** 个可按需加载`,
           `权限：${
             options.yes
               ? "**已跳过所有确认（--yes）**"
@@ -439,6 +538,22 @@ async function main(): Promise<void> {
                 const model = request?.model ?? existing?.model ?? fallbackModel;
                 const providerConfig =
                   request?.providerConfig ?? existing?.providerConfig ?? fallbackProviderConfig;
+                const configuredMcpIds = new Set(configuredMcpServerIds);
+                const requestedMcpIds =
+                  request?.mcpServerIds === undefined
+                    ? undefined
+                    : request.mcpServerIds.filter((id) => configuredMcpIds.has(id));
+                const targetMcpServerIds =
+                  requestedMcpIds ??
+                  (existing !== undefined
+                    ? store.enabledMcpServerIds(targetSessionId, configuredMcpServerIds)
+                    : configuredMcpServerIds);
+                if (requestedMcpIds !== undefined) {
+                  const selected = new Set(requestedMcpIds);
+                  for (const id of configuredMcpServerIds) {
+                    store.setMcpServerEnabled(targetSessionId, id, selected.has(id));
+                  }
+                }
                 const client = registry.resolve(
                   { provider: providerId, model },
                   {
@@ -454,6 +569,11 @@ async function main(): Promise<void> {
                   providerId,
                   ...(providerConfig !== undefined ? { providerConfig } : {}),
                   systemPrompt,
+                  ...(startedMcp.manager !== undefined
+                    ? { mcpManager: startedMcp.manager }
+                    : {}),
+                  mcpServerIds: targetMcpServerIds,
+                  skillManager: startedSkills.manager,
                   cwd: options.cwd,
                   store,
                   mode: runtimeMode,
@@ -467,6 +587,9 @@ async function main(): Promise<void> {
                   interaction,
                 });
                 activeSession = runtime.session;
+                activeMcpServerIds = targetMcpServerIds;
+                lastMcpManifest = startedMcp.manager?.manifest(targetMcpServerIds);
+                flushMcpChanges();
                 return runtime;
               },
             }),
@@ -527,6 +650,7 @@ async function main(): Promise<void> {
       prompter.close();
     }
   } finally {
+    await startedMcp.manager?.close();
     store?.close();
   }
 }
