@@ -294,6 +294,36 @@ describe("Goal P1 · controller", () => {
     expect(wrongCheckpoint.output).toContain("当前 Checkpoint");
   });
 
+  test("resume 到新分支时会幂等补回 plan 与 checkpoint/todo", async () => {
+    const { store, controller } = await setup();
+    prepareExecutingCheckpoint(controller);
+    const branchId = store.createBranch("s1", 0, { title: "resume probe" });
+    store.setActiveBranch("s1", branchId);
+    const restored = new AgentSession({
+      id: "s1",
+      branchId,
+      system: "SYS",
+      client: createMockClient({ script: [] }),
+      model: "test",
+      restore: store.loadBranchPath("s1", branchId),
+      nextMsgId: store.nextMsgId("s1"),
+      onMessage: (message) => store.appendMessageToBranch("s1", branchId, message, message.createdAt),
+    });
+    const restoredController = new GoalController({
+      repository: controller.repository,
+      session: restored,
+      store,
+      cwd: "/tmp",
+    });
+
+    restoredController.ensureContext();
+    restoredController.ensureContext();
+    const sources = restored.messages.map((message) => message.injectionSource);
+    expect(sources.filter((source) => source === "goal")).toHaveLength(1);
+    expect(sources.filter((source) => source === "plan")).toHaveLength(1);
+    expect(sources.filter((source) => source === "checkpoint")).toHaveLength(1);
+  });
+
   test("用户可编辑未规划 Goal Contract，clear 只删除 Goal 聚合", async () => {
     const { session, controller } = await setup();
     controller.repository.createGoal({

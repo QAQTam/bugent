@@ -112,6 +112,8 @@ export interface CreateSessionRuntimeOptions {
   /** Goal review policy / budget cap for this runtime. */
   goalDefaultReviewPolicy?: import("../goal/types.ts").ReviewPolicy;
   maxGoalTokenBudget?: number;
+  goalReviewClient?: ModelClient;
+  goalReviewModel?: string;
   cwd: string;
   store: SessionStore | undefined;
   /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
@@ -219,8 +221,8 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
             ? { maxTokenBudget: options.maxGoalTokenBudget }
             : {}),
           reviewRunner: createReadOnlyReviewRunner({
-            client: options.client,
-            model: options.model,
+            client: options.goalReviewClient ?? options.client,
+            model: options.goalReviewModel ?? options.model,
             cwd: options.cwd,
           }),
         });

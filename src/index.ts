@@ -341,6 +341,22 @@ async function main(): Promise<void> {
       ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
     },
   );
+  const reviewRef = config.goals?.reviewModel
+    ? parseModelRef(config.goals.reviewModel)
+    : undefined;
+  const reviewClient =
+    reviewRef === undefined
+      ? client
+      : registry.resolve(
+          reviewRef,
+          reviewRef.provider === effectiveProviderId
+            ? {
+                ...(effectiveProviderConfig ?? {}),
+                ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
+              }
+            : {},
+        );
+  const reviewModel = reviewRef?.model ?? effectiveModel;
 
   let activeSession: AgentSession | undefined;
   let mcpManagerRef: McpManager | undefined;
@@ -423,8 +439,8 @@ async function main(): Promise<void> {
             ? { maxTokenBudget: config.goals.maxGoalTokenBudget }
             : {}),
           reviewRunner: createReadOnlyReviewRunner({
-            client,
-            model: effectiveModel,
+            client: reviewClient,
+            model: reviewModel,
             cwd: options.cwd,
           }),
         });
@@ -624,6 +640,24 @@ async function main(): Promise<void> {
                     ...(request?.apiKey !== undefined ? { apiKey: request.apiKey } : {}),
                   },
                 );
+                const runtimeReviewRef =
+                  config.goals?.reviewModel === undefined
+                    ? undefined
+                    : parseModelRef(config.goals.reviewModel);
+                const runtimeReviewClient =
+                  runtimeReviewRef === undefined
+                    ? client
+                    : registry.resolve(
+                        runtimeReviewRef,
+                        runtimeReviewRef.provider === providerId
+                          ? {
+                              ...(providerConfig ?? {}),
+                              ...(request?.apiKey !== undefined
+                                ? { apiKey: request.apiKey }
+                                : {}),
+                            }
+                          : {},
+                      );
                 const runtime = createSessionRuntime({
                   sessionId: targetSessionId,
                   ...(request?.branchId !== undefined ? { branchId: request.branchId } : {}),
@@ -645,6 +679,8 @@ async function main(): Promise<void> {
                   ...(config.goals?.maxGoalTokenBudget !== undefined
                     ? { maxGoalTokenBudget: config.goals.maxGoalTokenBudget }
                     : {}),
+                  goalReviewClient: runtimeReviewClient,
+                  goalReviewModel: runtimeReviewRef?.model ?? model,
                   mode: runtimeMode,
                   ...(config.sandbox?.writablePaths !== undefined
                     ? { writablePaths: config.sandbox.writablePaths }
