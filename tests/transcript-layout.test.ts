@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { maxScrollOffset, TranscriptLayout } from "../src/tui/transcript-layout.ts";
+import { maxScrollOffset, reachableLines, TranscriptLayout } from "../src/tui/transcript-layout.ts";
 
 interface Item {
   id: string;
@@ -88,10 +88,28 @@ describe("TranscriptLayout", () => {
 });
 
 describe("历史窗口上限", () => {
-  test("主消息区最多回看三屏", () => {
-    expect(maxScrollOffset(100, 10)).toBe(20);
+  test("窗口取「三屏」与「绝对下限」的较大者", () => {
+    // 10 行正文：三屏 30 < 下限 100，所以窗口是 100 行 → 回看 90
+    expect(maxScrollOffset(200, 10)).toBe(90);
+    // 53 行正文：三屏 159 > 下限 100，按三屏走 → 回看 106
+    expect(maxScrollOffset(400, 53)).toBe(106);
+  });
+
+  test("内容不超过窗口时能一路滚到顶", () => {
+    expect(maxScrollOffset(100, 10)).toBe(90);
     expect(maxScrollOffset(20, 10)).toBe(10);
     expect(maxScrollOffset(5, 10)).toBe(0);
     expect(maxScrollOffset(100, 0)).toBe(0);
+  });
+
+  test("短终端不再退化成十几行 —— 至少能回看 100 行内容", () => {
+    // 12 行终端正文只有 5 行，老实现三屏 = 15 行，69 行内容里 54 行够不着
+    expect(reachableLines(200, 5)).toBe(100);
+    expect(reachableLines(69, 5)).toBe(69); // 内容本身就不到 100 行 → 全够得着
+  });
+
+  test("reachableLines 不会超过总行数", () => {
+    expect(reachableLines(5, 10)).toBe(5);
+    expect(reachableLines(0, 10)).toBe(0);
   });
 });

@@ -544,17 +544,32 @@ describe("TUI PTY 冒烟", () => {
 
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        // 30 轮：回看窗口有 100 行的绝对下限，10 轮在 14 行终端上顶不到上限，
+        // 滚动条 thumb 就不会出现在底部之外的行程上。
         terminal.write(
-          Array.from({ length: 10 }, (_, index) => `drag-${index + 1}`).join("\r") + "\r",
+          Array.from({ length: 30 }, (_, index) => `drag-${index + 1}`).join("\r") + "\r",
         );
-        await waitFor(() => output, (text) => strip(text).includes("turn 10"));
+        await waitFor(() => output, (text) => strip(text).includes("turn 30"));
 
-        // Bottom thumb occupies rows 6-7. Drag it to the top track cell.
+        // thumb 现在只有 1 格高、贴轨道底部：14 行终端正文 7 行 → 轨道 2..8，
+        // 所以 thumb 在第 8 行（不是以前那对 6-7）。拖到轨道顶格。
         output = "";
-        terminal.write("\x1b[<0;60;6M");
+        terminal.write("\x1b[<0;60;8M");
         terminal.write("\x1b[<32;60;2M");
         terminal.write("\x1b[<0;60;2m");
+
+        // 再补几下到真正的上限：拖拽用的滚动条度量来自**上一帧**，而吸顶行出现
+        // 后正文矮一行、上限跟着抬一行，一次拖拽会停在上限下方一行。
+        // 中间让一帧：拖动是异步落到状态上的，紧接着发按键会撞在它前面。
+        await Bun.sleep(300);
+        terminal.write("\x1b[5~".repeat(5));
         await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
+
+        // 核心断言：拖动确实把 chat 同步滚离了底部 —— 最后一条消息退出视口。
+        //
+        // 注意**不能**断言"第一条消息 drag-1 可见"：250 行内容里主视图只覆盖
+        // 最近 100 行，drag-1 从定义上就是够不着的早期消息。
+        expect(strip(output)).not.toContain("drag-30");
 
         terminal.write("\x03");
         expect(await proc.exited).toBe(0);
@@ -567,7 +582,7 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
-    "滚到三屏上限可打开历史抽屉并回到最新",
+    "滚到回看上限可打开历史抽屉并回到最新",
     async () => {
       let output = "";
       const decoder = new TextDecoder();
@@ -590,15 +605,23 @@ describe("TUI PTY 冒烟", () => {
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
-        // 多轮消息把 transcript 推过三屏阈值。
+        // 多轮消息把 transcript 推过回看上限（100 行绝对下限，10 轮不够）。
         terminal.write(
-          Array.from({ length: 10 }, (_, index) => `m${String(index + 1).padStart(2, "0")}`).join("\r") +
+          Array.from({ length: 30 }, (_, index) => `m${String(index + 1).padStart(2, "0")}`).join("\r") +
             "\r",
         );
-        await waitFor(() => output, (text) => strip(text).includes("turn 10"));
+        await waitFor(() => output, (text) => strip(text).includes("turn 30"));
 
         output = "";
-        terminal.write("\x1b[5~\x1b[5~\x1b[5~");
+        // 一次 PageUp 滚「正文高度」行，而上限有 96 行 —— 按三下远远到不了，
+        // 得一路滚到底。
+        //
+        // 分两批写：键处理用的 #bodyHeight 是**上一帧**的，而吸顶行出现后正文
+        // 会矮一行、上限跟着抬一行。一批到底会停在上限下方一行，中间让一帧
+        // 重算高度再补几下。
+        terminal.write("\x1b[5~".repeat(60));
+        await Bun.sleep(300);
+        terminal.write("\x1b[5~".repeat(5));
         await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
 
         // 先按画出来的位置定位，再清空输出观察点击结果

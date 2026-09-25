@@ -22,18 +22,26 @@ describe("HistoryViewState", () => {
     expect(back.followTail).toBe(true);
   });
 
-  test("到达三屏上限后显示查看更多消息", () => {
-    const state = { ...initialHistoryView(), followTail: false, scrollOffset: 20 };
-    expect(shouldShowMoreButton(state, 100, 10)).toBe(true);
+  test("滚到回看上限后显示查看更多消息", () => {
+    // 200 行内容、10 行正文：窗口 100 行 → 回看上限 90
+    const state = { ...initialHistoryView(), followTail: false, scrollOffset: 90 };
+    expect(shouldShowMoreButton(state, 200, 10)).toBe(true);
 
-    state.scrollOffset = 19;
+    state.scrollOffset = 89;
+    expect(shouldShowMoreButton(state, 200, 10)).toBe(false);
+  });
+
+  test("内容全在主视图里时不显示查看更多消息", () => {
+    // 100 行刚好被窗口覆盖（下限 100）→ 上面没有更早的消息
+    const state = { ...initialHistoryView(), followTail: false, scrollOffset: 90 };
     expect(shouldShowMoreButton(state, 100, 10)).toBe(false);
   });
 
-  test("打开历史抽屉时落在主区三屏窗口上方", () => {
-    const state = openHistoryView(initialHistoryView(), 100, 10);
+  test("打开历史抽屉时落在主区窗口上方", () => {
+    const state = openHistoryView(initialHistoryView(), 200, 10);
     expect(state.historyOpen).toBe(true);
-    expect(state.historyOffset).toBe(30); // main max 20 + body height 10
+    // 抽屉自己的上限 = 200 - top(4) = 196；主区窗口上方 = 90 + 10 = 100
+    expect(state.historyOffset).toBe(100);
   });
 
   test("新内容到达时主区和历史区都保持锚点", () => {
@@ -45,7 +53,9 @@ describe("HistoryViewState", () => {
     const next = syncHistoryView(state, 105, 10, 5);
 
     expect(next.scrollOffset).toBe(10);
-    expect(next.historyOffset).toBe(35);
+    // 抽屉开在 min(抽屉上限 96, 主区窗口上方 90+10) = 96；新内容 +5 后
+    // 顶到抽屉自己的上限 maxHistoryOffset(105,10) = 105 - 4 = 101
+    expect(next.historyOffset).toBe(101);
   });
 
   test("关闭抽屉与回到最新是两种不同语义", () => {

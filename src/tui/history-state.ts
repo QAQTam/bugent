@@ -6,7 +6,7 @@
  */
 
 import { historyPaneHeights } from "./history-drawer.ts";
-import { HISTORY_WINDOW_MULTIPLIER, maxScrollOffset } from "./transcript-layout.ts";
+import { maxScrollOffset, reachableLines } from "./transcript-layout.ts";
 
 export interface HistoryViewState {
   /** 是否钉底跟随最新消息。 */
@@ -124,7 +124,10 @@ export function shouldShowMoreButton(
   height: number,
 ): boolean {
   const max = maxScrollOffset(totalLines, height);
-  return totalLines > height * HISTORY_WINDOW_MULTIPLIER && max > 0 && state.scrollOffset >= max;
+  // "上面还有更早的消息" = 主视图覆盖不到整个 transcript。
+  // 别再拿 `totalLines > height * 3` 当代理：窗口大小现在是三屏与绝对下限取大，
+  // 那个判据会和真正的上限脱节，按钮该出的时候不出。
+  return reachableLines(totalLines, height) < totalLines && max > 0 && state.scrollOffset >= max;
 }
 
 export function shouldShowReturnButton(state: HistoryViewState): boolean {

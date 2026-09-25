@@ -21,9 +21,12 @@ function metrics(scrollOffset: number) {
 
 describe("TUI scrollbar", () => {
   test("底部是 followTail，顶部是最大回看偏移", () => {
+    // totalLines=100 / viewport=10 → 回看上限 90（下限 100 行），
+    // contentSpan = 10 + 90 = 100，thumb 只占 1 格
     const bottom = metrics(0);
-    expect(bottom.thumbTop).toBe(9);
-    expect(bottom.thumbHeight).toBe(3);
+    expect(bottom.maxOffset).toBe(90);
+    expect(bottom.thumbTop).toBe(11);
+    expect(bottom.thumbHeight).toBe(1);
 
     const top = metrics(bottom.maxOffset);
     expect(top.thumbTop).toBe(2);
