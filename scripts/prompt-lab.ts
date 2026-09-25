@@ -131,7 +131,7 @@ TASKS.study = STUDY_TASK;
 /* ------------------------------------------------------------------ */
 
 type ToolSetName = "zh-baseline" | "en-short" | "core" | "placeholder" | "none";
-type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2";
+type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2" | "pe-min" | "pe-mid" | "pe-narr" | "pe-compact";
 
 interface VariantSpec {
   readonly id: string;
@@ -316,6 +316,30 @@ const VARIANTS: readonly VariantSpec[] = [
     system: "pe-forced2",
   },
   {
+    id: "pe-min",
+    label: "PE + 只留 We need 校准（删掉思考方式描述）",
+    tools: "en-short",
+    system: "pe-min",
+  },
+  {
+    id: "pe-mid",
+    label: "PE + 只删掉防绕圈/叙述那三行，保留“长推理没问题”",
+    tools: "en-short",
+    system: "pe-mid",
+  },
+  {
+    id: "pe-narr",
+    label: "只留 We need + 禁叙述口吻",
+    tools: "en-short",
+    system: "pe-narr",
+  },
+  {
+    id: "pe-compact",
+    label: "PE + 压成三行（同样的框架，更少的字）",
+    tools: "en-short",
+    system: "pe-compact",
+  },
+  {
     id: "pe-forced-debug",
     label: "PE + 强制句式（简单题，看回答是否还短）",
     tools: "en-short",
@@ -365,6 +389,10 @@ const SYSTEM_FILES: Record<SystemName, string> = {
   pe: "system-pe.md",
   "pe-forced": "system-pe-forced.md",
   "pe-forced2": "system-pe-forced2.md",
+  "pe-min": "system-pe-min.md",
+  "pe-mid": "system-pe-mid.md",
+  "pe-narr": "system-pe-narr.md",
+  "pe-compact": "system-pe-compact.md",
 };
 
 async function loadSystem(name: SystemName): Promise<string> {
@@ -559,7 +587,7 @@ function clientFor(extraBody: Record<string, unknown>): ReturnType<typeof create
 
 const systems = Object.fromEntries(
   await Promise.all(
-    (["baseline", "new", "pe", "pe-forced", "pe-forced2"] as SystemName[]).map(
+    (["baseline", "new", "pe", "pe-forced", "pe-forced2", "pe-min", "pe-mid", "pe-narr", "pe-compact"] as SystemName[]).map(
       async (name) => [name, await loadSystem(name)] as const,
     ),
   ),
