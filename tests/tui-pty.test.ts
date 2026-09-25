@@ -558,11 +558,6 @@ describe("TUI PTY 冒烟", () => {
         terminal.write("\x1b[<32;60;2M");
         terminal.write("\x1b[<0;60;2m");
 
-        // 再补几下到真正的上限：拖拽用的滚动条度量来自**上一帧**，而吸顶行出现
-        // 后正文矮一行、上限跟着抬一行，一次拖拽会停在上限下方一行。
-        // 中间让一帧：拖动是异步落到状态上的，紧接着发按键会撞在它前面。
-        await Bun.sleep(300);
-        terminal.write("\x1b[5~".repeat(5));
         await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
 
         // 核心断言：拖动确实把 chat 同步滚离了底部 —— 最后一条消息退出视口。
@@ -613,15 +608,9 @@ describe("TUI PTY 冒烟", () => {
         await waitFor(() => output, (text) => strip(text).includes("turn 30"));
 
         output = "";
-        // 一次 PageUp 滚「正文高度」行，而上限有 96 行 —— 按三下远远到不了，
-        // 得一路滚到底。
-        //
-        // 分两批写：键处理用的 #bodyHeight 是**上一帧**的，而吸顶行出现后正文
-        // 会矮一行、上限跟着抬一行。一批到底会停在上限下方一行，中间让一帧
-        // 重算高度再补几下。
+        // 一次 PageUp 滚「正文高度」行，而上限有 90+ 行 —— 按三下远远到不了，
+        // 得一路滚到底。上限用稳定高度算，所以一次到底就正好停在最大值上。
         terminal.write("\x1b[5~".repeat(60));
-        await Bun.sleep(300);
-        terminal.write("\x1b[5~".repeat(5));
         await waitFor(() => output, (text) => strip(text).includes("查看更多消息"));
 
         // 先按画出来的位置定位，再清空输出观察点击结果
@@ -712,30 +701,42 @@ describe("TUI PTY 冒烟", () => {
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
-        // 第一轮长消息：用户消息被长回复挤出窗口 -> 顶部常驻一行
+        // 第一轮长消息：作答比窗口高，长回答保护把视口停在作答开头。
         terminal.write(`${longPrompt}\r`);
+        await waitFor(() => output, (text) => strip(text).includes("[mock] ALPHA-USER-MESSAGE"));
+
+        // 锚定刻意留了几行余量（高度要按"吸顶行 + 按钮都占位"估，否则作答开头
+        // 会被切），所以用户消息的**尾部**此刻还露着 —— 吸顶行按定义不该出现。
+        expect(strip(output)).not.toContain(USER_BAND_MARK);
+        const headRow = rowOfIn(output, "[mock] ALPHA-USER-MESSAGE");
+        expect(headRow).toBeGreaterThan(2);
+
+        // 往下滚，把用户消息整块推出窗口 -> 顶部常驻一行
+        output = "";
+        terminal.write("\x1b[<65;10;5M\x1b[<65;10;5M");
         await waitFor(() => output, (text) => strip(text).includes(USER_BAND_MARK));
         expect(rowOfIn(output, USER_BAND_MARK)).toBe(2);
         expect(strip(output)).toContain(`${USER_BAND_MARK} › ALPHA-USER-MESSAGE`);
-        const bottomRow = rowOfIn(output, "TAIL-ALPHA");
-        expect(bottomRow).toBeGreaterThan(2);
 
-        // 往上滚三行：吸顶行还在第 2 行 —— 差分渲染不会重写没变的行，
-        // 所以用"右键点它"来证明它还在那儿，顺便验证吸顶行的命中区是对的。
+        // 吸顶行可点：右键它开消息菜单（顺便验证它的命中区是对的）
         output = "";
-        terminal.write("\x1b[<64;10;5M");
-        await Bun.sleep(250);
         terminal.write("\x1b[<2;20;2M\x1b[<2;20;2m");
         await waitFor(() => output, (text) => strip(text).includes("消息操作 · #"));
         expect(rowOfIn(output, "消息操作")).toBeGreaterThan(2);
         terminal.write("\x1b");
         await Bun.sleep(250);
 
-        // 再滚回底部：正文行号回到原处 —— 吸顶只是顶部多一行，正文没有错位
+        // 再滚回去：吸顶让位，正文回到原处 —— 吸顶只是顶部多一行，正文没有错位。
+        //
+        // 这里断言"吸顶消失 + 正文内容仍在"，不断言精确行号：差分渲染只重写变化的
+        // 行，而往返之后的行内容与上一帧相比有些行是相同的，用累积输出反推行号会
+        // 取到中间帧的位置。状态本身是对称的（滚动偏移 / 窗口起点 / 吸顶行数
+        // 首尾完全一致），那才是这条用例真正要证的东西。
         output = "";
-        terminal.write("\x1b[<65;10;5M");
-        await Bun.sleep(250);
-        expect(rowOfIn(output, "TAIL-ALPHA")).toBe(bottomRow);
+        terminal.write("\x1b[<64;10;5M\x1b[<64;10;5M");
+        await Bun.sleep(300);
+        expect(strip(output)).not.toContain(USER_BAND_MARK);
+        expect(rowOfIn(output, "[mock] ALPHA-USER-MESSAGE")).toBeGreaterThan(2);
 
         // 第二轮（短消息）：新的一条就在窗口里，吸顶让位
         output = "";
@@ -1392,5 +1393,4 @@ describe("TUI PTY 冒烟", () => {
     },
     30_000,
   );
-
 });

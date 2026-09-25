@@ -70,7 +70,13 @@ import {
   THINKING_SPINNER_ROWS,
   type AgentActivity,
 } from "./thinking.ts";
-import { TranscriptLayout, maxScrollOffset } from "./transcript-layout.ts";
+import {
+  TranscriptLayout,
+  assistantScrollFloor,
+  maxScrollOffset,
+  toFoldableBlocks,
+  type FoldableBlock,
+} from "./transcript-layout.ts";
 import { composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
 import {
   BUTTON_BOX_ROWS,
@@ -421,6 +427,20 @@ export class TuiApp implements TuiInteraction {
   #lastLayoutTotal = 0;
   /** 上一次消息区高度，供滚动和历史上限计算。 */
   #bodyHeight = 1;
+  /**
+   * 滚动上限专用的稳定高度（见 #compose 里的说明）。
+   *
+   * 键处理发生在两帧之间，那时只有上一帧算出来的值可用；用 #bodyHeight 会拿到
+   * 被「回到最新消息」按钮压扁后的高度，上限因此每帧都在变。
+   */
+  #scrollHeight = 1;
+  /**
+   * 本轮跑完、下一帧要把滚动位置停到最后一条作答的开头。
+   *
+   * 用一次性标记而不是"每帧都判断"：否则用户主动滚到底部看结尾时会被反复拽回
+   * 作答开头 —— 那比原来的问题更烦人。
+   */
+  #anchorPending = false;
   /** 当前消息区右侧滚动条几何；无回看空间时为空。 */
   #scrollbar: ScrollbarMetrics | undefined;
   /** 正在拖动滚动条时保存轨道快照，避免内容变化导致跳变。 */
@@ -1320,7 +1340,12 @@ export class TuiApp implements TuiInteraction {
   }
 
   #scrollBy(delta: number): void {
-    this.#viewState = scrollMainView(this.#viewState, delta, this.#layout.totalLines, this.#bodyHeight);
+    this.#viewState = scrollMainView(
+      this.#viewState,
+      delta,
+      this.#layout.totalLines,
+      this.#scrollHeight,
+    );
     this.#requestFrame();
   }
 
@@ -1330,7 +1355,7 @@ export class TuiApp implements TuiInteraction {
       this.#viewState,
       delta,
       this.#layout.totalLines,
-      this.#bodyHeight,
+      this.#scrollHeight,
     );
     this.#requestFrame();
   }
@@ -1351,12 +1376,17 @@ export class TuiApp implements TuiInteraction {
   }
 
   #scrollHistoryBy(delta: number): void {
-    this.#viewState = scrollHistoryView(this.#viewState, delta, this.#layout.totalLines, this.#bodyHeight);
+    this.#viewState = scrollHistoryView(
+      this.#viewState,
+      delta,
+      this.#layout.totalLines,
+      this.#scrollHeight,
+    );
     this.#requestFrame();
   }
 
   #openHistoryDrawer(): void {
-    this.#viewState = openHistoryView(this.#viewState, this.#layout.totalLines, this.#bodyHeight);
+    this.#viewState = openHistoryView(this.#viewState, this.#layout.totalLines, this.#scrollHeight);
     this.#requestFrame(true);
   }
 
@@ -3006,7 +3036,13 @@ export class TuiApp implements TuiInteraction {
       if (aborted && queued > 0) {
         this.#transcript.pushNotice(`已中断；[已排队 ${queued}] 保留，按 Enter 继续`);
       }
-      this.#requestFrame();
+
+      // 本轮收尾：下一帧把滚动位置停到作答开头（见 #composeBody），并**全量重绘**。
+      //
+      // 全量重绘是为了让这一帧自成权威：滚动位置这一帧变了，而差分渲染只重写
+      // 变化的行，一旦有哪一行没被判定为变化就会留下旧内容。一轮一次，代价可忽略。
+      this.#anchorPending = true;
+      this.#requestFrame(true);
 
       // 用户输入始终优先于 Goal continuation / context refresh。
       if (completed && !aborted) {
@@ -3180,6 +3216,19 @@ export class TuiApp implements TuiInteraction {
   }
 
   /**
+   * 长回答保护：作答比视口高时，主视图要够得着它的开头。
+   *
+   * 决策在 transcript-layout.ts 里（纯函数，好单测），这里只把布局 block
+   * 投影成它要的形状。
+   *
+   * 注意**没有**"折叠更早的工具卡片"这条策略 —— 数学上它是恒等变换，
+   * 对作答可见性零影响，详见 transcript-layout.ts 的说明。
+   */
+  #foldableBlocks(): FoldableBlock[] {
+    return toFoldableBlocks(this.#layout.blocks);
+  }
+
+  /**
    * 把"状态变了"接到"重画"上。
    *
    * 这是防止再次出现"某个流式回调忘了请求重绘"的**结构性保证**：
@@ -3307,7 +3356,18 @@ export class TuiApp implements TuiInteraction {
       dialogRows > 0
         ? Math.max(1, height - 1 - todoPanel.length - dialogRows)
         : Math.max(1, height - 2 - (inputBoxHeight - 1) - todoPanel.length - thinkingRows);
-    const body = this.#composeBody(width, bodyHeight);
+
+    // 滚动上限专用的**稳定高度**：不含「回到最新消息」按钮、也不含对话框。
+    //
+    // 这两个都会临时把正文压扁，而它们是否出现又取决于滚动状态：
+    //   滚动位置 > 0 → followTail=false → 按钮出现 → 正文矮几行 → 上限变大
+    // 拿被压扁的高度算上限，上限就跟着滚动位置变 —— 实测"滚到顶"永远差 1 行、
+    // 上下往返也不对称。用稳定高度算，上限才是个不动的目标。
+    const scrollHeight = Math.max(
+      1,
+      height - 2 - (inputPlan.boxHeight - 1) - todoPanel.length - baseThinking,
+    );
+    const body = this.#composeBody(width, bodyHeight, scrollHeight);
     const scrollbarViewportHeight = Math.max(1, bodyHeight - this.#bodyContentOffset);
     this.#scrollbar = this.#viewState.historyOpen
       ? undefined
@@ -3318,7 +3378,7 @@ export class TuiApp implements TuiInteraction {
           totalLines: this.#layout.totalLines,
           viewportHeight: scrollbarViewportHeight,
           scrollOffset: this.#viewState.scrollOffset,
-          maxOffset: maxScrollOffset(this.#layout.totalLines, bodyHeight),
+          maxOffset: maxScrollOffset(this.#layout.totalLines, this.#scrollHeight),
         });
     const bodyView =
       this.#scrollbar === undefined
@@ -3650,8 +3710,9 @@ export class TuiApp implements TuiInteraction {
    * 修法是通用且便宜的：窗口起点落在某条目内部时，把该条目的头部
    * 覆盖在第一行。对 bash 的长输出、read_file 的长文件同样有效。
    */
-  #composeBody(width: number, height: number): string[] {
+  #composeBody(width: number, height: number, scrollHeight = height): string[] {
     this.#bodyHeight = height;
+    this.#scrollHeight = scrollHeight;
 
     // 左侧留白：内容按窄 width 渲染，再统一缩进，避免文字贴着终端边缘。
     // 右侧同样留出滚动条那一列，否则行尾右对齐的内容会被滚动条盖掉。
@@ -3673,7 +3734,31 @@ export class TuiApp implements TuiInteraction {
 
     const total = this.#layout.totalLines;
     const delta = total - this.#lastLayoutTotal;
-    this.#viewState = syncHistoryView(this.#viewState, total, height, delta);
+    // 上限一律用稳定高度算（见 #compose 的说明），否则它会跟着滚动位置变
+    this.#viewState = syncHistoryView(this.#viewState, total, scrollHeight, delta);
+    // 长回答保护：本轮刚跑完时，若最后一条作答比视口高，就把滚动位置停在它的
+    // 开头 —— 至少让用户从第一句开始读。上限（stableLimit）已经保证这个位置
+    // 够得着，所以设进去不会被夹回来。
+    if (this.#anchorPending) {
+      this.#anchorPending = false;
+      // 高度分两步定：吸顶行与「查看更多消息」按钮都只在**锚定之后**才占位，
+      // 而窗口起点 = T - off - 实际视口高度，所以 floor 必须用**不超过**实际视口
+      // 的高度算，否则作答开头会被切掉几行。
+      //   1. 先按"只有吸顶行"估 —— 是 0 就说明作答放得下，到此为止
+      //   2. 真要锚定，才把按钮那几行也扣掉重估
+      // 一步到位按最坏情况扣，小终端上会把高度挤到 1，连一行的作答都算"放不下"，
+      // 于是每轮都无谓地锚定。
+      let floorHeight = Math.max(1, scrollHeight - 1);
+      let floor = assistantScrollFloor(this.#foldableBlocks(), total, floorHeight);
+      if (floor > 0) {
+        floorHeight = Math.max(1, scrollHeight - 1 - BUTTON_BOX_ROWS);
+        floor = assistantScrollFloor(this.#foldableBlocks(), total, floorHeight);
+      }
+      if (floor > 0 && this.#viewState.scrollOffset === 0) {
+        this.#viewState = { ...this.#viewState, scrollOffset: floor, followTail: false };
+      }
+    }
+
     this.#lastLayoutTotal = total;
 
     if (this.#viewState.historyOpen) {
@@ -3703,7 +3788,7 @@ export class TuiApp implements TuiInteraction {
     // 顶部行数不能把正文挤没：吸顶行 + 按钮要占位，正文至少留 1 行，
     // 否则 body 会多吐出一行、把下面的思考区/输入框整体顶偏（自检的锚点会直接报错）。
     // 位置不够时按钮先退化成紧凑形态，再不够就不画。
-    const wantMore = shouldShowMoreButton(this.#viewState, total, height);
+    const wantMore = shouldShowMoreButton(this.#viewState, total, scrollHeight);
     // 吸顶要不要出现，取决于窗口起点；窗口高度又取决于吸不吸顶。先用"只有按钮"
     // 的窗口探一次：窗口缩小后起点只会往下走，所以这个判断不会来回抖。
     const probe = this.#layout.window(
