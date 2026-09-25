@@ -1393,4 +1393,77 @@ describe("TUI PTY 冒烟", () => {
     },
     30_000,
   );
+  test(
+    "作答比视口高时，本轮结束后从作答第一行开始显示",
+    async () => {
+      // 回归防线：正文视口钉底，内容一溢出被切掉的永远是顶部 —— 长作答的前半段
+      // 就这么"被收入早期历史"。长回答保护会在本轮收尾时把滚动位置停到作答开头。
+      //
+      // 关键：**不能**只断言"作答第一行可见"。layout 里有一段吸顶逻辑 —— 窗口起点
+      // 落在某个 block 内部时，把该 block 的 header 覆盖到第一行 —— 所以即使不锚定，
+      // 作答第一行也会以"吸顶头"的形式出现在顶部。那样的断言两种情况都通过。
+      //
+      // 真正的区别在**结尾**：锚定后视口停在作答开头，结尾在折叠线下方；不锚定则
+      // 钉底，结尾可见、开头只剩一个吸顶头。
+      const home = await mkdtemp(join(tmpdir(), "bugent-anchor-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 20,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, TERM: "xterm-256color" },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      // 约 3500 字符 → 作答 52 行，20 行终端远装不下
+      const prompt = `AAA-start ${"filler ".repeat(500)}ZZZ-end`;
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        terminal.write(`${prompt}\r`);
+        // 等本轮收尾：不能只等 "○ idle" —— 启动屏本身就是 idle turn 0
+        await waitFor(() => output, (text) => strip(text).includes("○ idle turn 1"), 15_000);
+
+        // 按行号把差分流还原成屏幕。
+        // 不能按 `\x1b[?25l` 切"最后一帧"：那个序列既是帧前缀、也是 setCursor
+        // 隐藏光标用的，会把帧切碎。
+        const screen = Array.from({ length: 20 }, () => "");
+        for (const m of output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?25|$)/g)) {
+          const row = Number(m[1]) - 1;
+          if (row >= 0 && row < screen.length) screen[row] = strip(m[2]!);
+        }
+
+        const headRow = screen.findIndex((line) => line.includes("[mock] AAA-start"));
+        expect(headRow).toBeGreaterThan(1);
+        // 作答开头落在屏幕上半部：说明视口停在作答开头，不是滚到一半
+        expect(headRow).toBeLessThan(10);
+
+        // 核心断言：作答**结尾**不在开头下方 —— 它比视口高，本来就看不到。
+        // 不锚定（钉底）时结尾必然可见，这条会红。
+        const tailBelowHead = screen.findIndex(
+          (line, index) => index > headRow && line.includes("ZZZ-end"),
+        );
+        expect(tailBelowHead).toBe(-1);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
 });
