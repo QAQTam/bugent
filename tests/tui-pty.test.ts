@@ -182,12 +182,19 @@ describe("TUI PTY 冒烟", () => {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
         output = "";
-        terminal.write("line1\nline2");
-        await waitFor(
-          () => output,
-          (text) => strip(text).includes("line1") && strip(text).includes("line2"),
-        );
-        expect(output).toContain("\x1b[13;3H\x1b[?25h");
+        terminal.write("line1");
+        await waitFor(() => output, (text) => strip(text).includes("line1"));
+
+        // Ctrl+J 必须真的换行：光标落到新一行的行首（第 13 行第 3 列）。
+        // 这里刻意拆成两次写入并各等一帧：整段一次性写入会被帧调度器合流成
+        // 一帧，中间态（新行还是空的）就不会被画出来。
+        output = "";
+        terminal.write("\n");
+        await waitFor(() => output, (text) => text.includes("\x1b[13;3H\x1b[?25h"));
+
+        output = "";
+        terminal.write("line2");
+        await waitFor(() => output, (text) => strip(text).includes("line2"));
 
         output = "";
         terminal.write("\r");
@@ -1201,7 +1208,9 @@ describe("TUI PTY 冒烟", () => {
 
         // 4) 内容溢出：滚动条、查看更多消息、回到最新消息
         terminal.write(Array.from({ length: 10 }, (_, index) => `m${index + 1}`).join("\r") + "\r");
-        await waitFor(() => output, (text) => strip(text).includes("turn 10"), 20_000);
+        // 一次性灌入 10 条消息，加上开头的 "hello" 共 11 轮，跑完停在 turn 11。
+        // 只等最终态：中间轮次会被帧调度器合流成一帧，逐轮的 turn 号不再单独出现。
+        await waitFor(() => output, (text) => strip(text).includes("turn 11"), 20_000);
         terminal.write("\x1b[5~\x1b[5~");
         await Bun.sleep(300);
 
@@ -1222,4 +1231,143 @@ describe("TUI PTY 冒烟", () => {
     },
     30_000,
   );
+  test(
+    "流式文本逐帧出现：帧率跟着 token 到达走，而不是被定时器压到 12.5fps",
+    async () => {
+      // 回归防线。曾经 onText 不请求重绘，纯文本流式时只剩 80ms 的菊花定时器
+      // 在兜底 —— 300 tok/s 下每 80ms 一次性吐约 24 个 token，肉眼就是"成批"。
+      //
+      // 这里用 mock 的分块流式把 token 到达节奏钉死（20ms 一块），然后只测
+      // **帧率**。帧率是时长归一化的，所以机器快慢都不影响判据：
+      //   回归（定时器兜底）：1000 / 80ms = 12.5 fps
+      //   修复（内容驱动）  ：约 50 fps，受 20ms 到达间隔限制
+      // 实测：回归 14.2 fps / 修复 48.2 fps，阈值取 25 两边都留了约 2 倍余量。
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          TERM: "xterm-256color",
+          BUGENT_MOCK_CHUNK_CHARS: "1",
+          BUGENT_MOCK_CHUNK_DELAY_MS: "20",
+        },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        const startedAt = Date.now();
+        terminal.write("abcdefghijklmnopqrstuvwxyz\r");
+        await waitFor(
+          () => output,
+          (text) => strip(text).includes("[mock] abcdefghijklmnopqrstuvwxyz"),
+          15_000,
+        );
+        const elapsedMs = Date.now() - startedAt;
+
+        // 一帧 = 一段以隐藏光标开头的差分输出。
+        const frames = (output.match(/\x1b\[\?25l/g) ?? []).length;
+        expect(frames / (elapsedMs / 1000)).toBeGreaterThanOrEqual(25);
+
+        // 顺带钉住语义：回复是"逐步长出来"的，不是一两批画完。
+        const growthSteps = new Set(
+          [...output.matchAll(/\[mock\]\s?[a-z]*/g)].map((match) => match[0].length),
+        ).size;
+        expect(growthSteps).toBeGreaterThanOrEqual(12);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "滚动条出现时，工具卡片行尾的 +N -M 徽标不被吞掉",
+    async () => {
+      // 回归防线。`composeScrollbar` 会把正文每一行截断到 `width - 1` 再在最右列
+      // 画轨道 —— 正文此前没有右侧留白，于是行尾**右对齐**的徽标正好被这一列吃掉，
+      // 截断补上的省略号盖在徽标上，看上去就像"徽标超出了终端宽度"。
+      //
+      // 这里用矮终端（rows=20）逼出滚动条，再断言 apply_patch 那一行仍带着 +N。
+      const home = await mkdtemp(join(tmpdir(), "bugent-gutter-"));
+      const work = await mkdtemp(join(tmpdir(), "bugent-gutter-ws-"));
+      const patch = [
+        "*** Begin Patch",
+        "*** Add File: probe.ts",
+        "+one",
+        "+two",
+        "+three",
+        "*** End Patch",
+      ].join("\n");
+
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 20,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn(
+        [process.execPath, "run", join(process.cwd(), "src/index.ts"), "--mock", "--mode", "workspace-write"],
+        {
+          cwd: work,
+          env: {
+            ...process.env,
+            HOME: home,
+            TERM: "xterm-256color",
+            BUGENT_MOCK_TOOL_CALL: JSON.stringify({ name: "apply_patch", args: { patch } }),
+          },
+          terminal,
+          timeout: 20_000,
+          killSignal: "SIGKILL",
+        },
+      );
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("go\r");
+        // 等到工具真正执行完 —— 此时卡片头部应当是 "⏺ apply_patch … +3"
+        await waitFor(() => output, (text) => strip(text).includes("Success. Updated"), 15_000);
+
+        const frames = output.split("\x1b[?25l").filter((frame) => frame.length > 0);
+        const lastFrame = strip(frames.at(-1) ?? "");
+        const cardLine = lastFrame.split("\n").find((line) => line.includes("apply_patch")) ?? "";
+
+        expect(cardLine).toContain("apply_patch");
+        expect(cardLine).toMatch(/\+3/);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+        await rm(work, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
 });

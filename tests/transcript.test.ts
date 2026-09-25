@@ -189,3 +189,139 @@ describe("P5 · Transcript 显示块归并", () => {
     expect(t.items[1]?.kind === "tool" && t.items[1].output).toBe("a.txt");
   });
 });
+
+/**
+ * 变更通知 —— 回归防线。
+ *
+ * 流式文本曾经因为"改完内容没人请求重绘"而每 80ms 才吐一批。修法是把触发点
+ * 从各个回调挪进 Transcript 自身：只要内容真的变了，就一定通知。这里逐个
+ * 钉住每条会改内容的路径，将来新加的变更方法漏了 `#touch()` 会直接红。
+ */
+describe("Transcript 变更通知", () => {
+  /** 返回 transcript 与一个累加的通知计数。 */
+  function tracked() {
+    const t = new Transcript();
+    const counter = { n: 0 };
+    t.onChange = () => {
+      counter.n += 1;
+    };
+    return { t, counter };
+  }
+
+  test("流式文本增量每次都通知", () => {
+    const { t, counter } = tracked();
+    t.appendAssistantText("你");
+    const first = counter.n;
+    expect(first).toBeGreaterThan(0);
+    t.appendAssistantText("好");
+    expect(counter.n).toBeGreaterThan(first);
+  });
+
+  test("空增量不算变更", () => {
+    const { t, counter } = tracked();
+    t.appendAssistantText("");
+    expect(counter.n).toBe(0);
+  });
+
+  test("用户消息、通知与错误都通知", () => {
+    const { t, counter } = tracked();
+    t.pushUser("hi");
+    t.pushNotice("notice");
+    t.pushError("boom");
+    expect(counter.n).toBe(3);
+  });
+
+  test("工具卡片的开始、参数增量、进度、展开与完成都通知", () => {
+    const { t, counter } = tracked();
+
+    t.startTool({ id: "c1", name: "bash", args: {} });
+    const afterStart = counter.n;
+    expect(afterStart).toBeGreaterThan(0);
+
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "bash",
+      argsDelta: '{"a":',
+      rawArgs: '{"a":',
+      args: { _raw: '{"a":', _parseError: true },
+    });
+    expect(counter.n).toBeGreaterThan(afterStart);
+
+    const afterDelta = counter.n;
+    t.appendToolProgress("c1", "out");
+    expect(counter.n).toBeGreaterThan(afterDelta);
+
+    const afterProgress = counter.n;
+    t.toggleToolExpanded("c1");
+    expect(counter.n).toBeGreaterThan(afterProgress);
+
+    const afterToggle = counter.n;
+    t.finishTool("c1", "done", true);
+    expect(counter.n).toBeGreaterThan(afterToggle);
+  });
+
+  test("assistant 消息收尾（endAssistant）通知", () => {
+    const { t, counter } = tracked();
+    t.appendAssistantText("hi");
+    const before = counter.n;
+    t.endAssistant(1);
+    expect(counter.n).toBeGreaterThan(before);
+  });
+
+  test("clearStreamingTools 通知", () => {
+    const { t, counter } = tracked();
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "bash",
+      argsDelta: "{}",
+      rawArgs: "{}",
+      args: {},
+    });
+    const before = counter.n;
+    t.clearStreamingTools();
+    expect(counter.n).toBeGreaterThan(before);
+  });
+
+  test("restore 重建时通知", () => {
+    const { t, counter } = tracked();
+    t.restore([
+      makeMessage({ msgid: 1, role: "user", origin: "user", parts: [textPart("hi")], createdAt: 1 }),
+    ]);
+    expect(counter.n).toBeGreaterThan(0);
+  });
+
+  test("通知到达时 revision 已经更新，且严格递增", () => {
+    const t = new Transcript();
+    const seen: number[] = [];
+    t.onChange = () => {
+      seen.push(t.revision);
+    };
+
+    t.appendAssistantText("a");
+    t.appendAssistantText("b");
+
+    // 一次 appendAssistantText 可能触发多于一次通知（建块 + 更新块），
+    // 但每次通知到达时 revision 都必须**已经**变了 —— 否则布局层会复用旧行。
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    for (const value of seen) expect(value).toBeGreaterThan(0);
+    for (let i = 1; i < seen.length; i += 1) {
+      expect(seen[i]!).toBeGreaterThan(seen[i - 1]!);
+    }
+    expect(seen.at(-1)).toBe(t.revision);
+  });
+
+  test("没有订阅者时变更不报错", () => {
+    const t = new Transcript();
+    expect(() => {
+      t.pushUser("hi");
+      t.appendAssistantText("x");
+    }).not.toThrow();
+  });
+
+  test("可以解除订阅", () => {
+    const { t, counter } = tracked();
+    t.onChange = undefined;
+    t.pushUser("hi");
+    expect(counter.n).toBe(0);
+  });
+});

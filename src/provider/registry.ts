@@ -5,7 +5,7 @@
  * 这就是 Phase 1 要的隔离。
  */
 
-import type { ModelClient } from "./types.ts";
+import type { ChatChunk, ModelClient } from "./types.ts";
 import {
   createOpenAIChatClient,
   type OpenAIChatOptions,
@@ -14,6 +14,12 @@ import {
   type ReasoningReplay,
 } from "./adapters/openai-chat.ts";
 import { createMockClient, type MockTurn } from "./adapters/mock.ts";
+
+/** 读一个"正整数"环境变量；缺失 / 非数字 / ≤0 一律当没配。 */
+function positiveIntEnv(name: string): number {
+  const raw = Number(Bun.env[name] ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
 
 /**
  * mock 的脚本。
@@ -26,11 +32,22 @@ import { createMockClient, type MockTurn } from "./adapters/mock.ts";
  * provider 层因此仍然不认识任何具体工具。
  */
 function mockScript(): MockTurn[] {
+  // 流式模拟：把回复切成小块并逐块延迟吐字，让 TUI 的增量渲染可被观测。
+  // 只在测试里用 env 打开，默认保持"一次性吐完"的原行为。
+  const chunkChars = positiveIntEnv("BUGENT_MOCK_CHUNK_CHARS");
+
   const echo: MockTurn = (req) => {
     const last = [...req.messages].reverse().find((message) => message.role === "user");
     const text = last?.parts.map((part) => (part.type === "text" ? part.text : "")).join("") ?? "";
+    const full = `[mock] ${text}`;
+    const deltas =
+      chunkChars === 0
+        ? [full]
+        : Array.from({ length: Math.ceil(full.length / chunkChars) }, (_, index) =>
+            full.slice(index * chunkChars, (index + 1) * chunkChars),
+          );
     return [
-      { type: "text", delta: `[mock] ${text}` },
+      ...deltas.map((delta): ChatChunk => ({ type: "text", delta })),
       { type: "done", reason: "stop" },
     ];
   };
@@ -93,11 +110,15 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
     return createOpenAIChatClient(model, options);
   },
 
-  mock: (config, model) =>
-    createMockClient({
+  mock: (config, model) => {
+    // 只有测试会设这个：让分块之间真的隔开时间，才能观察到逐帧增长。
+    const chunkDelayMs = positiveIntEnv("BUGENT_MOCK_CHUNK_DELAY_MS");
+    return createMockClient({
       id: `${config.id}/mock/${model}`,
       script: mockScript(),
-    }),
+      ...(chunkDelayMs > 0 ? { chunkDelayMs } : {}),
+    });
+  },
 
   "openai-responses": (_config, model) => {
     throw new Error(`endpoint "openai-responses" 尚未实现（model=${model}）`);

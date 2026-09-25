@@ -82,6 +82,15 @@ export class Transcript {
   #revision = 0;
   /** 当前正在接收流式文本的 assistant 块；undefined 表示下段文本要开新块。 */
   #streamingIndex: number | undefined;
+  /**
+   * 内容变更通知。TUI 用它把"改了就重画"变成结构性保证 ——
+   * 以前每个流式回调各自记得请求重绘，漏一处不会报错、只会让界面变慢。
+   */
+  #onChange: (() => void) | undefined;
+
+  set onChange(handler: (() => void) | undefined) {
+    this.#onChange = handler;
+  }
 
   get items(): readonly DisplayItem[] {
     return this.#items;
@@ -97,15 +106,26 @@ export class Transcript {
     return this.#versions[index] ?? 0;
   }
 
+  /**
+   * **唯一**的内容变更原语：版本号递增与外部通知必须成对发生。
+   *
+   * 所有改动条目的方法都必须经过这里（或经过 `#push` / `#bump`），
+   * 否则布局缓存会看到旧版本、或者界面压根不重画。
+   */
+  #touch(): void {
+    this.#revision += 1;
+    this.#onChange?.();
+  }
+
   #push(item: DisplayItem): void {
     this.#items.push(item);
     this.#versions.push(0);
-    this.#revision += 1;
+    this.#touch();
   }
 
   #bump(index: number): void {
     this.#versions[index] = (this.#versions[index] ?? 0) + 1;
-    this.#revision += 1;
+    this.#touch();
   }
 
   pushUser(text: string, msgid?: MsgId): void {
@@ -194,7 +214,7 @@ export class Transcript {
         this.#versions.splice(index, 1);
       }
     }
-    this.#revision += 1;
+    this.#touch();
   }
 
   setToolPatchProgress(callId: string, progress: PatchProgress): void {
@@ -302,7 +322,7 @@ export class Transcript {
     this.#items = [];
     this.#versions = [];
     this.#streamingIndex = undefined;
-    this.#revision += 1;
+    this.#touch();
 
     for (const message of messages) {
       if (message.role === "system") continue;

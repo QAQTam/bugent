@@ -35,6 +35,7 @@ import type { PersistedProviderConfig } from "../provider/registry.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
+import { FrameScheduler } from "./frame-scheduler.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
@@ -153,6 +154,19 @@ interface RenderedDialog {
 
 /** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
 export const BODY_INDENT = 3;
+
+/**
+ * 正文右侧为滚动条预留的列数。
+ *
+ * `composeScrollbar` 会把每一行截断到 `width - 1` 再在最右列画轨道 —— 也就是说
+ * 滚动条一出现，正文最右边那一列就不属于正文了。正文此前按 `width - BODY_INDENT`
+ * 渲染、完全没有右侧留白，于是**右对齐的东西（工具卡片行尾的 `+N -M`）会被直接
+ * 吃掉**：截断补上的省略号刚好盖在徽标上。
+ *
+ * 不能只在"这一帧有滚动条"时才留：留白会改变折行、折行又决定总行数、总行数再决定
+ * 滚动条是否出现，来回抖。固定留一列，布局就是确定的。
+ */
+export const SCROLLBAR_GUTTER = 1;
 
 /** 画在正文/思考区里的按钮：命中矩形 + 左上角字形。 */
 interface PlacedButton {
@@ -424,8 +438,26 @@ export class TuiApp implements TuiInteraction {
   #abort: AbortController | undefined;
   /** 串行化所有工具触发的交互弹窗，避免并发工具互相覆盖对话框状态。 */
   #interactionTail: Promise<void> = Promise.resolve();
-  #renderScheduled = false;
+  /**
+   * 全应用唯一的重绘入口。
+   *
+   * 一切重绘都走 `#requestFrame()`：内容变化、定时动画、按键与鼠标事件、
+   * 异步回调。窗口期内的多次请求合成一帧。
+   *
+   * `#render()` 是调度器内部的实际绘制动作，外面不要再直接调它 ——
+   * 唯一需要"立刻出帧"的场景（备用屏刚清空后的首帧）用
+   * `#requestFrame(true)` 之后紧跟 `#frames.flush()` 表达。
+   */
+  #frames = new FrameScheduler({ render: (force) => this.#render(force) });
   #resolveExit: (() => void) | undefined;
+  /**
+   * 出口建好之前就来过的退出请求。
+   *
+   * 构造期就会渲染首帧（banner 在构造函数里 push），所以用户完全可能在
+   * `run()` 建立出口之前按下 Ctrl+C —— 那一瞬间界面看起来已经"就绪"了。
+   * 请求必须记下来延后兑现，否则会被无声吞掉。
+   */
+  #exitRequested = false;
   #mode: SandboxMode = "workspace-write";
   #goalController: GoalController | undefined;
   #goalStatusLine: string | undefined;
@@ -486,9 +518,12 @@ export class TuiApp implements TuiInteraction {
     // 保证任何入口构造 TuiApp 都能拿到，而不只是 CLI。
     registerBuiltinToolRenderers();
 
+    // 内容一变就重画；不依赖每个流式回调自己记得请求。
+    this.#bindRenderTriggers();
+
     // 语言高亮模块是懒加载的：加载完成后要重绘一次，否则第一次看到的
     // 永远是纯文本。渲染路径保持同步，靠这个回调补上第二遍。
-    setHighlightReadyHandler(() => this.#render(true));
+    setHighlightReadyHandler(() => this.#requestFrame(true));
 
     this.#session = options.session;
     this.#tools = options.tools;
@@ -610,9 +645,9 @@ export class TuiApp implements TuiInteraction {
           this.#askResolve = resolve;
           this.#askFlow = new AskUserFlow({
             questions,
-            onChange: () => this.#render(true),
+            onChange: () => this.#requestFrame(true),
           });
-          this.#render(true);
+          this.#requestFrame(true);
         }),
     );
   }
@@ -634,21 +669,21 @@ export class TuiApp implements TuiInteraction {
     this.#askResolve = undefined;
     flow?.dispose();
     resolve?.(answers);
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #openDialog(dialog: Omit<PendingDialog, "resolve">): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.#clearButtonInteraction();
       this.#pendingDialog = { ...dialog, resolve };
-      this.#render(true);
+      this.#requestFrame(true);
     });
   }
 
   async run(): Promise<void> {
     this.#terminal.enter();
     const offData = this.#terminal.onData((chunk) => this.#handleKeys(this.#decoder.push(chunk)));
-    const offResize = this.#terminal.onResize(() => this.#render(true));
+    const offResize = this.#terminal.onResize(() => this.#requestFrame(true));
     // 裸 ESC 需要超时才能确认（区别于转义序列前缀）
     const escapeTimer = setInterval(() => {
       const keys = this.#decoder.flush();
@@ -663,17 +698,25 @@ export class TuiApp implements TuiInteraction {
     });
     applyTheme(detected.background);
 
+    let resolveExited!: () => void;
     const exited = new Promise<void>((resolve) => {
-      this.#resolveExit = resolve;
+      resolveExited = resolve;
     });
+    this.#resolveExit = resolveExited;
+    // 出口建好之前来的退出请求，现在兑现。
+    if (this.#exitRequested) resolveExited();
 
     try {
-      this.#render(true);
+      // 首帧必须立刻出现：备用屏刚被清空，等合流窗口会看到一瞬空白。
+      this.#requestFrame(true);
+      this.#frames.flush();
       this.#syncTodoShimmer();
       await exited;
     } finally {
       clearInterval(escapeTimer);
       this.#stopTodoShimmer();
+      // 取消挂起的合流帧，否则定时器会把进程多吊住一个窗口期。
+      this.#frames.dispose();
       offData();
       offResize();
       setHighlightReadyHandler(undefined);
@@ -734,7 +777,7 @@ export class TuiApp implements TuiInteraction {
       case "ctrl":
         if (key.key === "c") this.#requestExit();
         else if (key.key === "d" && this.#input.length === 0) this.#requestExit();
-        else if (key.key === "l") this.#render(true);
+        else if (key.key === "l") this.#requestFrame(true);
         return;
 
       case "escape":
@@ -756,7 +799,7 @@ export class TuiApp implements TuiInteraction {
         chars.splice(this.#cursor - 1, 1);
         this.#input = chars.join("");
         this.#cursor -= 1;
-        this.#render();
+        this.#requestFrame();
         return;
       }
 
@@ -765,24 +808,24 @@ export class TuiApp implements TuiInteraction {
         if (this.#cursor >= chars.length) return;
         chars.splice(this.#cursor, 1);
         this.#input = chars.join("");
-        this.#render();
+        this.#requestFrame();
         return;
       }
 
       case "left":
         if (this.#cursor > 0) this.#cursor -= 1;
-        this.#render();
+        this.#requestFrame();
         return;
 
       case "right":
         if (this.#cursor < Array.from(this.#input).length) this.#cursor += 1;
-        this.#render();
+        this.#requestFrame();
         return;
 
       case "home": {
         const layout = this.#inputLayout();
         this.#cursor = layout.starts[layout.cursorRow] ?? 0;
-        this.#render();
+        this.#requestFrame();
         return;
       }
 
@@ -790,7 +833,7 @@ export class TuiApp implements TuiInteraction {
         const layout = this.#inputLayout();
         const line = layout.lines[layout.cursorRow] ?? "";
         this.#cursor = inputIndexAt(layout, layout.cursorRow, visibleWidth(line));
-        this.#render();
+        this.#requestFrame();
         return;
       }
 
@@ -843,7 +886,7 @@ export class TuiApp implements TuiInteraction {
       }
       if (!key.pressed) {
         this.#scrollbarDrag = undefined;
-        this.#render();
+        this.#requestFrame();
         return;
       }
     }
@@ -885,7 +928,7 @@ export class TuiApp implements TuiInteraction {
       const target = this.#buttonTargetAt(key.x, key.y);
       if (!this.#sameButtonTarget(this.#hoveredButton, target)) {
         this.#hoveredButton = target;
-        this.#render(true);
+        this.#requestFrame(true);
       }
       return;
     }
@@ -897,20 +940,20 @@ export class TuiApp implements TuiInteraction {
       if (key.pressed) {
         if (target !== undefined) {
           this.#pressedButton = target;
-          this.#render(true);
+          this.#requestFrame(true);
           return;
         }
         // 按在按钮之外：清掉上一次残留的按下态（按住按钮拖出去就是这种）
         if (this.#pressedButton !== undefined) {
           this.#pressedButton = undefined;
-          this.#render(true);
+          this.#requestFrame(true);
         }
       } else {
         const pressed = this.#pressedButton;
         if (pressed !== undefined) {
           this.#pressedButton = undefined;
           if (this.#sameButtonTarget(pressed, target)) this.#invokeButton(pressed);
-          else this.#render(true);
+          else this.#requestFrame(true);
           return;
         }
       }
@@ -932,11 +975,11 @@ export class TuiApp implements TuiInteraction {
         // 只移动光标，不引入"激活/未激活"状态：输入框永远是按键汇聚点，
         // 点框外不会让后续输入被丢弃。
         this.#cursor = target.index;
-        this.#render();
+        this.#requestFrame();
         return;
       case "askLine":
         // 点到选项就选中/勾选；点到弹窗其它区域时吞掉事件，不穿透到消息列表
-        if (this.#askFlow?.clickLine(target.line) === true) this.#render(true);
+        if (this.#askFlow?.clickLine(target.line) === true) this.#requestFrame(true);
         return;
       case "dialogBody":
         return;
@@ -949,7 +992,7 @@ export class TuiApp implements TuiInteraction {
         return;
       case "tool":
         // 展开会改变布局，必须整屏重绘而不是走差分
-        if (this.#transcript.toggleToolExpanded(target.callId)) this.#render(true);
+        if (this.#transcript.toggleToolExpanded(target.callId)) this.#requestFrame(true);
         return;
       case "message":
         this.#openMessageMenu(target.msgid, target.undoMsgid);
@@ -1240,7 +1283,7 @@ export class TuiApp implements TuiInteraction {
   #toggleTodoPanel(): void {
     this.#todoPanelExpanded = !this.#todoPanelExpanded;
     this.#clearButtonInteraction();
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #insert(text: string): void {
@@ -1248,7 +1291,7 @@ export class TuiApp implements TuiInteraction {
     chars.splice(this.#cursor, 0, ...Array.from(text));
     this.#input = chars.join("");
     this.#cursor += Array.from(text).length;
-    this.#render();
+    this.#requestFrame();
   }
 
   #inputLayout(): InputLayout {
@@ -1268,13 +1311,13 @@ export class TuiApp implements TuiInteraction {
     const targetLine = layout.lines[targetRow] ?? "";
     const targetColumn = Math.min(layout.cursorColumn, visibleWidth(targetLine));
     this.#cursor = inputIndexAt(layout, targetRow, targetColumn);
-    this.#render();
+    this.#requestFrame();
     return true;
   }
 
   #scrollBy(delta: number): void {
     this.#viewState = scrollMainView(this.#viewState, delta, this.#layout.totalLines, this.#bodyHeight);
-    this.#render();
+    this.#requestFrame();
   }
 
   #setScrollOffset(offset: number): void {
@@ -1285,7 +1328,7 @@ export class TuiApp implements TuiInteraction {
       this.#layout.totalLines,
       this.#bodyHeight,
     );
-    this.#render();
+    this.#requestFrame();
   }
 
   #beginScrollbarDrag(y: number): void {
@@ -1305,22 +1348,22 @@ export class TuiApp implements TuiInteraction {
 
   #scrollHistoryBy(delta: number): void {
     this.#viewState = scrollHistoryView(this.#viewState, delta, this.#layout.totalLines, this.#bodyHeight);
-    this.#render();
+    this.#requestFrame();
   }
 
   #openHistoryDrawer(): void {
     this.#viewState = openHistoryView(this.#viewState, this.#layout.totalLines, this.#bodyHeight);
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #closeHistoryDrawer(): void {
     this.#viewState = closeHistoryView(this.#viewState);
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #returnToLatest(): void {
     this.#viewState = returnToLatestView(this.#viewState);
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #submit(): void {
@@ -1363,7 +1406,7 @@ export class TuiApp implements TuiInteraction {
       this.#clearInput();
       if (!isSandboxMode(mode)) {
         this.#transcript.pushError("未知档位，可选：read-only / workspace-write / no-sandbox");
-        this.#render();
+        this.#requestFrame();
         return;
       }
       this.#reconfigureRuntime({ mode });
@@ -1379,7 +1422,7 @@ export class TuiApp implements TuiInteraction {
       this.#clearInput();
       if (!this.#providerIds.includes(providerId)) {
         this.#transcript.pushError(`未知 provider：${providerId}`);
-        this.#render();
+        this.#requestFrame();
         return;
       }
       this.#reconfigureRuntime({ providerId });
@@ -1395,7 +1438,7 @@ export class TuiApp implements TuiInteraction {
       this.#clearInput();
       if (model.length === 0) {
         this.#transcript.pushError("model 不能为空");
-        this.#render();
+        this.#requestFrame();
         return;
       }
       this.#reconfigureRuntime({ model });
@@ -1409,7 +1452,7 @@ export class TuiApp implements TuiInteraction {
     if (text.startsWith("/")) {
       this.#clearInput();
       this.#transcript.pushError(`未知命令：${text}。输入 / 查看命令菜单`);
-      this.#render();
+      this.#requestFrame();
       return;
     }
 
@@ -1425,7 +1468,7 @@ export class TuiApp implements TuiInteraction {
       if (result.status === "queued") {
         this.#transcript.pushNotice(`[已排队 ${this.#session.queuedUserCount}]`);
       }
-      this.#render();
+      this.#requestFrame();
       return;
     }
 
@@ -1436,7 +1479,7 @@ export class TuiApp implements TuiInteraction {
       return;
     }
 
-    this.#render();
+    this.#requestFrame();
     void this.#runTurn(text);
   }
 
@@ -1444,7 +1487,7 @@ export class TuiApp implements TuiInteraction {
     this.#input = "";
     this.#cursor = 0;
     this.#viewState = initialHistoryView();
-    this.#render();
+    this.#requestFrame();
   }
 
   /** `/`：用现有 ask_user 选择器承载命令面板。 */
@@ -1481,7 +1524,7 @@ export class TuiApp implements TuiInteraction {
     const controller = this.#goalController;
     if (controller === undefined) {
       this.#transcript.pushError("当前 session 未启用持久化，无法使用 Goal 模式");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -1498,7 +1541,7 @@ export class TuiApp implements TuiInteraction {
           this.#transcript.pushError(error instanceof Error ? error.message : String(error));
         }
       }
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (argument === "resume") {
@@ -1513,36 +1556,36 @@ export class TuiApp implements TuiInteraction {
           this.#transcript.pushError(error instanceof Error ? error.message : String(error));
         }
       }
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (argument === "continue") {
       if (goal === undefined) {
         this.#transcript.pushError("当前 session 没有 Goal");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       if (this.#busy || this.#session.hasOpenToolBatch()) {
         this.#transcript.pushError("当前一轮还在跑，先结束或中断再刷新 Context Epoch");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       try {
         const epoch = await controller.createContextEpoch("manual");
         if (this.#switchRuntime(epoch.branchId, `已创建 Context Epoch ${epoch.epochId}`)) {
           this.#refreshGoalStatus();
-          this.#render(true);
+          this.#requestFrame(true);
         }
       } catch (error) {
         this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-        this.#render(true);
+        this.#requestFrame(true);
       }
       return;
     }
     if (argument === "checkpoints") {
       if (goal === undefined) {
         this.#transcript.pushError("当前 session 没有 Goal");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       const checkpoints = controller.repository.listCheckpoints(goal.id);
@@ -1572,17 +1615,17 @@ export class TuiApp implements TuiInteraction {
     if (argument === "finalize") {
       if (goal === undefined) {
         this.#transcript.pushError("当前 session 没有 Goal");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       if (this.#busy || this.#session.hasOpenToolBatch()) {
         this.#transcript.pushError("当前一轮还在跑，先结束或中断再执行 final audit");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       this.#busy = true;
       this.#activity = { state: "working" };
-      this.#render(true);
+      this.#requestFrame(true);
       try {
         const result = await controller.finalAudit();
         this.#transcript.pushNotice(
@@ -1597,14 +1640,14 @@ export class TuiApp implements TuiInteraction {
         this.#activity = { state: "idle" };
         this.#goalContinuationStreak = 0;
         this.#refreshGoalStatus();
-        this.#render(true);
+        this.#requestFrame(true);
       }
       return;
     }
     if (argument === "edit") {
       if (goal === undefined) {
         this.#transcript.pushError("当前 session 没有 Goal");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       const objective = await this.#promptText(`Goal objective（当前：${goal.objective}）`);
@@ -1633,13 +1676,13 @@ export class TuiApp implements TuiInteraction {
       } catch (error) {
         this.#transcript.pushError(error instanceof Error ? error.message : String(error));
       }
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (argument === "clear") {
       if (goal === undefined) {
         this.#transcript.pushError("当前 session 没有 Goal");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       const confirmed = await this.#openDialog({
@@ -1663,7 +1706,7 @@ export class TuiApp implements TuiInteraction {
         } catch (error) {
           this.#transcript.pushError(error instanceof Error ? error.message : String(error));
         }
-        this.#render(true);
+        this.#requestFrame(true);
       }
       return;
     }
@@ -1675,7 +1718,7 @@ export class TuiApp implements TuiInteraction {
       this.#transcript.pushError(
         "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`、`/goal edit`、`/goal clear`。",
       );
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -1689,12 +1732,12 @@ export class TuiApp implements TuiInteraction {
     if (controller === undefined) return;
     if (this.#busy || this.#session.hasOpenToolBatch()) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再初始化 Goal");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (this.#session.queuedUserCount > 0) {
       this.#transcript.pushError("当前 session 还有排队消息，先处理完再初始化 Goal");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -1702,7 +1745,7 @@ export class TuiApp implements TuiInteraction {
     this.#session.enqueueInjection(GOAL_INITIALIZATION_INSTRUCTION, "goal");
     this.#transcript.pushNotice("Goal 初始化已开始：模型会先澄清契约，不会立即改代码。");
     this.#refreshGoalStatus();
-    this.#render(true);
+    this.#requestFrame(true);
     await this.#runTurn(rawIntent);
   }
 
@@ -1712,7 +1755,7 @@ export class TuiApp implements TuiInteraction {
     const goal = controller.currentGoal();
     if (goal === undefined) {
       this.#transcript.pushError("当前 session 没有 Goal。使用 `/goal <目标>` 初始化。");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -1751,7 +1794,7 @@ export class TuiApp implements TuiInteraction {
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     }
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #refreshGoalStatus(): void {
@@ -1854,7 +1897,7 @@ export class TuiApp implements TuiInteraction {
       this.#transcript.pushNotice(
         `MCP server ${selected.id} 已${selected.enabled ? "停用" : "启用"}（当前 session）`,
       );
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -1862,18 +1905,18 @@ export class TuiApp implements TuiInteraction {
   async #chooseMcpReload(): Promise<void> {
     if (this.#busy) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再重载 MCP");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (this.#reloadMcp === undefined) {
       this.#transcript.pushError("当前没有可用的 MCP 重载入口");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     const enabled = this.#mcpServers.filter((server) => server.enabled);
     if (enabled.length === 0) {
       this.#transcript.pushError("当前 session 没有启用的 MCP server");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     const answers = await this.askUser([
@@ -1892,19 +1935,19 @@ export class TuiApp implements TuiInteraction {
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     }
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   /** 重载 skill catalog，并在安全边界追加 developer delta。 */
   async #reloadSkillCatalog(): Promise<void> {
     if (this.#busy) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再重载 skills");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (this.#reloadSkills === undefined) {
       this.#transcript.pushError("当前没有可用的 skills 重载入口");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     try {
@@ -1915,7 +1958,7 @@ export class TuiApp implements TuiInteraction {
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
     }
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   /** 用单选表单切换当前 session 的沙箱档位。 */
@@ -1974,7 +2017,7 @@ export class TuiApp implements TuiInteraction {
     const profiles = [...this.#providerConfigs.values()];
     if (profiles.length === 0) {
       this.#transcript.pushError("当前 session 还没有自定义 provider profile");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     const answers = await this.askUser([
@@ -2015,7 +2058,7 @@ export class TuiApp implements TuiInteraction {
       if (newId === undefined) return;
       if (this.#providerConfigs.has(newId)) {
         this.#transcript.pushError(`provider profile 已存在：${newId}`);
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       const oldKey =
@@ -2035,7 +2078,7 @@ export class TuiApp implements TuiInteraction {
       } else {
         if (this.#saveProviderConfig === undefined) {
           this.#transcript.pushError("当前未启用持久化，无法重命名 provider profile");
-          this.#render(true);
+          this.#requestFrame(true);
           return;
         }
         this.#saveProviderConfig(this.#session.id, renamed);
@@ -2054,7 +2097,7 @@ export class TuiApp implements TuiInteraction {
         toProviderId: newId,
       });
       this.#transcript.pushNotice(`已重命名 provider profile：${providerId} -> ${newId}`);
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -2063,12 +2106,12 @@ export class TuiApp implements TuiInteraction {
       if (newId === undefined) return;
       if (this.#providerConfigs.has(newId)) {
         this.#transcript.pushError(`provider profile 已存在：${newId}`);
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       if (this.#saveProviderConfig === undefined) {
         this.#transcript.pushError("当前未启用持久化，无法复制 provider profile");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       const copied: PersistedProviderConfig = { ...config, id: newId };
@@ -2083,19 +2126,19 @@ export class TuiApp implements TuiInteraction {
         toProviderId: newId,
       });
       this.#transcript.pushNotice(`已复制 provider profile：${providerId} -> ${newId}`);
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
     if (action === 3) {
       if (providerId === this.#providerId) {
         this.#transcript.pushError("不能删除当前 active provider，先切换到其它 provider");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       if (this.#deleteProviderConfig === undefined) {
         this.#transcript.pushError("当前未启用持久化，无法删除 provider profile");
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
       this.#deleteProviderConfig(this.#session.id, providerId);
@@ -2107,7 +2150,7 @@ export class TuiApp implements TuiInteraction {
         providerId,
       });
       this.#transcript.pushNotice(`已删除 provider profile：${providerId}`);
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -2116,7 +2159,7 @@ export class TuiApp implements TuiInteraction {
       this.#reconfigureRuntime({ clearApiKey: true });
       this.#audit?.sessionConfig({ action: "api_key_clear", providerId });
       this.#transcript.pushNotice(`已清除 API key：${providerId}`);
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -2218,7 +2261,7 @@ export class TuiApp implements TuiInteraction {
       }
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -2278,7 +2321,7 @@ export class TuiApp implements TuiInteraction {
       }
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -2331,22 +2374,22 @@ export class TuiApp implements TuiInteraction {
       overrides.mcpServerIds === undefined
     ) {
       this.#transcript.pushNotice("当前 session 配置没有变化");
-      this.#render(true);
+      this.#requestFrame(true);
       return true;
     }
     if (this.#busy) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再切换配置");
-      this.#render(true);
+      this.#requestFrame(true);
       return false;
     }
     if (this.#createRuntime === undefined) {
       this.#transcript.pushError("当前未启用 runtime 切换，无法调整 session 配置");
-      this.#render(true);
+      this.#requestFrame(true);
       return false;
     }
     if (this.#session.queuedUserCount > 0) {
       this.#transcript.pushError("当前 session 还有排队消息，先处理完再切换配置");
-      this.#render(true);
+      this.#requestFrame(true);
       return false;
     }
 
@@ -2382,11 +2425,11 @@ export class TuiApp implements TuiInteraction {
           this.#apiKeyOverride !== undefined ? " · API key 仅当前进程生效" : ""
         }`,
       );
-      this.#render(true);
+      this.#requestFrame(true);
       return true;
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render(true);
+      this.#requestFrame(true);
       return false;
     }
   }
@@ -2395,12 +2438,12 @@ export class TuiApp implements TuiInteraction {
   #startNewSession(): void {
     if (this.#busy) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再开新对话");
-      this.#render();
+      this.#requestFrame();
       return;
     }
     if (this.#createRuntime === undefined && this.#createSession === undefined) {
       this.#transcript.pushError("当前未启用持久化，无法创建新对话");
-      this.#render();
+      this.#requestFrame();
       return;
     }
 
@@ -2428,15 +2471,16 @@ export class TuiApp implements TuiInteraction {
       this.#lastAssistantMsgid = undefined;
     }
 
-    this.#transcript = new Transcript();
+    this.#adoptTranscript(new Transcript());
     this.#layout = new TranscriptLayout<DisplayItem>();
     this.#transcript.pushNotice(
       `已开始新对话：\`${this.#session.id}\`\n\n用 \`/resume\` 之外的会话请重启并加 \`--resume <id>\`。`,
     );
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #requestExit(): void {
+    this.#exitRequested = true;
     this.#resolveExit?.();
   }
 
@@ -2472,7 +2516,7 @@ export class TuiApp implements TuiInteraction {
     this.#dialogButtonHits = [];
     this.#clearButtonInteraction();
     dialog.resolve(answer);
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   /* --------------------------- 消息操作 / 分支 --------------------------- */
@@ -2486,7 +2530,7 @@ export class TuiApp implements TuiInteraction {
     if (message === undefined) return;
     if (this.#branchService === undefined || this.#createRuntime === undefined) {
       this.#transcript.pushError("当前会话未启用持久化分支，无法执行消息操作");
-      this.#render();
+      this.#requestFrame();
       return;
     }
 
@@ -2511,7 +2555,7 @@ export class TuiApp implements TuiInteraction {
         ...(item.shortcut !== undefined ? { shortcut: item.shortcut } : {}),
       })),
     };
-    this.#render(true);
+    this.#requestFrame(true);
   }
 
   #resolveMessageMenuKey(key: Key): void {
@@ -2532,17 +2576,17 @@ export class TuiApp implements TuiInteraction {
     this.#clearButtonInteraction();
 
     if (action === "cancel") {
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (this.#busy) {
       this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再操作消息");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
     if (this.#branchService === undefined || this.#createRuntime === undefined) {
       this.#transcript.pushError("当前会话未启用持久化分支");
-      this.#render(true);
+      this.#requestFrame(true);
       return;
     }
 
@@ -2574,7 +2618,7 @@ export class TuiApp implements TuiInteraction {
           const payload = Buffer.from(text, "utf8").toString("base64");
           this.#terminal.write(`\x1b]52;c;${payload}\x1b\\`);
           this.#transcript.pushNotice(copyNotice(text));
-          this.#render(true);
+          this.#requestFrame(true);
           return;
         }
 
@@ -2600,7 +2644,7 @@ export class TuiApp implements TuiInteraction {
       }
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -2666,7 +2710,7 @@ export class TuiApp implements TuiInteraction {
         this.#transcript.pushError(
           `工作区撤回失败：${workspaceResult.conflicts.join("、") || "未知冲突"}`,
         );
-        this.#render(true);
+        this.#requestFrame(true);
         return;
       }
 
@@ -2678,7 +2722,7 @@ export class TuiApp implements TuiInteraction {
       );
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render(true);
+      this.#requestFrame(true);
     }
   }
 
@@ -2712,7 +2756,7 @@ export class TuiApp implements TuiInteraction {
   #switchRuntime(branchId: string, notice?: string): boolean {
     if (this.#createRuntime === undefined) {
       this.#transcript.pushError("当前未启用 runtime 切换");
-      this.#render(true);
+      this.#requestFrame(true);
       return false;
     }
 
@@ -2724,7 +2768,7 @@ export class TuiApp implements TuiInteraction {
     // 旧分支的排队消息不能带入新分支；retry 也只重发原 user message 一次。
     this.#session.clearQueues();
     this.#adoptRuntime(runtime);
-    this.#transcript = new Transcript();
+    this.#adoptTranscript(new Transcript());
     this.#transcript.restore(runtime.session.messages);
     if (notice !== undefined) this.#transcript.pushNotice(notice);
 
@@ -2739,7 +2783,7 @@ export class TuiApp implements TuiInteraction {
     this.#stopThinkingAnimation();
     this.#input = "";
     this.#cursor = 0;
-    this.#render(true);
+    this.#requestFrame(true);
     return true;
   }
 
@@ -2765,13 +2809,13 @@ export class TuiApp implements TuiInteraction {
     this.#activity = { state: "working" };
     this.#stopThinkingAnimation();
     this.#syncThinkingAnimation();
-    this.#render();
+    this.#requestFrame();
     this.#syncTodoShimmer();
 
     const uiHooks: LoopHooks = {
       onUser: (message) => {
         this.#transcript.pushUser(storedText(message), message.msgid);
-        this.#scheduleRender();
+        this.#requestFrame();
       },
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
@@ -2793,7 +2837,7 @@ export class TuiApp implements TuiInteraction {
         if (delta.reset === true) {
           this.#patchStreams.clear();
           this.#transcript.clearStreamingTools();
-          this.#scheduleRender();
+          this.#requestFrame();
           return;
         }
 
@@ -2810,7 +2854,7 @@ export class TuiApp implements TuiInteraction {
           }
         }
         this.#setActivity({ state: "working" });
-        this.#scheduleRender();
+        this.#requestFrame();
       },
       onToolCall: (call) => {
         const patchStream = this.#patchStreams.get(call.id);
@@ -2827,7 +2871,7 @@ export class TuiApp implements TuiInteraction {
       // 运行中的流式输出：只保留末尾若干行，内存有界
       onToolProgress: (call, chunk, stream) => {
         this.#transcript.appendToolProgress(call.id, chunk, stream);
-        this.#scheduleRender();
+        this.#requestFrame();
       },
       // 工具跑失败后请求一次性能力授权（如联网）—— 弹窗里带真实原因与报错
       onRequestCapability: (_call, escalation) => this.requestCapability(escalation),
@@ -2862,7 +2906,7 @@ export class TuiApp implements TuiInteraction {
       },
       onUsage: (usage) => {
         this.#usage = Transcript.mergeUsage(this.#usage, usage);
-        this.#scheduleRender();
+        this.#requestFrame();
       },
       onExtensionRoleFallback: async (error) => {
         this.#setActivity({ state: "working" });
@@ -2958,7 +3002,7 @@ export class TuiApp implements TuiInteraction {
       if (aborted && queued > 0) {
         this.#transcript.pushNotice(`已中断；[已排队 ${queued}] 保留，按 Enter 继续`);
       }
-      this.#render();
+      this.#requestFrame();
 
       // 用户输入始终优先于 Goal continuation / context refresh。
       if (completed && !aborted) {
@@ -2979,23 +3023,23 @@ export class TuiApp implements TuiInteraction {
     if (controller === undefined || this.#busy || this.#session.queuedUserCount > 0) return;
     this.#busy = true;
     this.#activity = { state: "working" };
-    this.#render(true);
+    this.#requestFrame(true);
     try {
       const epoch = await controller.createContextEpoch("checkpoint");
       if (this.#switchRuntime(epoch.branchId, `Checkpoint 后已切换 Context Epoch ${epoch.epochId}`)) {
         this.#refreshGoalStatus();
-        this.#render(true);
+        this.#requestFrame(true);
       }
     } catch (error) {
       this.#transcript.pushError(
         `Context Epoch 创建失败：${error instanceof Error ? error.message : String(error)}`,
       );
-      this.#render(true);
+      this.#requestFrame(true);
     } finally {
       this.#busy = false;
       this.#activity = { state: "idle" };
       this.#refreshGoalStatus();
-      this.#render(true);
+      this.#requestFrame(true);
       if (!this.#busy && this.#session.queuedUserCount === 0) this.#maybeContinueGoal();
     }
   }
@@ -3007,7 +3051,7 @@ export class TuiApp implements TuiInteraction {
       this.#transcript.pushNotice(
         `Goal 已达到连续自动推进上限 ${this.#maxGoalContinuationTurns}，等待用户输入。`,
       );
-      this.#render();
+      this.#requestFrame();
       return;
     }
     const controller = this.#goalController;
@@ -3028,7 +3072,7 @@ export class TuiApp implements TuiInteraction {
       });
     } catch (error) {
       this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#render();
+      this.#requestFrame();
     }
   }
 
@@ -3063,7 +3107,7 @@ export class TuiApp implements TuiInteraction {
   #setActivity(activity: AgentActivity, render = true): void {
     this.#activity = activity;
     this.#syncThinkingAnimation();
-    if (render) this.#scheduleRender();
+    if (render) this.#requestFrame();
   }
 
   /** 工作中的菊花动画；没有 active work 时不常驻定时器。 */
@@ -3081,7 +3125,7 @@ export class TuiApp implements TuiInteraction {
         return;
       }
       this.#thinkingFrame += 1;
-      this.#render();
+      this.#requestFrame();
     }, 80);
   }
 
@@ -3114,7 +3158,7 @@ export class TuiApp implements TuiInteraction {
         return;
       }
       this.#todoShimmer = (this.#todoShimmer + 0.04) % 1;
-      this.#render();
+      this.#requestFrame();
     }, 50);
   }
 
@@ -3126,13 +3170,27 @@ export class TuiApp implements TuiInteraction {
     this.#todoShimmer = 0;
   }
 
-  #scheduleRender(): void {
-    if (this.#renderScheduled) return;
-    this.#renderScheduled = true;
-    setTimeout(() => {
-      this.#renderScheduled = false;
-      this.#render();
-    }, 16);
+  /** 请求一帧；窗口期内的重复请求合成一帧。`force` 会在合流中被保留。 */
+  #requestFrame(force = false): void {
+    this.#frames.request(force);
+  }
+
+  /**
+   * 把"状态变了"接到"重画"上。
+   *
+   * 这是防止再次出现"某个流式回调忘了请求重绘"的**结构性保证**：
+   * 触发点不再散落在各个回调里，而是跟着状态容器走 —— 只要内容真的变了，
+   * 容器就会通知，新加的回调不会因为忘了写一行而静默变慢。
+   */
+  #bindRenderTriggers(): void {
+    this.#transcript.onChange = () => this.#requestFrame();
+    this.#thinking.onChange = () => this.#requestFrame();
+  }
+
+  /** 换一份 transcript 并重新接线（分支切换 / 新建会话）。 */
+  #adoptTranscript(transcript: Transcript): void {
+    this.#transcript = transcript;
+    transcript.onChange = () => this.#requestFrame();
   }
 
   /* --------------------------- 渲染 --------------------------- */
@@ -3591,9 +3649,10 @@ export class TuiApp implements TuiInteraction {
   #composeBody(width: number, height: number): string[] {
     this.#bodyHeight = height;
 
-    // 左侧留白：内容按窄 width 渲染，再统一缩进，避免文字贴着终端边缘
+    // 左侧留白：内容按窄 width 渲染，再统一缩进，避免文字贴着终端边缘。
+    // 右侧同样留出滚动条那一列，否则行尾右对齐的内容会被滚动条盖掉。
     const indent = " ".repeat(BODY_INDENT);
-    const innerWidth = Math.max(1, width - BODY_INDENT);
+    const innerWidth = Math.max(1, width - BODY_INDENT - SCROLLBAR_GUTTER);
 
     // 只有内容版本变化的 block 会重新渲染；滚动本身只重新取窗口。
     this.#layout.update(

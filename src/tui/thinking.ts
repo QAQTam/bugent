@@ -62,6 +62,12 @@ export function isSpinningActivity(activity: AgentActivity): boolean {
 
 export class ThinkingBuffer {
   #current = "";
+  /** 内容变更通知；TUI 用它把"改了就重画"变成结构性保证。 */
+  #onChange: (() => void) | undefined;
+
+  set onChange(handler: (() => void) | undefined) {
+    this.#onChange = handler;
+  }
 
   /** 收到思考增量。 */
   push(delta: string): void {
@@ -75,6 +81,7 @@ export class ThinkingBuffer {
       }
       this.#current += char;
     }
+    this.#onChange?.();
   }
 
   get current(): string {
@@ -83,7 +90,10 @@ export class ThinkingBuffer {
 
   /** 一轮结束时调用：清空缓冲。 */
   reset(): void {
+    // 已经是空的不算变更，别为此白请求一帧。
+    if (this.#current === "") return;
     this.#current = "";
+    this.#onChange?.();
   }
 }
 

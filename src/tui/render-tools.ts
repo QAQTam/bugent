@@ -61,9 +61,16 @@ function argsSummary(item: ToolItem): string {
  * 右对齐要 ANSI 感知：徽标的可见宽度用 visibleWidth 算，
  * 而不是字符串长度 —— 否则带颜色的 `+12 -3` 会把间隔算错。
  * 窄屏时先压缩摘要，摘要压到 0 就直接不要它，保证徽标不被挤掉。
+ *
+ * 返回值**保证**不超过 width：宽度不够时先砍左边，实在不行才砍徽标本身。
+ * 早先这里用 `Math.max(1, …)` 兜间隔，左边一长整行就超出终端宽度，
+ * 被屏幕层硬截断 —— 截掉的恰好是行尾的徽标，也就是这行最该看见的东西。
  */
 function header(item: ToolItem, width: number, marker: string, color: string, badge = ""): string {
   const badgeWidth = visibleWidth(badge);
+  // 徽标比整行还宽：没有别的选择，只能砍徽标。
+  if (badgeWidth >= width) return truncateAnsi(badge, width);
+
   const reserved = badgeWidth > 0 ? badgeWidth + 1 : 0; // 徽标 + 至少 1 格间隔
 
   const nameWidth = visibleWidth(item.name);
@@ -76,10 +83,13 @@ function header(item: ToolItem, width: number, marker: string, color: string, ba
       ? ` ${DIM}${truncateAnsi(summary, summaryBudget)}${RESET}`
       : "");
 
-  if (badgeWidth === 0) return left;
+  if (badgeWidth === 0) return truncateAnsi(left, width);
 
-  const gap = Math.max(1, width - visibleWidth(left) - badgeWidth);
-  return `${left}${" ".repeat(gap)}${badge}`;
+  const gap = width - visibleWidth(left) - badgeWidth;
+  if (gap >= 1) return `${left}${" ".repeat(gap)}${badge}`;
+
+  // 左边太长：砍左边保住徽标。徽标是这行要传达的信息，摘要不是。
+  return `${truncateAnsi(left, width - badgeWidth - 1)} ${badge}`;
 }
 
 /** bash 头部单独走语法高亮：命令参数不是普通字符串，而是 shell 代码。 */
@@ -385,15 +395,23 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
     }
     for (const file of progress.files.slice(0, 4)) {
       const marker = patchKindMarker(file.kind);
-      const path =
+      const rawPath =
         file.kind === "move" && file.destination !== undefined
           ? `${file.path} → ${file.destination}`
           : file.path;
+      const badge = file.added > 0 || file.removed > 0 ? formatStatBadge(file) : "";
+      const badgeWidth = visibleWidth(badge);
+      // 前缀 = 两格缩进 + 标记 + 空格。路径按剩余预算截断，保证整行（含徽标）
+      // 不超过 width —— 否则徽标会被屏幕层截掉，而这行最该看见的就是它。
+      const pathBudget = Math.max(0, width - (2 + visibleWidth(marker) + 1) - (badgeWidth > 0 ? badgeWidth + 1 : 0));
+      const path = truncateAnsi(rawPath, pathBudget);
+      // 极窄终端（连前缀+徽标都放不下）兜底：宁可砍掉整行，也不返回超宽字符串。
       lines.push(
+        truncateAnsi(
         `${fg(patchKindColor(file.kind))}  ${marker} ${path}${RESET}` +
-          (file.added > 0 || file.removed > 0
-            ? ` ${DIM}${formatStatBadge(file)}${RESET}`
-            : ""),
+            (badgeWidth > 0 ? ` ${DIM}${badge}${RESET}` : ""),
+          width,
+        ),
       );
     }
     if (progress.files.length > 4) {
@@ -413,11 +431,12 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
     .map((line) => {
       const marker = line[0] ?? "?";
       const color = marker === "A" ? COLOR.diffAdd : marker === "D" ? COLOR.diffRemove : COLOR.tool;
-      return `${fg(color)}  ${line}${RESET}`;
+      // 先拼成纯文本再按整行预算截断，最后上色 —— 否则 2 格缩进会顶破极窄终端
+      return `${fg(color)}${truncateAnsi(`  ${line}`, width)}${RESET}`;
     });
   return [
     head,
-    `${DIM}${summary ?? ""}${RESET}`,
+    `${DIM}${truncateAnsi(summary ?? "", width)}${RESET}`,
     ...foldTail(colored, DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
   ];
 }
