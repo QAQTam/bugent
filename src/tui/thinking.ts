@@ -26,6 +26,7 @@
  */
 
 import { BOLD, RESET, fg } from "./markdown.ts";
+import { visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 
 /**
@@ -103,14 +104,14 @@ export class ThinkingBuffer {
  */
 export function tailToWidth(text: string, width: number): { text: string; truncated: boolean } {
   if (width <= 0) return { text: "", truncated: text.length > 0 };
-  if (Bun.stringWidth(text) <= width) return { text, truncated: false };
+  if (visibleWidth(text) <= width) return { text, truncated: false };
 
   const chars = [...text];
   let used = 0;
   let start = chars.length;
 
   for (let i = chars.length - 1; i >= 0; i -= 1) {
-    const charWidth = Bun.stringWidth(chars[i]!);
+    const charWidth = visibleWidth(chars[i]!);
     if (used + charWidth > width) break;
     used += charWidth;
     start = i;
@@ -200,8 +201,8 @@ function renderSpinnerLine(options: {
   if (options.text.length === 0) return spinner;
 
   const head = `${options.frame} `;
-  const budget = Math.max(1, options.width - Bun.stringWidth(head));
-  const truncated = Bun.stringWidth(options.text) > budget;
+  const budget = Math.max(1, options.width - visibleWidth(head));
+  const truncated = visibleWidth(options.text) > budget;
   const available = truncated ? Math.max(1, budget - 1) : budget;
   const { text } = tailToWidth(options.text, available);
   const prefix = truncated ? "…" : "";

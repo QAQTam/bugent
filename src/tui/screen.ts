@@ -8,14 +8,17 @@
  * 纯函数式：`draw()` 只返回要写入的转义序列，不碰 stdout，方便单测。
  */
 
-import { truncateAnsi } from "./ansi.ts";
+import { expandTabs, truncateAnsi } from "./ansi.ts";
 
 const ESC = "\x1b";
 
 /** 把一行裁剪到屏幕宽度，并保证不含换行。 */
 function fit(line: string, width: number): string {
   const single = line.replace(/[\r\n]+/g, " ");
-  return truncateAnsi(single, width);
+  // 兜底：任何绕过 ansi.ts 测量、带着 TAB 走到这里的行，都在写屏前展开成空格。
+  // 终端的制表位是从第 0 列算的，而每一行都是从行首开始写的，所以这里展开的列
+  // 位置与终端一致。
+  return truncateAnsi(expandTabs(single), width);
 }
 
 export class Screen {

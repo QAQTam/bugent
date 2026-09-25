@@ -8,7 +8,7 @@
  * 这里保持纯函数，方便单测；TuiApp 只负责取 window、路由按键和鼠标。
  */
 
-import { truncateAnsi } from "./ansi.ts";
+import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { DIM, RESET } from "./markdown.ts";
 
 export interface HistoryPaneHeights {
@@ -65,7 +65,7 @@ export function composeHistoryDrawer(input: HistoryDrawerInput): HistoryDrawerLa
     dividerRow = lines.length;
     const left = `├─ 更早消息 · ↑↓ ${Math.max(0, input.offset)}/${Math.max(0, input.maxOffset)} `;
     const right = ` 最新消息 ─┤`;
-    const fill = Math.max(0, input.width - Bun.stringWidth(left) - Bun.stringWidth(right));
+    const fill = Math.max(0, input.width - visibleWidth(left) - visibleWidth(right));
     const divider = `${left}${"─".repeat(fill)}${right}`;
     lines.push(`${DIM}${truncateAnsi(divider, input.width)}${RESET}`);
   }

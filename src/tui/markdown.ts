@@ -4,7 +4,7 @@ export const BOLD = "\x1b[1m";
 
 import { highlightCode, isNativeLanguage, normalizeLanguage } from "./highlight.ts";
 import { currentBackground } from "./theme.ts";
-import { padAnsi, truncateAnsi, visibleWidth } from "./ansi.ts";
+import { expandTabs, padAnsi, truncateAnsi, visibleWidth } from "./ansi.ts";
 import {
   parseMarkdownTree,
   readClosedFencedCode,
@@ -30,7 +30,10 @@ export function wrapToLines(text: string, width: number): string[] {
   if (width <= 0) return [];
   const out: string[] = [];
 
-  for (const line of text.split("\n")) {
+  for (const raw of text.split("\n")) {
+    // TAB 必须先展开：Bun.wrapAnsi / Bun.stringWidth 都把 TAB 当 0 列，而终端
+    // 按制表位渲染 —— 不展开的话折行宽度与实际渲染宽度不一致（详见 ansi.ts）。
+    const line = expandTabs(raw);
     if (Bun.stringWidth(line) === 0) {
       out.push("");
       continue;

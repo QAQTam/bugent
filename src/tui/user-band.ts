@@ -8,7 +8,7 @@
  * 免得"什么时候吸顶"这种判断只能靠 PTY 里滚一下来验证。
  */
 
-import { truncateAnsi } from "./ansi.ts";
+import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { bg, fg, RESET } from "./markdown.ts";
 import { COLOR } from "./theme.ts";
 
@@ -46,8 +46,8 @@ export function composeUserBand(text: string, width: number): string {
   const safeWidth = Math.max(0, Math.floor(width));
   if (safeWidth <= 0) return "";
   const prefix = `${USER_BAND_MARK} › `;
-  const room = Math.max(0, safeWidth - Bun.stringWidth(prefix));
+  const room = Math.max(0, safeWidth - visibleWidth(prefix));
   const content = `${prefix}${truncateAnsi(bandText(text), room)}`;
-  const padding = " ".repeat(Math.max(0, safeWidth - Bun.stringWidth(content)));
+  const padding = " ".repeat(Math.max(0, safeWidth - visibleWidth(content)));
   return `${bg(COLOR.userBandBg)}${fg(COLOR.userBandFg)}${content}${padding}${RESET}`;
 }

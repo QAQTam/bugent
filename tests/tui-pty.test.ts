@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bg } from "../src/tui/markdown.ts";
+import { visibleWidth } from "../src/tui/ansi.ts";
 import { COLOR } from "../src/tui/theme.ts";
 import { USER_BAND_MARK } from "../src/tui/user-band.ts";
 
@@ -1566,6 +1567,65 @@ describe("TUI PTY 冒烟", () => {
           (line, index) => index > headRow && line.includes("ZZZ-end"),
         );
         expect(tailBelowHead).toBe(-1);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "read_file 的行号 TAB 不会顶破右边界（滚动条不留缺口）",
+    async () => {
+      // read_file 的输出是 `${lineNumber}\t${line}`，文件内容本身也可能含 TAB。
+      // Bun.stringWidth("\t") 是 0，终端却按制表位渲染（默认 8 列）—— 不展开的话
+      // 那一行会比 TUI 以为的宽 1~7 列，右对齐的滚动条字符被挤出屏幕，形成缺口。
+      const home = await mkdtemp(join(tmpdir(), "bugent-tab-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 100,
+        rows: 30,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          TERM: "xterm-256color",
+          BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+            name: "read_file",
+            args: { path: "src/tui/ansi.ts", limit: 6 },
+          }),
+        },
+        terminal,
+        timeout: 30_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write("读一下 ansi.ts\r");
+        await waitFor(() => output, (text) => strip(text).includes("read_file"));
+        await waitForTurnIdle(() => output, 1, 30);
+
+        // 根因的直接编码：写进终端的字节流里不允许出现 TAB。
+        // （Screen.draw 会在写屏前把任何漏网的 TAB 展开成空格）
+        expect(output).not.toContain("\t");
+
+        // 每一行的可见宽度都不超过终端宽度；超过就说明又会被终端折行/挤出边界。
+        for (const line of screenOf(output, 30)) {
+          expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+        }
 
         terminal.write("\x03");
         expect(await proc.exited).toBe(0);
