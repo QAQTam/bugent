@@ -131,7 +131,7 @@ TASKS.study = STUDY_TASK;
 /* ------------------------------------------------------------------ */
 
 type ToolSetName = "zh-baseline" | "en-short" | "core" | "placeholder" | "none";
-type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2" | "pe-min" | "pe-mid" | "pe-narr" | "pe-compact";
+type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2" | "pe-min" | "pe-mid" | "pe-narr" | "pe-compact" | "pe-borrow" | "pe-borrow2";
 
 interface VariantSpec {
   readonly id: string;
@@ -152,6 +152,8 @@ interface VariantSpec {
   readonly extraBody?: Record<string, unknown>;
   /** 用另一道题（study 的原始题）替换当前 task。 */
   readonly taskOverride?: "study";
+  /** 额外挂一条 developer 消息（角色位置实验：Codex 就是这么放 AGENTS.md 的）。 */
+  readonly developerText?: string;
 }
 
 const CORE_TOOLS = ["bash", "read_file", "edit_file", "apply_patch"];
@@ -340,6 +342,25 @@ const VARIANTS: readonly VariantSpec[] = [
     system: "pe-compact",
   },
   {
+    id: "pe-borrow",
+    label: "PE + 借大厂共识（授权范围/并行/注释/自包含/进度更新）",
+    tools: "en-short",
+    system: "pe-borrow",
+  },
+  {
+    id: "pe-borrow2",
+    label: "PE + 只借两条（授权范围 / 进度更新纪律）",
+    tools: "en-short",
+    system: "pe-borrow2",
+  },
+  {
+    id: "pe-borrow2-dev",
+    label: "PE 不动 + 两条共识挂 developer 角色",
+    tools: "en-short",
+    system: "pe-forced2",
+    developerText: "Before an action that is hard to reverse or touches shared state, confirm first. An earlier approval never authorizes unrelated work.\nWhile working, send an update only for a discovery, a tradeoff, or a blocker. Never narrate routine reads or edits.",
+  },
+  {
     id: "pe-forced-debug",
     label: "PE + 强制句式（简单题，看回答是否还短）",
     tools: "en-short",
@@ -393,6 +414,8 @@ const SYSTEM_FILES: Record<SystemName, string> = {
   "pe-mid": "system-pe-mid.md",
   "pe-narr": "system-pe-narr.md",
   "pe-compact": "system-pe-compact.md",
+  "pe-borrow": "system-pe-borrow.md",
+  "pe-borrow2": "system-pe-borrow2.md",
 };
 
 async function loadSystem(name: SystemName): Promise<string> {
@@ -587,7 +610,7 @@ function clientFor(extraBody: Record<string, unknown>): ReturnType<typeof create
 
 const systems = Object.fromEntries(
   await Promise.all(
-    (["baseline", "new", "pe", "pe-forced", "pe-forced2", "pe-min", "pe-mid", "pe-narr", "pe-compact"] as SystemName[]).map(
+    (["baseline", "new", "pe", "pe-forced", "pe-forced2", "pe-min", "pe-mid", "pe-narr", "pe-compact", "pe-borrow", "pe-borrow2"] as SystemName[]).map(
       async (name) => [name, await loadSystem(name)] as const,
     ),
   ),
@@ -619,6 +642,13 @@ function buildMessages(variant: VariantSpec): ChatMessage[] {
     system = system.replace("Be concise and direct. Prefer acting over explaining. ", "");
   }
   const suffix = variant.systemSuffix !== undefined ? `\n\n${variant.systemSuffix}` : "";
+  if (variant.developerText !== undefined) {
+    return [
+      textMessage("system", system + suffix),
+      textMessage("developer", variant.developerText),
+      textMessage("user", task),
+    ];
+  }
   if (variant.splitRoles === true) {
     const { head, tail } = splitSystem(system);
     return [textMessage("system", head + suffix), textMessage("developer", tail), textMessage("user", task)];
