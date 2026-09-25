@@ -34,6 +34,20 @@ const CJK_PATH = "中文目录/深层/嵌套/再深一层/更深的目录/中文
 const EMOJI_PATH = "src/😀emoji/路径/file.ts";
 const PATHS = ["src/a.ts", LONG_PATH, CJK_PATH, EMOJI_PATH];
 
+/** 两个文件、4 增 1 删 —— 完成态统计用例的固定输入。 */
+const MULTI_FILE_PATCH = [
+  "*** Begin Patch",
+  "*** Add File: src/a.ts",
+  "+one",
+  "+two",
+  "+three",
+  "*** Update File: src/b.ts",
+  "@@ context",
+  "-old line",
+  "+new line",
+  "*** End Patch",
+].join("\n");
+
 const STATS = [
   { added: 7, removed: 3 },
   { added: 1234, removed: 5678 },
@@ -164,4 +178,40 @@ describe("apply_patch 卡片 · 徽标必须看得见", () => {
       expect(Bun.stripANSI(lines[1]!)).toContain("+5");
     }
   });
+  test("完成态从入参反解统计 —— 恢复会话后徽标仍在", () => {
+    // 模拟 --resume：卡片从持久化消息重建，没有 patchProgress，只有 args + output。
+    // 之前这里用 parseDiffStat(item.output)，而 apply_patch 的输出是
+    // `A path` / `M path`，和它认的 `+行/-行` 格式对不上 —— 徽标因此永远消失。
+    const restored = item({
+      done: true,
+      ok: true,
+      args: { patch: MULTI_FILE_PATCH },
+      output: "Success. Updated the following files:\nA src/a.ts\nM src/b.ts",
+    });
+
+    const head = Bun.stripANSI(renderApplyPatchTool(restored, 80)[0]!);
+    expect(head).toContain("+4");
+    expect(head).toContain("-1");
+  });
+
+  test("入参是裸 patch 字符串时同样能反解", () => {
+    // freeform 工具的 parseInput 在 patch 以 "*** Begin Patch" 开头时直接返回字符串
+    const restored = item({ done: true, ok: true, args: MULTI_FILE_PATCH, output: "Success." });
+    expect(Bun.stripANSI(renderApplyPatchTool(restored, 80)[0]!)).toContain("+4");
+  });
+
+  test("入参缺失或不是合法 patch 时不抛错，只是没有徽标", () => {
+    for (const args of [undefined, {}, { patch: "*** Begin Patch" }, { patch: 42 }, "not a patch"]) {
+      const broken = item({ done: true, ok: true, args, output: "Success." });
+      const lines = renderApplyPatchTool(broken, 80);
+      expect(Bun.stripANSI(lines[0]!)).not.toContain("+");
+      expect(visibleWidth(lines[0]!)).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test("完成态但失败时不显示徽标", () => {
+    const failed = item({ done: true, ok: false, args: { patch: MULTI_FILE_PATCH }, output: "boom" });
+    expect(Bun.stripANSI(renderApplyPatchTool(failed, 80)[0]!)).not.toContain("+4");
+  });
+
 });

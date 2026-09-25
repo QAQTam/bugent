@@ -17,6 +17,8 @@ import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import { parseDiffStat, type DiffStat } from "../tools/diff.ts";
+import { parsePatch } from "../patch/parser.ts";
+import { patchProgress } from "../patch/streaming-progress.ts";
 import { highlightCode } from "./highlight.ts";
 
 /** 折叠规格：头几行 + 尾几行。 */
@@ -377,12 +379,37 @@ function patchKindColor(kind: "add" | "delete" | "update" | "move"): string {
 }
 
 /** apply_patch：参数流式阶段即显示文件与 +N -M，执行后显示操作清单。 */
+/**
+ * 从工具入参反解 patch 的行级统计。
+ *
+ * 为什么不能靠 `parseDiffStat(item.output)`：apply_patch 的**输出**是
+ * `A path` / `M path` / `D path` 的操作清单，而 parseDiffStat 认的是 `+行` /
+ * `-行` 的 diff 格式 —— 两者对不上，于是完成态永远算不出徽标。
+ *
+ * 而 `--resume` 之后卡片是从持久化消息重建的，`patchProgress`（流式期间的
+ * 统计）不落库。入参是持久化的，只有从它反解才能同时覆盖"刚跑完"和"恢复会话"。
+ * 统计口径复用流式那套 `patchProgress`，两边不会漂。
+ */
+function patchStatFromArgs(args: unknown): DiffStat | undefined {
+  const patchText =
+    typeof args === "string" ? args : (args as { patch?: unknown } | null | undefined)?.patch;
+  if (typeof patchText !== "string" || patchText.length === 0) return undefined;
+
+  try {
+    const { added, removed } = patchProgress(parsePatch(patchText).hunks, true);
+    return added === 0 && removed === 0 ? undefined : { added, removed };
+  } catch {
+    // 参数不完整或不是合法 patch：宁可不出徽标，也不要让渲染抛错打挂整帧。
+    return undefined;
+  }
+}
+
 export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
   const progress = item.patchProgress;
   const stat =
     progress === undefined
       ? item.done && item.ok
-        ? parseDiffStat(item.output)
+        ? patchStatFromArgs(item.args)
         : undefined
       : { added: progress.added, removed: progress.removed };
   const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
