@@ -24,8 +24,13 @@ describe("apply_patch tool", () => {
     expect(tool.name).toBe(APPLY_PATCH_TOOL_NAME);
     expect(tool.description).toContain("*** Begin Patch");
     expect(tool.description).toContain("*** Update File:");
-    expect(tool.defaultPermission).toBe("ask");
     expect(tool.requires).toEqual({ write: true });
+    // 刻意**不**自带 defaultPermission。
+    //
+    // 这里曾经是 "ask"，后果是每次 apply_patch 都弹窗确认 —— 即使档位是
+    // workspace-write（写工作区本来就是那一档声明的边界），而且和同类的
+    // write_file / edit_file 行为不一致。写权限由 `requires` 交给档位判断。
+    expect(tool.defaultPermission).toBeUndefined();
   });
 
   test("applies a multi-file patch and reports workspace edits", async () => {

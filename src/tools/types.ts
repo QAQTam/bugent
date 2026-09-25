@@ -169,7 +169,15 @@ function errorMessage(error: unknown): string {
 /** 把一次调用翻译成权限系统能理解的形式。 */
 export function describeCall(tool: Tool, call: ToolCall): PermissionRequest {
   const described = tool.describe(call.args);
-  return { tool: tool.name, resource: described.resource, summary: described.summary };
+  return {
+    tool: tool.name,
+    resource: described.resource,
+    summary: described.summary,
+    // requires 必须带上。进程内工具没有内核兜底，档位能力全靠闸门来执行 ——
+    // 漏掉它，gate 里那段 modeSatisfies 检查就永远不会触发，read-only 档位
+    // 对 write_file / edit_file / apply_patch 形同虚设（实测能直接写盘）。
+    ...(tool.requires !== undefined ? { requires: tool.requires } : {}),
+  };
 }
 
 export class ToolRegistry {

@@ -101,7 +101,9 @@ export function createApplyPatchTool(): Tool<unknown, string> {
     parameters: APPLY_PATCH_PARAMETERS,
     inputFormat: "freeform",
     parseInput: parsePatchInput,
-    defaultPermission: "ask",
+    // 刻意不声明 defaultPermission：写工作区就是 workspace-write 档的边界，
+    // 由档位负责（"档位即授权"），和 write_file / edit_file 保持一致。
+    // 声明成 "ask" 会导致每次 apply_patch 都弹窗，且和同类的文件工具行为不一致。
     requires: { write: true },
     resources: resourceClaims,
     describe(input: unknown) {
