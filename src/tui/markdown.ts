@@ -4,6 +4,15 @@ export const BOLD = "\x1b[1m";
 
 import { highlightCode, isNativeLanguage, normalizeLanguage } from "./highlight.ts";
 import { currentBackground } from "./theme.ts";
+import { padAnsi, truncateAnsi, visibleWidth } from "./ansi.ts";
+import {
+  parseMarkdownTree,
+  readClosedFencedCode,
+  readTableModel,
+  type MarkdownTableAlignment,
+  type MarkdownTableModel,
+  type MarkdownTableRow,
+} from "./markdown-ast.ts";
 
 /**
  * 内容渲染 —— 直接吃 Bun 原生能力，零依赖。
@@ -128,6 +137,10 @@ export function renderMarkdown(
         ...(kittyGraphics ? { kittyGraphics: true } : {}),
       });
       out.push(...wrapPreservingGraphics(stripBackground(rendered), width));
+    } else if (segment.kind === "table") {
+      out.push(
+        ...renderTableSegment(segment.lines, segment.model, width, { hyperlinks }),
+      );
     } else {
       out.push(...renderCodeSegment(segment, width));
     }
@@ -142,69 +155,217 @@ export function renderMarkdown(
 
 export type MarkdownSegment =
   | { kind: "prose"; text: string }
-  | { kind: "code"; language: string; code: string };
+  | { kind: "code"; language: string; code: string }
+  | { kind: "table"; lines: readonly string[]; model: MarkdownTableModel };
 
-function isClosingFence(line: string, char: string, minLength: number): boolean {
-  const trimmed = line.trim();
-  if (trimmed.length < minLength) return false;
-  for (const ch of trimmed) if (ch !== char) return false;
-  return true;
+const MAX_INLINE_CELL_CACHE_ENTRIES = 2048;
+const inlineCellCache = new Map<string, string>();
+
+function renderInlineTableCell(source: string, hyperlinks: boolean): string {
+  const key = `${hyperlinks ? "1" : "0"}\u0000${source}`;
+  const cached = inlineCellCache.get(key);
+  if (cached !== undefined) {
+    inlineCellCache.delete(key);
+    inlineCellCache.set(key, cached);
+    return cached;
+  }
+
+  const rendered = Bun.markdown.render(source, {
+    strong: (children) => `${BOLD}${children}${RESET}`,
+    emphasis: (children) => `\x1b[3m${children}\x1b[23m`,
+    codespan: (children) => `\x1b[38;5;215m${children}${RESET}`,
+    strikethrough: (children) => `\x1b[9m${children}\x1b[29m`,
+    link: (children, meta) =>
+      hyperlinks ? `\x1b]8;;${meta.href}\x07${children}\x1b]8;;\x07` : children,
+    image: (children) => children,
+  });
+  inlineCellCache.set(key, rendered);
+  while (inlineCellCache.size > MAX_INLINE_CELL_CACHE_ENTRIES) {
+    const oldest = inlineCellCache.keys().next().value;
+    if (oldest === undefined) break;
+    inlineCellCache.delete(oldest);
+  }
+  return rendered;
+}
+
+function padTableCell(
+  text: string,
+  width: number,
+  align: MarkdownTableAlignment,
+): string {
+  const clipped = truncateAnsi(text, width);
+  const gap = Math.max(0, width - visibleWidth(clipped));
+  if (gap === 0) return clipped;
+  switch (align) {
+    case "right":
+      return " ".repeat(gap) + clipped;
+    case "center": {
+      const left = Math.floor(gap / 2);
+      return " ".repeat(left) + clipped + " ".repeat(gap - left);
+    }
+    case "left":
+    default:
+      return padAnsi(clipped, width);
+  }
+}
+
+function renderTableRow(
+  row: MarkdownTableRow,
+  widths: readonly number[],
+  alignments: readonly MarkdownTableAlignment[],
+  hyperlinks: boolean,
+): string[] {
+  const cells = widths.map((width, index) => {
+    const inline = renderInlineTableCell(row.cells[index] ?? "", hyperlinks);
+    return wrapToLines(row.header ? `${BOLD}${inline}${RESET}` : inline, width);
+  });
+  const height = Math.max(1, ...cells.map((lines) => lines.length));
+  const vertical = `${DIM}│${RESET}`;
+  const out: string[] = [];
+
+  for (let line = 0; line < height; line += 1) {
+    let rendered = vertical;
+    for (let column = 0; column < widths.length; column += 1) {
+      const content = cells[column]?.[line] ?? "";
+      rendered += ` ${padTableCell(content, widths[column]!, alignments[column] ?? "left")} `;
+      rendered += vertical;
+    }
+    out.push(rendered);
+  }
+  return out;
+}
+
+function renderTableSegment(
+  lines: readonly string[],
+  model: MarkdownTableModel,
+  width: number,
+  options: { hyperlinks: boolean },
+): string[] {
+  const source = lines.join("\n");
+  if (model.rows.length === 0) return wrapToLines(source, width);
+
+  const columns = Math.max(
+    model.alignments.length,
+    ...model.rows.map((row) => row.cells.length),
+  );
+  if (columns === 0) return [];
+
+  const rows = model.rows.map((row) => ({
+    ...row,
+    cells: Array.from({ length: columns }, (_, index) =>
+      renderInlineTableCell(row.cells[index] ?? "", options.hyperlinks),
+    ),
+  }));
+  const alignments = Array.from(
+    { length: columns },
+    (_, index) => model.alignments[index] ?? "left",
+  );
+  const natural = Array.from({ length: columns }, (_, index) => {
+    let max = 1;
+    for (const row of rows) {
+      max = Math.max(max, visibleWidth(row.cells[index] ?? ""));
+    }
+    return max;
+  });
+  const minimum = Array.from({ length: columns }, (_, index) => {
+    let min = 1;
+    for (const row of rows) {
+      for (const char of Bun.stripANSI(row.cells[index] ?? "")) {
+        min = Math.max(min, Bun.stringWidth(char));
+      }
+    }
+    return min;
+  });
+
+  // 每列左右各留 1 空格，再加 columns + 1 根竖线。
+  const borderCost = columns * 3 + 1;
+  const available = width - borderCost;
+  if (available < minimum.reduce((sum, value) => sum + value, 0)) {
+    return lines.map((line) => truncateAnsi(line, width));
+  }
+
+  const widths = [...natural];
+  let total = widths.reduce((sum, value) => sum + value, 0);
+  while (total > available) {
+    let widest = 0;
+    for (let index = 1; index < widths.length; index += 1) {
+      if (
+        widths[index]! > widths[widest]! &&
+        widths[index]! > minimum[index]!
+      ) {
+        widest = index;
+      }
+    }
+    if (widths[widest]! <= minimum[widest]!) break;
+    widths[widest] = widths[widest]! - 1;
+    total -= 1;
+  }
+
+  const border = (left: string, middle: string, right: string): string =>
+    `${DIM}${left}${widths.map((value) => "─".repeat(value + 2)).join(middle)}${right}${RESET}`;
+
+  const out = [border("┌", "┬", "┐")];
+  out.push(...renderTableRow(rows[0]!, widths, alignments, options.hyperlinks));
+  out.push(border("├", "┼", "┤"));
+  for (let index = 1; index < rows.length; index += 1) {
+    out.push(...renderTableRow(rows[index]!, widths, alignments, options.hyperlinks));
+  }
+  out.push(border("└", "┴", "┘"));
+  return out;
 }
 
 /**
- * 把 markdown 切成「散文」与「代码块」。
+ * 把 markdown 切成「散文 / 代码块 / 表格」。
  *
- * 为什么要切：`Bun.markdown.render()` 的自定义 `code` 回调会**顶掉全部
- * 原生排版**（标题、列表、引用都没样式了），代价太大。切开之后散文仍然
- * 交给 Bun 原生渲染，只有代码块走我们自己的高亮器。
+ * 结构识别交给 Lezer AST；Bun 只负责散文和表格单元格的行内排版。这样不再
+ * 维护“围栏怎么闭合、表格 delimiter 长什么样”的第二套正则规则。
  */
 export function splitMarkdown(text: string): MarkdownSegment[] {
-  const lines = text.split("\n");
   const segments: MarkdownSegment[] = [];
-  let prose: string[] = [];
+  const tree = parseMarkdownTree(text);
+  let cursor = 0;
 
-  const flushProse = (): void => {
-    if (prose.length === 0) return;
-    segments.push({ kind: "prose", text: prose.join("\n") });
-    prose = [];
+  const pushProse = (end: number, separatorBeforeBlock: boolean): void => {
+    let proseEnd = end;
+    if (separatorBeforeBlock) {
+      if (text.endsWith("\r\n", proseEnd)) proseEnd -= 2;
+      else if (text[proseEnd - 1] === "\n") proseEnd -= 1;
+    }
+    if (proseEnd <= cursor) return;
+    segments.push({ kind: "prose", text: text.slice(cursor, proseEnd) });
   };
 
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i]!;
-    const fence = /^\s*(`{3,}|~{3,})\s*(\S*)/.exec(line);
+  const consumeLineEnding = (): void => {
+    if (text.startsWith("\r\n", cursor)) cursor += 2;
+    else if (text[cursor] === "\n") cursor += 1;
+  };
 
-    if (fence === null) {
-      prose.push(line);
-      i += 1;
+  for (let node = tree.topNode.firstChild; node !== null; node = node.nextSibling) {
+    if (node.name === "Table") {
+      const model = readTableModel(node, text);
+      if (model === undefined) continue;
+      pushProse(node.from, true);
+      segments.push({
+        kind: "table",
+        lines: text.slice(node.from, node.to).split("\n"),
+        model,
+      });
+      cursor = node.to;
+      consumeLineEnding();
       continue;
     }
 
-    const marker = fence[1]!;
-    const char = marker[0]!;
-    const language = fence[2] ?? "";
+    if (node.name !== "FencedCode") continue;
+    const code = readClosedFencedCode(node, text);
+    if (code === undefined) continue;
 
-    // 找结束围栏。流式输出中途会遇到未闭合的围栏，那时按普通文本处理，
-    // 等闭合了再切成代码块 —— 否则每帧的解析结果会跳变。
-    let j = i + 1;
-    const codeLines: string[] = [];
-    while (j < lines.length && !isClosingFence(lines[j]!, char, marker.length)) {
-      codeLines.push(lines[j]!);
-      j += 1;
-    }
-
-    if (j >= lines.length) {
-      prose.push(line);
-      i += 1;
-      continue;
-    }
-
-    flushProse();
-    segments.push({ kind: "code", language, code: codeLines.join("\n") });
-    i = j + 1;
+    pushProse(node.from, true);
+    segments.push({ kind: "code", language: code.language, code: code.code });
+    cursor = node.to;
+    consumeLineEnding();
   }
 
-  flushProse();
+  pushProse(text.length, false);
   return segments;
 }
 

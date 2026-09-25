@@ -128,6 +128,17 @@ describe("高亮：懒加载与缓存", () => {
     expect(ready).toBe(true);
   });
 
+  test("bash 模块加载完成后能同步高亮", async () => {
+    const code = "echo hello | grep h";
+    const first = highlightCode(code, "bash");
+    await Bun.sleep(400);
+    const highlighted = highlightCode(code, "bash");
+
+    expect(strip(highlighted)).toBe(code);
+    expect(highlighted).toContain("\x1b[");
+    expect(first).not.toBe(undefined);
+  });
+
   test("缓存命中后内容一致", async () => {
     const code = "const x = 1";
     const a = highlightCode(code, "rust");
@@ -214,6 +225,16 @@ describe("renderMarkdown：代码块渲染", () => {
   test("ts 代码块走 Bun 原生（不需要加载 highlight.js）", () => {
     const raw = renderMarkdown("```ts\nconst x: number = 1;\n```", 60).join("\n");
     expect(colorCount(raw)).toBeGreaterThan(0);
+  });
+
+  test("bash fenced code 会进入 highlight.js 高亮路径", async () => {
+    const source = "```bash\ngit diff --stat | rg copy\n```";
+    renderMarkdown(source, 60);
+    await Bun.sleep(400);
+
+    const raw = renderMarkdown(source, 60).join("\n");
+    expect(colorCount(raw)).toBeGreaterThan(0);
+    expect(strip(raw)).toContain("git diff --stat | rg copy");
   });
 
   test("散文部分保留 Bun 原生排版", () => {

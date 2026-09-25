@@ -48,6 +48,8 @@ import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { FrameScheduler } from "./frame-scheduler.ts";
+import { StreamingMarkdownCache } from "./streaming-markdown.ts";
+import { LezerMarkdownBoundaryTracker } from "./lezer-markdown-boundary.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
@@ -417,6 +419,13 @@ export class TuiApp implements TuiInteraction {
   #patchStreams = new Map<string, PatchStreamProgress>();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
   #layout = new TranscriptLayout<DisplayItem>();
+  /**
+   * 每个 assistant item 的 Markdown stable/tail 缓存。
+   *
+   * WeakMap 以 DisplayItem 为键；分支切换后旧 item 可被 GC，不会把旧会话
+   * 的 Markdown 文本长期挂在全局 map 上。
+   */
+  #markdownCaches = new WeakMap<DisplayItem, StreamingMarkdownCache>();
   /** 思考链路的滚动缓冲（只保留当前行，O(1) 内存）。 */
   #thinking = new ThinkingBuffer();
   /** Agent 的运行状态；spinner 代表 alive/working，而不是只看 reasoning。 */
@@ -4127,7 +4136,18 @@ export class TuiApp implements TuiInteraction {
 
       case "assistant": {
         if (item.text.length === 0) return [DIM + "…" + RESET];
-        return renderMarkdown(item.text, width);
+        let cache = this.#markdownCaches.get(item);
+        if (cache === undefined) {
+          const useLezerBoundary = process.env.BUGENT_LEZER_MARKDOWN !== "0";
+          cache = new StreamingMarkdownCache(
+            (text, renderWidth) => renderMarkdown(text, renderWidth),
+            useLezerBoundary
+              ? { boundaryTracker: new LezerMarkdownBoundaryTracker() }
+              : {},
+          );
+          this.#markdownCaches.set(item, cache);
+        }
+        return cache.render(item.text, width);
       }
 
       case "tool":
