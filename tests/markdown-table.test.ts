@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { renderMarkdown, splitMarkdown } from "../src/tui/markdown.ts";
+import {
+  clearMarkdownRenderCaches,
+  getMarkdownCacheStats,
+  renderMarkdown,
+  resetMarkdownCacheStats,
+  splitMarkdown,
+} from "../src/tui/markdown.ts";
 
 describe("Markdown 表格渲染", () => {
   test("每个物理行都保留竖线，不因超宽丢边框", () => {
@@ -40,6 +46,51 @@ describe("Markdown 表格渲染", () => {
 
     const plain = renderMarkdown(source, 80, { hyperlinks: false }).join("\n");
     expect(plain).not.toContain("\x1b]8;;");
+  });
+
+  test("千行表格追加一行只重排新行且结果与全量一致", () => {
+    const width = 120;
+    const body = Array.from(
+      { length: 1000 },
+      (_, index) =>
+        `| row-${String(index).padStart(4, "0")} | value-${String(index).padStart(4, "0")} | ${index % 2} |`,
+    );
+    const source = ["| name | value | flag |", "|---|---|---|", ...body].join("\n");
+    const appended = `${source}\n| row-1000 | value-1000 | 0 |`;
+
+    clearMarkdownRenderCaches();
+    const expected = renderMarkdown(appended, width);
+
+    clearMarkdownRenderCaches();
+    renderMarkdown(source, width);
+    resetMarkdownCacheStats();
+    const actual = renderMarkdown(appended, width);
+    const stats = getMarkdownCacheStats();
+
+    expect(actual).toEqual(expected);
+    expect(stats.tableStateHits).toBe(1);
+    expect(stats.tableRowRenders).toBe(1);
+    expect(stats.tableRowReuses).toBe(1001);
+  });
+
+  test("新行改变列宽时整表重排，避免复用旧边框", () => {
+    const width = 120;
+    const source = "| a | b |\n|---|---|\n| 1 | 2 |";
+    const wider = `${source}\n| much-wider-value | 3 |`;
+
+    clearMarkdownRenderCaches();
+    const expected = renderMarkdown(wider, width);
+
+    clearMarkdownRenderCaches();
+    renderMarkdown(source, width);
+    resetMarkdownCacheStats();
+    const actual = renderMarkdown(wider, width);
+    const stats = getMarkdownCacheStats();
+
+    expect(actual).toEqual(expected);
+    expect(stats.tableStateHits).toBe(1);
+    expect(stats.tableRowReuses).toBe(0);
+    expect(stats.tableRowRenders).toBe(3);
   });
 
   test("GFM 允许的单横线 delimiter 也由 Lezer 识别", () => {

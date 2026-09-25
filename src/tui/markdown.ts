@@ -161,6 +161,47 @@ export type MarkdownSegment =
 const MAX_INLINE_CELL_CACHE_ENTRIES = 2048;
 const inlineCellCache = new Map<string, string>();
 
+export interface MarkdownCacheStats {
+  inlineCellRenders: number;
+  tableStateHits: number;
+  tableStateMisses: number;
+  tableRowRenders: number;
+  tableRowReuses: number;
+  tableStates: number;
+}
+
+const markdownCacheCounters = {
+  inlineCellRenders: 0,
+  tableStateHits: 0,
+  tableStateMisses: 0,
+  tableRowRenders: 0,
+  tableRowReuses: 0,
+};
+
+/** 诊断快照：用于性能基准和回归测试，不参与渲染决策。 */
+export function getMarkdownCacheStats(): MarkdownCacheStats {
+  return {
+    ...markdownCacheCounters,
+    tableStates: tableRenderCache.size,
+  };
+}
+
+/** 只重置计数，不清缓存；适合在预热后开始观测。 */
+export function resetMarkdownCacheStats(): void {
+  markdownCacheCounters.inlineCellRenders = 0;
+  markdownCacheCounters.tableStateHits = 0;
+  markdownCacheCounters.tableStateMisses = 0;
+  markdownCacheCounters.tableRowRenders = 0;
+  markdownCacheCounters.tableRowReuses = 0;
+}
+
+/** 清空 Markdown 行内与表格缓存，并重置计数。 */
+export function clearMarkdownRenderCaches(): void {
+  inlineCellCache.clear();
+  tableRenderCache.clear();
+  resetMarkdownCacheStats();
+}
+
 function renderInlineTableCell(source: string, hyperlinks: boolean): string {
   const key = `${hyperlinks ? "1" : "0"}\u0000${source}`;
   const cached = inlineCellCache.get(key);
@@ -170,6 +211,7 @@ function renderInlineTableCell(source: string, hyperlinks: boolean): string {
     return cached;
   }
 
+  markdownCacheCounters.inlineCellRenders += 1;
   const rendered = Bun.markdown.render(source, {
     strong: (children) => `${BOLD}${children}${RESET}`,
     emphasis: (children) => `\x1b[3m${children}\x1b[23m`,
@@ -209,14 +251,82 @@ function padTableCell(
   }
 }
 
+interface RenderedTableRow {
+  header: boolean;
+  cells: readonly string[];
+}
+
+interface TableRenderState {
+  rowKeys: readonly string[];
+  alignments: readonly MarkdownTableAlignment[];
+  widths: readonly number[];
+  inlineRows: readonly (readonly string[])[];
+  renderedRows: readonly (readonly string[])[];
+}
+
+const MAX_TABLE_RENDER_CACHE_ENTRIES = 64;
+const tableRenderCache = new Map<string, TableRenderState>();
+
+function tableRowKey(row: MarkdownTableRow): string {
+  return JSON.stringify([row.header, row.cells]);
+}
+
+function tableStateKey(
+  delimiter: string,
+  rows: readonly MarkdownTableRow[],
+  width: number,
+  hyperlinks: boolean,
+): string {
+  return JSON.stringify([width, hyperlinks, delimiter, rows.map(tableRowKey)]);
+}
+
+function getTableRenderState(key: string): TableRenderState | undefined {
+  const state = tableRenderCache.get(key);
+  if (state === undefined) {
+    markdownCacheCounters.tableStateMisses += 1;
+    return undefined;
+  }
+  markdownCacheCounters.tableStateHits += 1;
+  tableRenderCache.delete(key);
+  tableRenderCache.set(key, state);
+  return state;
+}
+
+function setTableRenderState(key: string, state: TableRenderState): void {
+  tableRenderCache.delete(key);
+  tableRenderCache.set(key, state);
+  while (tableRenderCache.size > MAX_TABLE_RENDER_CACHE_ENTRIES) {
+    const oldest = tableRenderCache.keys().next().value;
+    if (oldest === undefined) break;
+    tableRenderCache.delete(oldest);
+  }
+}
+
+function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameAlignments(
+  left: readonly MarkdownTableAlignment[],
+  right: readonly MarkdownTableAlignment[],
+): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function hasRowPrefix(state: TableRenderState, rowKeys: readonly string[]): boolean {
+  return (
+    state.rowKeys.length <= rowKeys.length &&
+    state.rowKeys.every((key, index) => key === rowKeys[index])
+  );
+}
+
 function renderTableRow(
-  row: MarkdownTableRow,
+  row: RenderedTableRow,
   widths: readonly number[],
   alignments: readonly MarkdownTableAlignment[],
-  hyperlinks: boolean,
 ): string[] {
   const cells = widths.map((width, index) => {
-    const inline = renderInlineTableCell(row.cells[index] ?? "", hyperlinks);
+    const inline = row.cells[index] ?? "";
     return wrapToLines(row.header ? `${BOLD}${inline}${RESET}` : inline, width);
   });
   const height = Math.max(1, ...cells.map((lines) => lines.length));
@@ -250,27 +360,46 @@ function renderTableSegment(
   );
   if (columns === 0) return [];
 
-  const rows = model.rows.map((row) => ({
-    ...row,
-    cells: Array.from({ length: columns }, (_, index) =>
-      renderInlineTableCell(row.cells[index] ?? "", options.hyperlinks),
-    ),
-  }));
+  const delimiter = lines[1] ?? "";
+  const rowKeys = model.rows.map(tableRowKey);
+  const prefixRows = model.rows.slice(0, -1);
+  const previous = getTableRenderState(
+    tableStateKey(delimiter, prefixRows, width, options.hyperlinks),
+  );
+  const reusePrefix =
+    previous !== undefined &&
+    hasRowPrefix(previous, rowKeys);
+
+  const inlineRows: string[][] = [];
+  for (let index = 0; index < model.rows.length; index += 1) {
+    const cached = reusePrefix ? previous.inlineRows[index] : undefined;
+    if (cached !== undefined && cached.length === columns) {
+      inlineRows.push([...cached]);
+      continue;
+    }
+    const row = model.rows[index]!;
+    inlineRows.push(
+      Array.from({ length: columns }, (_, column) =>
+        renderInlineTableCell(row.cells[column] ?? "", options.hyperlinks),
+      ),
+    );
+  }
+
   const alignments = Array.from(
     { length: columns },
     (_, index) => model.alignments[index] ?? "left",
   );
   const natural = Array.from({ length: columns }, (_, index) => {
     let max = 1;
-    for (const row of rows) {
-      max = Math.max(max, visibleWidth(row.cells[index] ?? ""));
+    for (const row of inlineRows) {
+      max = Math.max(max, visibleWidth(row[index] ?? ""));
     }
     return max;
   });
   const minimum = Array.from({ length: columns }, (_, index) => {
     let min = 1;
-    for (const row of rows) {
-      for (const char of Bun.stripANSI(row.cells[index] ?? "")) {
+    for (const row of inlineRows) {
+      for (const char of Bun.stripANSI(row[index] ?? "")) {
         min = Math.max(min, Bun.stringWidth(char));
       }
     }
@@ -301,14 +430,47 @@ function renderTableSegment(
     total -= 1;
   }
 
+  const reuseLayout =
+    reusePrefix &&
+    sameNumbers(previous.widths, widths) &&
+    sameAlignments(previous.alignments, alignments);
+  const renderedRows: string[][] = [];
+  for (let index = 0; index < model.rows.length; index += 1) {
+    const cached = reuseLayout ? previous.renderedRows[index] : undefined;
+    if (cached !== undefined) {
+      markdownCacheCounters.tableRowReuses += 1;
+      renderedRows.push([...cached]);
+      continue;
+    }
+    markdownCacheCounters.tableRowRenders += 1;
+    renderedRows.push(
+      renderTableRow(
+        { header: model.rows[index]!.header, cells: inlineRows[index]! },
+        widths,
+        alignments,
+      ),
+    );
+  }
+
+  setTableRenderState(
+    tableStateKey(delimiter, model.rows, width, options.hyperlinks),
+    {
+      rowKeys,
+      alignments,
+      widths,
+      inlineRows,
+      renderedRows,
+    },
+  );
+
   const border = (left: string, middle: string, right: string): string =>
     `${DIM}${left}${widths.map((value) => "─".repeat(value + 2)).join(middle)}${right}${RESET}`;
 
   const out = [border("┌", "┬", "┐")];
-  out.push(...renderTableRow(rows[0]!, widths, alignments, options.hyperlinks));
+  out.push(...renderedRows[0]!);
   out.push(border("├", "┼", "┤"));
-  for (let index = 1; index < rows.length; index += 1) {
-    out.push(...renderTableRow(rows[index]!, widths, alignments, options.hyperlinks));
+  for (let index = 1; index < renderedRows.length; index += 1) {
+    out.push(...renderedRows[index]!);
   }
   out.push(border("└", "┴", "┘"));
   return out;
