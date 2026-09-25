@@ -129,31 +129,31 @@ const GET_GOAL_PARAMETERS: JSONSchema = {
 const CREATE_GOAL_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    raw_intent: { type: "string", description: "用户最初的 Goal 原始意图" },
-    objective: { type: "string", description: "清晰、不可缩小的最终目标" },
+    raw_intent: { type: "string", description: "The user's original intent, verbatim." },
+    objective: { type: "string", description: "Clear, non-reducible end goal." },
     success_criteria: {
       type: "array",
-      description: "可验证的成功标准；每项必须能关联证据",
+      description: "Verifiable success criteria. Each must be provable by evidence.",
       items: { type: "string" },
     },
     constraints: {
       type: "array",
-      description: "必须遵守的约束",
+      description: "Constraints that must be respected.",
       items: { type: "string" },
     },
     non_goals: {
       type: "array",
-      description: "明确不做的范围",
+      description: "Explicit non-goals.",
       items: { type: "string" },
     },
     risk_level: {
       type: "string",
       enum: [...RISK_LEVELS],
-      description: "风险等级；high/critical 默认要求用户 gate",
+      description: "Risk level. high and critical require user approval.",
     },
     token_budget: {
       type: "integer",
-      description: "可选 token 预算；必须大于 0",
+      description: "Optional token budget. Must be greater than 0.",
     },
   },
   required: ["raw_intent", "objective", "success_criteria"],
@@ -165,9 +165,9 @@ const UPDATE_GOAL_PARAMETERS: JSONSchema = {
     status: {
       type: "string",
       enum: [...UPDATE_STATUSES],
-      description: "模型只能提交 paused / blocked / complete；resume 由用户控制",
+      description: "Only paused, blocked, or complete. Resuming is user-controlled.",
     },
-    reason: { type: "string", description: "状态变更原因，可选" },
+    reason: { type: "string", description: "Optional reason for the status change." },
   },
   required: ["status"],
 };
@@ -177,7 +177,7 @@ const UPDATE_PLAN_PARAMETERS: JSONSchema = {
   properties: {
     phases: {
       type: "array",
-      description: "策略阶段；每个阶段至少关联一个 Checkpoint",
+      description: "Plan phases. Each phase needs at least one checkpoint.",
       items: {
         type: "object",
         properties: {
@@ -194,7 +194,7 @@ const UPDATE_PLAN_PARAMETERS: JSONSchema = {
     },
     checkpoints: {
       type: "array",
-      description: "首次 update_plan 必须提供；后续策略 revision 省略并复用已冻结的 Checkpoint",
+      description: "Required on the first update_plan; later revisions reuse the frozen checkpoints.",
       items: {
         type: "object",
         properties: {
@@ -223,11 +223,11 @@ const UPDATE_PLAN_PARAMETERS: JSONSchema = {
 const SUBMIT_CHECKPOINT_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    checkpoint_id: { type: "string", description: "当前 active Checkpoint ID" },
-    summary: { type: "string", description: "本次提交的简短结果摘要" },
+    checkpoint_id: { type: "string", description: "Active checkpoint ID." },
+    summary: { type: "string", description: "Short summary of this submission." },
     evidence: {
       type: "array",
-      description: "可核验的结构化证据；命令类必须带 command 和 exit_code=0",
+      description: "Verifiable evidence. Command evidence needs command and exit_code=0.",
       items: {
         type: "object",
         properties: {
@@ -238,18 +238,18 @@ const SUBMIT_CHECKPOINT_PARAMETERS: JSONSchema = {
           summary: { type: "string" },
           reference: {
             type: "string",
-            description: "命令、文件路径、diff hash 或其他可定位引用",
+            description: "Command, file path, diff hash, or other locator.",
           },
-          digest: { type: "string", description: "file 证据的 sha256，可选" },
-          command: { type: "string", description: "test/command/runtime 证据必须提供" },
-          exit_code: { type: "integer", description: "命令退出码；必须为 0" },
+          digest: { type: "string", description: "Optional sha256 for file evidence." },
+          command: { type: "string", description: "Required for test, command, and runtime evidence." },
+          exit_code: { type: "integer", description: "Command exit code. Must be 0." },
         },
         required: ["kind", "summary", "reference"],
       },
     },
     remaining_risk: {
       type: "array",
-      description: "已识别但尚未解决的残余风险",
+      description: "Known unresolved risks.",
       items: { type: "string" },
     },
   },
@@ -261,7 +261,7 @@ const GET_HANDOFF_PARAMETERS: JSONSchema = {
   properties: {
     epoch_id: {
       type: "string",
-      description: "省略时读取 canonical 最新 revision；提供时读取不可变 Epoch snapshot",
+      description: "Omit to read the latest revision; provide to read a frozen snapshot.",
     },
   },
 };
@@ -274,7 +274,7 @@ const FINAL_AUDIT_PARAMETERS: JSONSchema = {
 const HANDOFF_UPDATE_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    base_revision: { type: "integer", description: "必须匹配当前 canonical revision" },
+    base_revision: { type: "integer", description: "Must match the current revision." },
     patches: {
       type: "array",
       items: {
@@ -283,8 +283,8 @@ const HANDOFF_UPDATE_PARAMETERS: JSONSchema = {
           section: { type: "string", enum: [...HANDOFF_SECTIONS] },
           operation: { type: "string", enum: ["append", "correct"] },
           content: { type: "string" },
-          target: { type: "string", description: "correct 时引用被订正的条目 id" },
-          reason: { type: "string", description: "correct 时必填" },
+          target: { type: "string", description: "Entry id being corrected." },
+          reason: { type: "string", description: "Required when operation is correct." },
           evidence: { type: "array", items: { type: "string" } },
         },
         required: ["section", "operation", "content"],
@@ -297,7 +297,7 @@ const HANDOFF_UPDATE_PARAMETERS: JSONSchema = {
 export function createGoalTools(controller: GoalController): Tool[] {
   const getGoal: Tool<Record<string, never>, unknown> = {
     name: GET_GOAL_TOOL_NAME,
-    description: "读取当前 session 的 Goal Contract、状态、phase、预算与 Checkpoint 进度。",
+    description: "Read the current goal: contract, status, phase, budget, and checkpoint progress.",
     parameters: GET_GOAL_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -318,11 +318,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const createGoal: Tool<unknown, unknown> = {
     name: CREATE_GOAL_TOOL_NAME,
-    description: [
-      "把显式 `/goal` 初始化结果编译成持久 Goal Contract。",
-      "只有在用户刚执行 `/goal` 且宿主授予一次性创建权限时可用。",
-      "普通对话、普通任务和模型自行发现的“长期目标”都不得调用。",
-    ].join("\n"),
+    description: "Create the persistent goal contract. Only available right after the user runs `/goal`.",
     parameters: CREATE_GOAL_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -373,10 +369,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const updateGoal: Tool<unknown, unknown> = {
     name: UPDATE_GOAL_TOOL_NAME,
-    description: [
-      "提交 Goal 生命周期状态。模型只能提交 paused、blocked、complete。",
-      "active/resume 只能由用户或系统控制；complete 必须通过 final audit 门禁。",
-    ].join("\n"),
+    description: "Update goal status. Allowed values: paused, blocked, complete.",
     parameters: UPDATE_GOAL_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -407,11 +400,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const updatePlan: Tool<unknown, unknown> = {
     name: UPDATE_PLAN_TOOL_NAME,
-    description: [
-      "为当前 Goal 提交 Plan revision 与 Checkpoint DAG。",
-      "首次调用必须同时提供 checkpoints；后续 revision 只能更新 phases/assumptions。",
-      "Checkpoint 必须是可验证的阶段结果，不能是“运行一次测试”这类微步骤。",
-    ].join("\n"),
+    description: "Submit a plan revision with phases and checkpoints. The first call must include checkpoints.",
     parameters: UPDATE_PLAN_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -490,10 +479,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const submitCheckpoint: Tool<unknown, unknown> = {
     name: SUBMIT_CHECKPOINT_TOOL_NAME,
-    description: [
-      "提交当前 Goal Checkpoint 进行确定性验证和独立 review。",
-      "只有所有 Todo 完成且带证据时才能提交；提交不等于完成，必须通过 verifier/review gate。",
-    ].join("\n"),
+    description: "Submit the active checkpoint with evidence for verification and review.",
     parameters: SUBMIT_CHECKPOINT_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -556,7 +542,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
   const getHandoff: Tool<unknown, unknown> = {
     name: GET_HANDOFF_TOOL_NAME,
     description:
-      "读取当前 Goal 的 canonical Handoff，或按 epoch_id 读取不可变 snapshot。snapshot 与当前工作区是权威状态。",
+      "Read the canonical handoff snapshot, or a frozen one by epoch_id.",
     parameters: GET_HANDOFF_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -594,11 +580,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const handoffUpdate: Tool<unknown, unknown> = {
     name: HANDOFF_UPDATE_TOOL_NAME,
-    description: [
-      "通过结构化 patch 更新 canonical Handoff 的叙事章节。",
-      "禁止整文件覆盖，禁止修改 Goal Contract、Checkpoints、Evidence 等系统事实章节。",
-      "base_revision 过期时必须先 get_handoff 再重试。",
-    ].join("\n"),
+    description: "Update narrative sections of the handoff snapshot with a structured patch.",
     parameters: HANDOFF_UPDATE_PARAMETERS,
     defaultPermission: "allow",
     resources() {
@@ -659,10 +641,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
 
   const finalAudit: Tool<Record<string, never>, unknown> = {
     name: FINAL_AUDIT_TOOL_NAME,
-    description: [
-      "所有 Checkpoint 完成后，对原始 Goal 做最终独立审计。",
-      "必须覆盖全部 success criteria；最后一个 checkbox 本身不是完成条件。",
-    ].join("\n"),
+    description: "Request the final independent audit of the goal against its success criteria.",
     parameters: FINAL_AUDIT_PARAMETERS,
     defaultPermission: "allow",
     resources() {

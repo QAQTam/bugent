@@ -386,10 +386,10 @@ export interface BashInput {
 export const BASH_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    command: { type: "string", description: "要执行的 shell 命令（在项目工作目录下运行）" },
+    command: { type: "string", description: "Shell command to run in the workspace root." },
     timeoutMs: {
       type: "number",
-      description: `超时毫秒数，默认 ${DEFAULT_TIMEOUT_MS}，上限 ${MAX_TIMEOUT_MS}`,
+      description: `Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS}, maximum ${MAX_TIMEOUT_MS}.`,
     },
   },
   required: ["command"],
@@ -628,11 +628,7 @@ export function createBashTool(
 
   return {
     name: "bash",
-    description: [
-      "在项目工作目录中执行 shell 命令并返回输出。",
-      "适合查看文件、搜索代码、运行测试与构建。",
-      "命令是非交互式的：不要执行需要用户输入的程序。",
-    ].join(" "),
+    description: "Run a shell command in the workspace and return its output.",
     parameters: BASH_PARAMETERS,
     needsSandbox: true,
 

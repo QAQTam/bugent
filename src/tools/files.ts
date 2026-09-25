@@ -161,9 +161,12 @@ export interface ReadFileInput {
 export const READ_FILE_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    path: { type: "string", description: "相对工作目录的文件路径" },
-    offset: { type: "number", description: "起始行号（1-based），默认 1" },
-    limit: { type: "number", description: `最多读取行数，默认 ${MAX_READ_LINES}` },
+    path: { type: "string", description: "Path relative to the workspace root." },
+    offset: { type: "number", description: "First line to read (1-based). Defaults to 1." },
+    limit: {
+      type: "number",
+      description: `Maximum number of lines to read. Defaults to ${MAX_READ_LINES}.`,
+    },
   },
   required: ["path"],
 };
@@ -186,10 +189,7 @@ function optionalPositiveInt(value: unknown, field: string): number | undefined 
 export function createReadFileTool(): Tool<ReadFileInput, string> {
   return {
     name: "read_file",
-    description: [
-      "读取工作目录下的文本文件，返回带行号的内容。",
-      "大文件用 offset / limit 分段读取。",
-    ].join(" "),
+    description: "Read a text file from the workspace; returns numbered lines.",
     parameters: READ_FILE_PARAMETERS,
 
     resources(input, ctx) {
@@ -286,8 +286,8 @@ export interface WriteFileInput {
 export const WRITE_FILE_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    path: { type: "string", description: "相对工作目录的文件路径（父目录会自动创建）" },
-    content: { type: "string", description: "要写入的完整内容" },
+    path: { type: "string", description: "Path relative to the workspace root. Parent directories are created." },
+    content: { type: "string", description: "Full file content." },
   },
   required: ["path", "content"],
 };
@@ -295,11 +295,7 @@ export const WRITE_FILE_PARAMETERS: JSONSchema = {
 export function createWriteFileTool(): Tool<WriteFileInput, string> {
   return {
     name: "write_file",
-    description: [
-      "把内容写入文件，覆盖已有内容。",
-      "父目录不存在会自动创建；写入是原子的（临时文件 + rename）。",
-      "修改已有文件请优先用 edit_file，避免覆盖掉你没看过的内容。",
-    ].join(" "),
+    description: "Create or overwrite a file with the given content.",
     parameters: WRITE_FILE_PARAMETERS,
     // 进程内工具没有内核兜底，必须显式声明需要写权限 ——
     // read-only 档位下闸门会据此拦下（或弹窗请求升档）
@@ -387,10 +383,13 @@ export interface EditFileInput {
 export const EDIT_FILE_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    path: { type: "string", description: "相对工作目录的文件路径" },
-    old_string: { type: "string", description: "要被替换的原文（必须与文件内容完全一致，含缩进）" },
-    new_string: { type: "string", description: "替换成的新内容" },
-    replace_all: { type: "boolean", description: "是否替换所有匹配；默认 false，此时要求唯一匹配" },
+    path: { type: "string", description: "Path relative to the workspace root." },
+    old_string: { type: "string", description: "Exact text to replace, including indentation." },
+    new_string: { type: "string", description: "Replacement text." },
+    replace_all: {
+      type: "boolean",
+      description: "Replace every match. Defaults to false, which requires a unique match.",
+    },
   },
   required: ["path", "old_string", "new_string"],
 };
@@ -409,11 +408,7 @@ function countOccurrences(haystack: string, needle: string): number {
 export function createEditFileTool(): Tool<EditFileInput, string> {
   return {
     name: "edit_file",
-    description: [
-      "在文件中做精确字符串替换。",
-      "old_string 必须与文件内容完全一致（含缩进与换行）。",
-      "默认要求唯一匹配；有多处匹配时要么提供更多上下文，要么设 replace_all=true。",
-    ].join(" "),
+    description: "Replace one exact string in a file.",
     parameters: EDIT_FILE_PARAMETERS,
     requires: { write: true },
 

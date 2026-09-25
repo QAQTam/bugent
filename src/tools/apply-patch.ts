@@ -79,10 +79,8 @@ export function createApplyPatchTool(): Tool<unknown, string> {
   return {
     name: APPLY_PATCH_TOOL_NAME,
     description: [
-      "The `apply_patch` tool can be used to edit files.",
-      "This is a Codex-compatible patch format and edits one or more files atomically.",
-      "The executor accepts a FREEFORM patch string. When exposed through a JSON function interface, put that string in the `patch` field.",
-      "Do not wrap the patch in a shell command.",
+      "Edit files with a Codex-style patch: add, update, delete, or move one or more files, applied atomically.",
+      "The executor takes a freeform patch string; through a JSON function interface, put it in the `patch` field.",
       "Patch grammar:",
       "*** Begin Patch",
       "*** Add File: path",
@@ -96,7 +94,6 @@ export function createApplyPatchTool(): Tool<unknown, string> {
       " context line",
       "*** End of File",
       "*** End Patch",
-      "Use context lines liberally so the anchor is unambiguous.",
     ].join("\n"),
     parameters: APPLY_PATCH_PARAMETERS,
     inputFormat: "freeform",

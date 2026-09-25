@@ -51,41 +51,41 @@ export const TODO_PARAMETERS: JSONSchema = {
   properties: {
     summary: {
       type: "string",
-      description: "整份计划的一句话摘要，可选",
+      description: "One-line summary of the plan.",
     },
     checkpoint_id: {
       type: "string",
-      description: "Goal 模式下当前 Checkpoint ID；清单内各项也可以分别提供 checkpointId",
+      description: "Current checkpoint ID while a goal is active.",
     },
     todos: {
       type: "array",
-      description: "完整的待办清单（整写覆盖，不是增量）",
+      description: "The full todo list. Replaces the previous list.",
       items: {
         type: "object",
         properties: {
           id: {
             type: "string",
-            description: "稳定 id；后续更新与审计引用它。省略时宿主会自动生成",
+            description: "Stable id referenced by later updates. Generated when omitted.",
           },
-          content: { type: "string", description: "祈使句描述，具体可验证" },
-          activeForm: { type: "string", description: "进行时文案，可选" },
+          content: { type: "string", description: "Imperative, specific, verifiable description." },
+          activeForm: { type: "string", description: "Present-continuous label shown while the item is in progress." },
           completion: {
             type: "string",
-            description: "完成描述或证据，可选；仅 completed 项使用",
+            description: "Outcome or evidence, for completed items.",
           },
           checkpointId: {
             type: "string",
-            description: "Goal 模式下所属 Checkpoint；通常由顶层 checkpoint_id 统一提供",
+            description: "Owning checkpoint while a goal is active.",
           },
           completionEvidence: {
             type: "array",
-            description: "Goal 模式下 completed 项必须提供；每项应是可核验的产物或命令结果",
+            description: "Required for completed items while a goal is active.",
             items: { type: "string" },
           },
           status: {
             type: "string",
             enum: ["pending", "in_progress", "completed"],
-            description: "同一时刻最多一项为 in_progress",
+            description: "At most one item may be in_progress.",
           },
         },
         required: ["content", "status"],
@@ -332,30 +332,7 @@ export interface TodoWriteInput {
   todos?: unknown;
 }
 
-const DESCRIPTION = [
-  "用待办清单规划并跟踪多步任务，用户会实时看到进度。",
-  "",
-  "什么时候该用：",
-  "- 任务需要 3 步以上，或用户一次提了多个要求",
-  "- 用户明确要求你先规划",
-  "- 开始一项新任务之前",
-  "",
-  "什么时候不该用：",
-  "- 一步就能做完的事（例如\"跑一下测试\"）",
-  "- 纯问答、纯解释，没有可执行步骤",
-  "",
-  "清单可以包含：",
-  "- summary：整份计划的一句话摘要",
-  "- id：稳定标识，建议用短横线命名，例如 fix-sandbox-ui",
-  "- completion：完成项的结果或证据，例如 338 tests pass",
-  "",
-  "纪律：",
-  "- 每次提交**完整清单**（整写覆盖），不是只改某一项",
-  "- 同一时刻**最多一项** in_progress",
-  "- 开始某项前标为 in_progress，做完立刻标为 completed，不要事后批量补",
-  "- 描述要具体可验证：\"补 edit_file 的单测\" 而不是 \"写测试\"",
-  "- completed 项尽量写一句 completion，让用户知道结果，不要只留一个勾",
-].join("\n");
+const DESCRIPTION = "Replace the session todo list shown to the user.";
 
 export interface TodoWriteToolOptions {
   /** Goal 模式下把整写校验与状态推进交给 GoalController。 */
@@ -372,12 +349,8 @@ export function createTodoWriteTool(
         ? DESCRIPTION
         : [
             DESCRIPTION,
-            "",
-            "Goal 模式扩展：",
-            "- 必须用 checkpoint_id 指定当前 Checkpoint",
-            "- completed 项必须提供 completionEvidence",
-            "- 只能为当前 Checkpoint 写 Todo，不能提前生成后续阶段清单",
-          ].join("\n"),
+            "While a goal is active, checkpoint_id is required and completed items must carry completionEvidence.",
+          ].join(" "),
     parameters: TODO_PARAMETERS,
     // 无副作用，只改显示状态 —— 不该为它打断用户
     needsSandbox: false,

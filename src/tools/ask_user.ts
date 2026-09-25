@@ -26,19 +26,19 @@ export const ASK_USER_PARAMETERS: JSONSchema = {
   properties: {
     questions: {
       type: "array",
-      description: `要问的问题，最多 ${MAX_QUESTIONS} 个。用户用上下键选选项、可以输入自定义答案。`,
+      description: `Questions to ask, at most ${MAX_QUESTIONS}.`,
       items: {
         type: "object",
         properties: {
-          question: { type: "string", description: "问题正文，一句话说清" },
+          question: { type: "string", description: "Question text." },
           options: {
             type: "array",
-            description: `候选项，最多 ${MAX_OPTIONS} 个（界面按 A~D 展示）。留空表示纯自由回答。`,
+            description: `Choices, at most ${MAX_OPTIONS}. Leave empty for a free-form answer.`,
             items: { type: "string" },
           },
           multiple: {
             type: "boolean",
-            description: "是否为多选。省略即单选 —— 只有在确实允许多个答案时才设为 true。",
+            description: "Allow multiple selections. Defaults to false.",
           },
         },
         required: ["question"],
@@ -48,25 +48,7 @@ export const ASK_USER_PARAMETERS: JSONSchema = {
   required: ["questions"],
 };
 
-const DESCRIPTION = [
-  "向用户提问以澄清需求。用户会看到分页的选择界面，可以选项也可以自由作答。",
-  "",
-  "什么时候该用：",
-  "- 需求有歧义，且不同理解会导致完全不同的实现方向",
-  "- 涉及用户的偏好或业务决策，你无法从代码里推断",
-  "- 要做破坏性操作前需要确认范围",
-  "",
-  "什么时候不该用（重要）：",
-  "- 能从当前上下文、代码或文档推断出来的，自己判断",
-  "- 能通过读文件 / 跑命令查清楚的，自己去查",
-  "- 只是想让用户帮你做本该你做的技术决策",
-  "- 一次问超过 5 个问题 —— 说明你该先自己调研",
-  "",
-  "写法要求：",
-  "- 每个问题给出 2~4 个具体、互斥的选项（会显示为 A/B/C/D）",
-  "- 选项要能直接指导行动，不要写\"其他\"这类空泛选项（用户本来就能自定义回答）",
-  "- 只有确实允许多个答案时才设 multiple: true，否则保持单选",
-].join("\n");
+const DESCRIPTION = "Ask the user a question and wait for the answer.";
 
 /* ------------------------------------------------------------------ */
 /* 校验                                                                */
