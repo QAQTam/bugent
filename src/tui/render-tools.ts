@@ -11,7 +11,7 @@
  * Transcript.TOOL_PROGRESS_LINES），让用户看到"现在跑到哪了"。
  */
 
-import { BOLD, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown.ts";
+import { BOLD, bg, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
@@ -375,8 +375,14 @@ export function renderDiffTool(item: ToolItem, width: number): string[] {
   const colored = rest.map((line) => {
     const prefix = line[0];
     const text = line.slice(1);
-    if (prefix === "+") return `${fg(COLOR.diffAdd)}  +${text}${RESET}`;
-    if (prefix === "-") return `${fg(COLOR.diffRemove)}  -${text}${RESET}`;
+    // 标记列（`  +` / `  -` 共 3 格）铺底色，做成一条能一眼扫到的色带；
+    // 正文仍用降过饱和的前景色 —— 语义与颜色都不丢。
+    if (prefix === "+") {
+      return `${bg(COLOR.diffAddBg)}${fg(COLOR.diffAdd)}  +${RESET}${fg(COLOR.diffAdd)}${text}${RESET}`;
+    }
+    if (prefix === "-") {
+      return `${bg(COLOR.diffRemoveBg)}${fg(COLOR.diffRemove)}  -${RESET}${fg(COLOR.diffRemove)}${text}${RESET}`;
+    }
     return `${DIM}  ${line}${RESET}`;
   });
 

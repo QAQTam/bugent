@@ -714,7 +714,7 @@ export class TuiApp implements TuiInteraction {
       if (keys.length > 0) this.#handleKeys(keys);
     }, 50);
 
-    // 终端底色必须在第一帧之前定下来，否则行内代码的底色会先画错再改。
+    // 终端底色必须在第一帧之前定下来，否则行内代码的字色会先画错再改。
     // 探测上限 60ms，且只在没有 COLORFGBG 线索时才真的发查询。
     const detected = await detectTerminalBackground({
       write: (text) => this.#terminal.write(text),

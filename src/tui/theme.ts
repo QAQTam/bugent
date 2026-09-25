@@ -50,6 +50,9 @@ export interface Theme {
   // diff
   diffAdd: string;
   diffRemove: string;
+  /** diff 标记列（`+`/`-` 那一格）的底色；正文仍走前景色。 */
+  diffAddBg: string;
+  diffRemoveBg: string;
 
   // bash 输出语义层
   bashStdout: string;
@@ -78,11 +81,11 @@ export interface Theme {
 /**
  * 深色终端配色。
  *
- * diff 两色刻意压低饱和度（69% / 91% → 28% / 51%）：一屏几十行 diff 连续
- * 看，报警器级别的鲜艳很累眼。语义不靠颜色单独承载 —— 每行有 `+`/`-`
- * 前缀，头部还有 `+N -M` 徽标。
+ * diff 增/删两色用高饱和绿/红（hsl 113/345，S 64%），一眼分清改了什么；
+ * 标记列底色是它们的**同色相深色版**，只铺在 `+`/`-` 那一格。语义不靠颜色
+ * 单独承载 —— 每行有 `+`/`-` 前缀，头部还有 `+N -M` 徽标。
  *
- * 注意 `fg()` 默认量化到 256 色，所以这两个值实际落到索引 144 / 173。
+ * 注意 `fg()` 默认量化到 256 色。
  */
 export const darkTheme: Theme = {
   prompt: "#22d3ee",
@@ -114,8 +117,13 @@ export const darkTheme: Theme = {
   reasoningSpinnerDim: "#0891b2",
   spinnerIdle: "#64748b",
 
-  diffAdd: "#a3be8c",
-  diffRemove: "#d08770",
+  diffAdd: "#37b227",
+  diffRemove: "#b2274a",
+  // 标记列底色：与上面两色同色相（113 / 345）的深色版，只铺在 `+`/`-` 那一格。
+  // 浅色主题落地前两档都用这组（深色终端上是一条低饱和色带，浅色终端上
+  // 会是一条深色小色块 —— 与当前"浅色配色尚未实现"的整体状态一致）。
+  diffAddBg: "#214a1c",
+  diffRemoveBg: "#4a1c28",
 
   bashStdout: "#cbd5e1",
   bashStderr: "#fca5a5",
@@ -149,7 +157,7 @@ let background: TerminalBackground = "dark";
  * 记录终端底色并选定配色。
  *
  * 浅色配色还没落地，所以两档现在都选 `darkTheme`；底色仍然要记下来，
- * 因为 markdown 渲染要据此决定行内代码的底色。浅色主题做好之后，
+ * 因为 markdown 渲染要据此决定行内代码的字色。浅色主题做好之后，
  * 这里按 `background` 换成 `lightTheme` 即可。
  */
 export function applyTheme(next: TerminalBackground): void {

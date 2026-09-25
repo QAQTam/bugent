@@ -912,7 +912,7 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
-    "COLORFGBG 说浅色终端时行内代码改用浅色底，且不再查询",
+    "COLORFGBG 说浅色终端时行内代码改用浅色字色，且不再查询",
     async () => {
       let output = "";
       const decoder = new TextDecoder();
@@ -934,9 +934,11 @@ describe("TUI PTY 冒烟", () => {
 
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
-        // 横幅里的 `/context`、`ESC` 等行内代码用浅色底 254，而不是深色底 236
-        expect(output).toContain("\x1b[48;5;254m");
-        expect(output).not.toContain("\x1b[48;5;236m");
+        // 横幅里的行内代码（provider id 等）改用浅色字色 124，而不是深色 215；
+        // 行内代码不再铺底色
+        expect(output).toContain("\x1b[38;5;124m");
+        expect(output).not.toContain("\x1b[38;5;215m");
+        expect(output).not.toContain("\x1b[48;5;");
         // 已经有线索了，就不该再发查询
         expect(output).not.toContain("\x1b]11;?");
 

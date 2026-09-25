@@ -235,6 +235,42 @@ describe("diff 统计徽标", () => {
     expect(plain.endsWith("+1 -1")).toBe(true);
   });
 
+  test("标记列铺底色，正文与上下文行不着底", () => {
+    const item: ToolItem = {
+      kind: "tool",
+      callId: "c1",
+      name: "edit_file",
+      args: { path: "src/a.ts" },
+      output: "已编辑 src/a.ts\n unchanged\n-old line\n+new line",
+      ok: true,
+      done: true,
+      progress: "",
+      expanded: false,
+    };
+
+    const lines = renderDiffTool(item, 60);
+    const addLine = lines.find((line) => line.includes("new line"))!;
+    const delLine = lines.find((line) => line.includes("old line"))!;
+    const ctxLine = lines.find((line) => line.includes("unchanged"))!;
+    const bgCount = (line: string) => (line.match(/\x1b\[48;[0-9;]*m/g) ?? []).length;
+
+    // 底色恰好一个，且盖在标记列（正文不着底）
+    expect(bgCount(addLine)).toBe(1);
+    expect(bgCount(delLine)).toBe(1);
+    expect(ctxLine).not.toContain("\x1b[48;");
+
+    // 底色序列在标记列之前；正文（第一个 RESET 之后）不再带底色
+    expect(addLine.indexOf("\x1b[48;")).toBeLessThan(addLine.indexOf("  +"));
+    expect(delLine.indexOf("\x1b[48;")).toBeLessThan(delLine.indexOf("  -"));
+    expect(addLine.split("\x1b[0m")[1]!).not.toContain("\x1b[48;");
+    expect(delLine.split("\x1b[0m")[1]!).not.toContain("\x1b[48;");
+
+    // 文本布局没变：仍是 `  +正文` / `  -正文`
+    const strip = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(strip(addLine)).toBe("  +new line");
+    expect(strip(delLine)).toBe("  -old line");
+  });
+
   test("窄屏时压缩摘要但保留徽标", () => {
     const item: ToolItem = {
       kind: "tool",

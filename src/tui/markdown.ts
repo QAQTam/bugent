@@ -44,8 +44,11 @@ export interface MarkdownRenderOptions {
   /** 是否启用 Kitty Graphics；不传时只在已知支持的终端开启。 */
   kittyGraphics?: boolean;
   /**
-   * 终端底色是否为浅色。影响行内代码的底色与字色（Bun 会给深色终端挑
-   * `48;5;236`、给浅色终端挑 `48;5;254`）。不传时用启动时探测到的结果。
+   * 终端底色是否为浅色。影响行内代码的**字色**（Bun 会给深色终端挑
+   * `38;5;215`、给浅色终端挑 `38;5;124`）。不传时用启动时探测到的结果。
+   *
+   * 注意行内代码的**底色**被 bugent 主动剥掉了（见 `stripBackground`），
+   * 所以 `light` 不再影响底色。
    */
   light?: boolean;
 }
@@ -85,6 +88,22 @@ function wrapPreservingGraphics(text: string, width: number): string[] {
   return out;
 }
 
+/**
+ * 去掉「设置背景色」的 SGR 序列，让底色透出终端本身。
+ *
+ * 唯一的来源是 `Bun.markdown.ansi` 给行内代码铺的那层底（深色终端
+ * `48;5;236`、浅色终端 `48;5;254`）。bugent 不要色块，只要字色，所以把
+ * 这些序列整段剥掉。
+ *
+ * 只剥「设置」（`4x` / `48;5;n` / `48;2;r;g;b`），不碰 `49` 复位：复位只是
+ * 回到默认底，不画色块，留着无害；而误删复位反而可能让颜色渗到后续文本。
+ */
+const BACKGROUND_SET = /\x1b\[(?:4[0-7]|48;5;\d+|48;2;\d+;\d+;\d+)m/g;
+
+function stripBackground(text: string): string {
+  return text.replace(BACKGROUND_SET, "");
+}
+
 /** markdown -> 终端 ANSI -> 按宽度折行。 */
 export function renderMarkdown(
   text: string,
@@ -108,7 +127,7 @@ export function renderMarkdown(
         light,
         ...(kittyGraphics ? { kittyGraphics: true } : {}),
       });
-      out.push(...wrapPreservingGraphics(rendered, width));
+      out.push(...wrapPreservingGraphics(stripBackground(rendered), width));
     } else {
       out.push(...renderCodeSegment(segment, width));
     }
