@@ -6,6 +6,7 @@ runtime/bun/lib/
 runtime/bun/include/
 runtime/bun/runtime.json
 .bugent/
+.tmp-home/
 *.log
 .env
 .env.*
