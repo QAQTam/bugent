@@ -226,6 +226,17 @@ interface WireStreamEvent {
     prompt_tokens?: number;
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+    /**
+     * 缓存命中 token 的同义字段。各家命名不统一：
+     *   - OpenAI / 兼容网关：`prompt_tokens_details.cached_tokens`
+     *   - DeepSeek / Kimi：`prompt_cache_hit_tokens`（配 `prompt_cache_miss_tokens`）
+     *   - 部分网关：裸 `cached_tokens` / Anthropic 风格的 `cache_read_input_tokens`
+     */
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
+    cached_tokens?: number;
+    cache_read_input_tokens?: number;
   } | null;
 }
 
@@ -268,14 +279,41 @@ export function mapStreamEvent(
   }
 
   if (event.usage) {
+    const input = event.usage.prompt_tokens ?? 0;
+    const output = event.usage.completion_tokens ?? 0;
+
+    // 命中量取所有同义别名的**最大值**，而不是第一个存在的字段：
+    // 实测同一次响应里同一个量可能被报多遍，其中夹杂恒为 0 的占位符
+    // （workbuddy 上游就同时给 `prompt_tokens_details.cached_tokens=6144`
+    // 和 `cache_read_input_tokens=0`）。取最大值在"真没命中"时同样得到 0。
+    const cachedCandidates = [
+      event.usage.prompt_tokens_details?.cached_tokens,
+      event.usage.prompt_cache_hit_tokens,
+      event.usage.cached_tokens,
+      event.usage.cache_read_input_tokens,
+    ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    const cached = cachedCandidates.length > 0 ? Math.max(...cachedCandidates) : undefined;
+
+    const missRaw = event.usage.prompt_cache_miss_tokens;
+    const cacheMiss =
+      typeof missRaw === "number" && Number.isFinite(missRaw)
+        ? missRaw
+        : cached !== undefined && input > cached
+          ? input - cached
+          : undefined;
+
+    const reasoningRaw = event.usage.completion_tokens_details?.reasoning_tokens;
+    const reasoning =
+      typeof reasoningRaw === "number" && Number.isFinite(reasoningRaw) ? reasoningRaw : undefined;
+
     const usage: ChatChunk = {
       type: "usage",
       usage: {
-        input: event.usage.prompt_tokens ?? 0,
-        output: event.usage.completion_tokens ?? 0,
-        ...(event.usage.prompt_tokens_details?.cached_tokens !== undefined
-          ? { cached: event.usage.prompt_tokens_details.cached_tokens }
-          : {}),
+        input,
+        output,
+        ...(cached !== undefined ? { cached } : {}),
+        ...(cacheMiss !== undefined ? { cacheMiss } : {}),
+        ...(reasoning !== undefined ? { reasoning } : {}),
       },
     };
     chunks.push(usage);

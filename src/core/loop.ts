@@ -11,6 +11,7 @@ import type {
   ToolCall,
   Usage,
 } from "../provider/types.ts";
+import { mergeUsage } from "../provider/types.ts";
 import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
 import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
@@ -92,10 +93,7 @@ export interface TurnResult {
 const EMPTY_USAGE: Usage = { input: 0, output: 0 };
 
 function addUsage(total: Usage, delta: Usage): Usage {
-  const merged: Usage = { input: total.input + delta.input, output: total.output + delta.output };
-  const cached = (total.cached ?? 0) + (delta.cached ?? 0);
-  if (cached > 0) merged.cached = cached;
-  return merged;
+  return mergeUsage(total, delta);
 }
 
 /** 流式拼起来的 tool args 是字符串，这里尽力解析。 */

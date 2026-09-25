@@ -32,6 +32,8 @@ export interface ProviderProfileExport {
   headers?: Record<string, string>;
   extraBody?: Record<string, unknown>;
   reasoningReplay?: ReasoningReplay;
+  /** 上下文窗口（token）；非敏感，可随 profile 导出。 */
+  contextWindow?: number;
   proxy?: string | false;
   tls?: ProviderTlsProfile;
 }
@@ -83,6 +85,7 @@ function exportProvider(config: PersistedProviderConfig): ProviderProfileExport 
     ...(config.reasoningReplay !== undefined
       ? { reasoningReplay: config.reasoningReplay }
       : {}),
+    ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
     ...(config.proxy !== undefined ? { proxy: config.proxy } : {}),
     ...(tls !== undefined ? { tls } : {}),
   };
@@ -175,6 +178,16 @@ function validateProvider(raw: unknown, index: number): ProviderProfileExport {
       throw new Error(`${label}.proxy 必须是字符串或 false`);
     }
     out.proxy = raw.proxy;
+  }
+  if (raw.contextWindow !== undefined) {
+    if (
+      typeof raw.contextWindow !== "number" ||
+      !Number.isSafeInteger(raw.contextWindow) ||
+      raw.contextWindow <= 0
+    ) {
+      throw new Error(`${label}.contextWindow 必须是正整数`);
+    }
+    out.contextWindow = raw.contextWindow;
   }
   if (raw.tls !== undefined) {
     if (!isRecord(raw.tls)) throw new Error(`${label}.tls 必须是 object`);

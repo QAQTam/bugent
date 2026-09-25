@@ -87,6 +87,10 @@ export interface Usage {
   output: number;
   /** 命中 provider 前缀缓存的 token 数（能拿到时才有）。 */
   cached?: number;
+  /** 未命中缓存的输入 token 数（DeepSeek 会单独回传，缺失时可由 input - cached 推出）。 */
+  cacheMiss?: number;
+  /** output 里属于思考链路的 token 数（能拿到时才有）。 */
+  reasoning?: number;
 }
 
 /** 流式增量。adapter 必须把各家流式格式归一到这几种。 */
@@ -136,4 +140,25 @@ export function messageText(msg: ChatMessage): string {
 /** 判断一条消息是否"有内容"（空 assistant 消息在多数 provider 上会被拒）。 */
 export function hasContent(msg: ChatMessage): boolean {
   return msg.parts.length > 0 || (msg.toolCalls?.length ?? 0) > 0;
+}
+
+/**
+ * 累加两段 usage。
+ *
+ * 可选字段只在**任意一边出现过**时保留：全程没回传 cached 的 provider 不应该
+ * 因为累加而凭空多出一个 0，那会让 UI 把"拿不到"显示成"命中率 0%"。
+ */
+export function mergeUsage(total: Usage, delta: Usage): Usage {
+  const merged: Usage = { input: total.input + delta.input, output: total.output + delta.output };
+  const cached = (total.cached ?? 0) + (delta.cached ?? 0);
+  if (cached > 0 || total.cached !== undefined || delta.cached !== undefined) merged.cached = cached;
+  const cacheMiss = (total.cacheMiss ?? 0) + (delta.cacheMiss ?? 0);
+  if (cacheMiss > 0 || total.cacheMiss !== undefined || delta.cacheMiss !== undefined) {
+    merged.cacheMiss = cacheMiss;
+  }
+  const reasoning = (total.reasoning ?? 0) + (delta.reasoning ?? 0);
+  if (reasoning > 0 || total.reasoning !== undefined || delta.reasoning !== undefined) {
+    merged.reasoning = reasoning;
+  }
+  return merged;
 }

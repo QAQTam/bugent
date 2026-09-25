@@ -130,7 +130,34 @@ describe("P1 · openai-chat 流式映射", () => {
 
     expect(mapped.finish).toBe("tool_calls");
     expect(mapped.chunks).toEqual<ChatChunk[]>([
-      { type: "usage", usage: { input: 100, output: 20, cached: 80 } },
+      // 命中 80 / 输入 100 → 未命中 20 直接推出来（DeepSeek 会自己回传 miss，
+      // 只回传 hit 的 provider 就得靠这一步补齐）
+      { type: "usage", usage: { input: 100, output: 20, cached: 80, cacheMiss: 20 } },
+    ]);
+  });
+
+  test("DeepSeek 风格的缓存字段与 reasoning_tokens 也被认出来", () => {
+    const mapped = mapStreamEvent(
+      {
+        choices: [{ finish_reason: "stop", delta: {} }],
+        usage: {
+          prompt_tokens: 7000,
+          completion_tokens: 900,
+          prompt_cache_hit_tokens: 6144,
+          prompt_cache_miss_tokens: 856,
+          // 同一个量的占位符：取最大值才不会读成 0
+          cache_read_input_tokens: 0,
+          completion_tokens_details: { reasoning_tokens: 512 },
+        },
+      },
+      new Map(),
+    );
+
+    expect(mapped.chunks).toEqual<ChatChunk[]>([
+      {
+        type: "usage",
+        usage: { input: 7000, output: 900, cached: 6144, cacheMiss: 856, reasoning: 512 },
+      },
     ]);
   });
 

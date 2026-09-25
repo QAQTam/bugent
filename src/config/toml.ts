@@ -153,6 +153,11 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
     );
   }
 
+  const contextWindow = asPositiveInteger(
+    pick(table, "context_window", "contextWindow"),
+    `${at}.context_window`,
+  );
+
   return {
     id,
     endpoint,
@@ -166,6 +171,7 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
     ...(reasoningReplay !== undefined
       ? { reasoningReplay: reasoningReplay as (typeof REASONING_REPLAYS)[number] }
       : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
   };
 }
 
@@ -578,6 +584,10 @@ api_key = ""
 # WorkBuddy 上游认 reasoning；默认就是 reasoning。
 # reasoning_replay = "reasoning"
 extra_body = { reasoning_effort = "high" }
+
+# 上下文窗口（token）。协议里没有这个字段，不写就按模型名前缀查内置兜底表；
+# 兜底表没命中时状态栏只显示绝对占用，不显示百分比。
+# context_window = 128000
 `;
 
 /**

@@ -8,6 +8,7 @@
  */
 
 import type { ToolCall, Usage } from "../provider/types.ts";
+import { mergeUsage } from "../provider/types.ts";
 import type { ToolCallDelta } from "../core/loop.ts";
 import type { PatchProgress } from "../patch/streaming-progress.ts";
 import { storedText, type MsgId, type StoredMessage } from "../core/message.ts";
@@ -374,9 +375,6 @@ export class Transcript {
 
   /** 供 TuiApp 记录 token 用量（不进条目流）。 */
   static mergeUsage(total: Usage, delta: Usage): Usage {
-    const merged: Usage = { input: total.input + delta.input, output: total.output + delta.output };
-    const cached = (total.cached ?? 0) + (delta.cached ?? 0);
-    if (cached > 0) merged.cached = cached;
-    return merged;
+    return mergeUsage(total, delta);
   }
 }
