@@ -60,6 +60,13 @@ export function renderGenericTool(item: ToolItem, width: number): string[] {
 /** 查表渲染，没有注册就回退到通用外观。 */
 export function renderToolItem(item: ToolItem, width: number): string[] {
   const custom = registry.get(item.name);
-  if (custom !== undefined) return custom(item, width);
-  return renderGenericTool(item, width);
+  const lines = custom !== undefined ? custom(item, width) : renderGenericTool(item, width);
+
+  // 兜底：工具卡片返回的**任何一行**都不许超过 width。
+  //
+  // 该折行的（路径、命令、正文）在各自渲染器里已经折了，这里只兜住那些固定
+  // 文案 —— "… 还有 N 行（点击展开）"、"… 还有 N 个文件"、"[exit code: N]" ——
+  // 它们在极窄终端上比 width 还宽。放在这个出口而不是每处各夹一次：卡片形态
+  // 再多也不用记得加。
+  return lines.map((line) => truncateAnsi(line, width));
 }

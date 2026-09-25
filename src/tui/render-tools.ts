@@ -11,7 +11,7 @@
  * Transcript.TOOL_PROGRESS_LINES），让用户看到"现在跑到哪了"。
  */
 
-import { BOLD, DIM, RESET, fg, renderPlain } from "./markdown.ts";
+import { BOLD, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
 import type { ToolItem } from "./renderers.ts";
@@ -58,50 +58,79 @@ function argsSummary(item: ToolItem): string {
 }
 
 /**
- * 头部行：`⏺ 工具名 摘要`，可选在**右侧右对齐**一个徽标（如 `+12 -3`）。
+ * 把 `prefix + body` 折成多行，续行按 prefix 的可见宽度做**悬挂缩进**。
  *
- * 右对齐要 ANSI 感知：徽标的可见宽度用 visibleWidth 算，
- * 而不是字符串长度 —— 否则带颜色的 `+12 -3` 会把间隔算错。
- * 窄屏时先压缩摘要，摘要压到 0 就直接不要它，保证徽标不被挤掉。
+ * 折行而不是截断：路径和命令被砍掉一半就认不出是哪个文件、哪条命令了，而卡片
+ * 本来就能变高 —— 截断省下的那几行不值得拿"看不全"去换。
  *
- * 返回值**保证**不超过 width：宽度不够时先砍左边，实在不行才砍徽标本身。
- * 早先这里用 `Math.max(1, …)` 兜间隔，左边一长整行就超出终端宽度，
- * 被屏幕层硬截断 —— 截掉的恰好是行尾的徽标，也就是这行最该看见的东西。
+ * `prefix` 可以带 ANSI（缩进宽度用 visibleWidth 算）。
  */
-function header(item: ToolItem, width: number, marker: string, color: string, badge = ""): string {
-  const badgeWidth = visibleWidth(badge);
-  // 徽标比整行还宽：没有别的选择，只能砍徽标。
-  if (badgeWidth >= width) return truncateAnsi(badge, width);
-
-  const reserved = badgeWidth > 0 ? badgeWidth + 1 : 0; // 徽标 + 至少 1 格间隔
-
-  const nameWidth = visibleWidth(item.name);
-  const summaryBudget = Math.max(0, width - reserved - nameWidth - 4);
-  const summary = argsSummary(item);
-
-  const left =
-    `${fg(color)}${marker}${RESET} ${BOLD}${item.name}${RESET}` +
-    (summary.length > 0 && summaryBudget > 0
-      ? ` ${DIM}${truncateAnsi(summary, summaryBudget)}${RESET}`
-      : "");
-
-  if (badgeWidth === 0) return truncateAnsi(left, width);
-
-  const gap = width - visibleWidth(left) - badgeWidth;
-  if (gap >= 1) return `${left}${" ".repeat(gap)}${badge}`;
-
-  // 左边太长：砍左边保住徽标。徽标是这行要传达的信息，摘要不是。
-  return `${truncateAnsi(left, width - badgeWidth - 1)} ${badge}`;
+function wrapHanging(prefix: string, body: string, width: number): string[] {
+  if (body.length === 0) return [prefix.trimEnd()];
+  const indent = visibleWidth(prefix);
+  const bodyWidth = Math.max(1, width - indent);
+  const pad = " ".repeat(indent);
+  return wrapToLines(body, bodyWidth).map((line, index) =>
+    // 极窄终端上缩进本身就超过行宽（prefix 比 width 还宽），只能砍 ——
+    // 宁可把名字截掉，也不返回超宽字符串让屏幕层去兜底。
+    truncateAnsi(index === 0 ? prefix + line : pad + line, width),
+  );
 }
 
-/** bash 头部单独走语法高亮：命令参数不是普通字符串，而是 shell 代码。 */
-function bashHeader(item: ToolItem, width: number): string {
-  const command = argsSummary(item).replace(/\s+/g, " ").trim();
-  const left = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}bash${RESET}`;
-  if (command.length === 0) return left;
+/**
+ * 把徽标右对齐到**最后一行**行尾。
+ *
+ * 挑最后一行而不是第一行：折行之后第一行已经被正文占满，硬塞会把正文挤掉；
+ * 末行留白多，右对齐后读起来仍然是一个稳定的"扫一眼就知道改了多少"的位置。
+ * 末行也放不下时（差得很少）就单独起一行，仍然右对齐。
+ */
+function withBadge(lines: string[], badge: string, width: number): string[] {
+  const badgeWidth = visibleWidth(badge);
+  if (badge.length === 0 || badgeWidth === 0) return lines;
+  // 徽标比整行还宽：只能砍徽标，没有别的选择
+  if (badgeWidth >= width) return [...lines, truncateAnsi(badge, width)];
 
-  const budget = Math.max(1, width - visibleWidth(left) - 1);
-  return `${left} ${truncateAnsi(highlightCode(command, "bash"), budget)}`;
+  const out = [...lines];
+  const last = out[out.length - 1] ?? "";
+  const gap = width - visibleWidth(last) - badgeWidth;
+  if (gap >= 1) {
+    out[out.length - 1] = `${last}${" ".repeat(gap)}${badge}`;
+    return out;
+  }
+  out.push(`${" ".repeat(Math.max(0, width - badgeWidth))}${badge}`);
+  return out;
+}
+
+/**
+ * 头部：`⏺ 工具名 摘要`，可选一个右对齐徽标（如 `+12 -3`），返回**若干行**。
+ *
+ * 摘要折行（悬挂缩进对齐到摘要起点），徽标挑到最后一行右端。早先是单行 + 截断，
+ * 摘要一长就把徽标挤到行尾之外，被屏幕层硬截断 —— 截掉的恰好是这行最该看见的
+ * 东西。折行之后两者都能看全，代价是卡片可能高一行。
+ *
+ * 右对齐要 ANSI 感知：宽度用 visibleWidth 算，否则带颜色的徽标会把间隔算错。
+ */
+function header(item: ToolItem, width: number, marker: string, color: string, badge = ""): string[] {
+  const prefix = `${fg(color)}${marker}${RESET} ${BOLD}${item.name}${RESET} `;
+  const summary = argsSummary(item);
+  const lines =
+    summary.length > 0
+      ? wrapHanging(prefix, `${DIM}${summary}${RESET}`, width)
+      : [prefix.trimEnd()];
+  return withBadge(lines, badge, width);
+}
+
+/**
+ * bash 头部：单独走语法高亮（命令不是普通字符串，而是 shell 代码），命令折行。
+ *
+ * 命令被截断比路径被截断更糟 —— 后半段往往才是关键参数（重定向、管道、
+ * 要删的那个目录），看不见就等于让用户批准了一条自己没读全的命令。
+ */
+function bashHeader(item: ToolItem, width: number): string[] {
+  const command = argsSummary(item).replace(/\s+/g, " ").trim();
+  const prefix = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}bash${RESET}`;
+  if (command.length === 0) return [prefix];
+  return wrapHanging(`${prefix} `, highlightCode(command, "bash"), width);
 }
 
 export type BashLineTone = "normal" | "error" | "warn" | "success" | "path" | "url" | "meta";
@@ -283,7 +312,7 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
     const progress = item.progress.length > 0 ? item.progress : "…";
     const stream = item.progressStream ?? "stdout";
     const lines = renderPlain(progress, Math.max(1, width - 2));
-    return [head, ...lines.map((line) => renderBashLine(line, stream))];
+    return [...head, ...lines.map((line) => renderBashLine(line, stream))];
   }
 
   const presentation =
@@ -292,7 +321,7 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
   // 非 bash 工具异常（权限拒绝、参数错误）没有结构化段，保持原来的错误外观。
   if (!item.ok && item.presentation === undefined) {
     const body = bodyLines(item.output, width, COLOR.error);
-    return [head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, COLOR.error, item.expanded)];
+    return [...head, ...foldLines(body, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, COLOR.error, item.expanded)];
   }
 
   const lines: string[] = [];
@@ -314,7 +343,7 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
   lines.push(`${fg(toneColor(exitTone))}  [exit code: ${exitLabel}]${RESET}`);
 
   return [
-    head,
+    ...head,
     ...foldLines(lines, FOLD_SPEC.bash.head, FOLD_SPEC.bash.tail, COLOR.tool, item.expanded),
   ];
 }
@@ -325,11 +354,11 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
 
 export function renderReadFileTool(item: ToolItem, width: number): string[] {
   const head = header(item, width, "⏺", COLOR.tool);
-  if (!item.done) return [head, `${DIM}  读取中…${RESET}`];
+  if (!item.done) return [...head, `${DIM}  读取中…${RESET}`];
 
   const color = item.ok ? COLOR.toolOk : COLOR.error;
   const body = bodyLines(item.output, width, color);
-  return [head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, color, item.expanded)];
+  return [...head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, color, item.expanded)];
 }
 
 /** write_file / edit_file：按 diff 语义着色，右侧右对齐 +N -M。 */
@@ -338,7 +367,7 @@ export function renderDiffTool(item: ToolItem, width: number): string[] {
   const stat = item.done && item.ok ? parseDiffStat(item.output) : undefined;
   const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
 
-  if (!item.done) return [head, `${DIM}  写入中…${RESET}`];
+  if (!item.done) return [...head, `${DIM}  写入中…${RESET}`];
 
   const [summary, ...rest] = item.output.split("\n");
   const lines: string[] = [`${DIM}${summary ?? ""}${RESET}`];
@@ -352,7 +381,7 @@ export function renderDiffTool(item: ToolItem, width: number): string[] {
   });
 
   return [
-    head,
+    ...head,
     ...lines,
     ...foldTail(colored, DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
   ];
@@ -415,7 +444,7 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
   const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
 
   if (!item.done) {
-    const lines = [head];
+    const lines = [...head];
     if (progress === undefined || progress.files.length === 0) {
       lines.push(`${DIM}  构建补丁…${RESET}`);
       return lines;
@@ -427,16 +456,14 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
           ? `${file.path} → ${file.destination}`
           : file.path;
       const badge = file.added > 0 || file.removed > 0 ? formatStatBadge(file) : "";
-      const badgeWidth = visibleWidth(badge);
-      // 前缀 = 两格缩进 + 标记 + 空格。路径按剩余预算截断，保证整行（含徽标）
-      // 不超过 width —— 否则徽标会被屏幕层截掉，而这行最该看见的就是它。
-      const pathBudget = Math.max(0, width - (2 + visibleWidth(marker) + 1) - (badgeWidth > 0 ? badgeWidth + 1 : 0));
-      const path = truncateAnsi(rawPath, pathBudget);
-      // 极窄终端（连前缀+徽标都放不下）兜底：宁可砍掉整行，也不返回超宽字符串。
+      // 路径折行（续行对齐到路径起点），徽标挑到最后一行右端 —— 长路径不再
+      // 把徽标顶出行外，也不再被截成半截认不出是哪个文件。
       lines.push(
-        truncateAnsi(
-        `${fg(patchKindColor(file.kind))}  ${marker} ${path}${RESET}` +
-            (badgeWidth > 0 ? ` ${DIM}${badge}${RESET}` : ""),
+        ...withBadge(
+          wrapHanging(`${fg(patchKindColor(file.kind))}  ${marker} `, rawPath, width).map(
+            (line) => `${line}${RESET}`,
+          ),
+          badge,
           width,
         ),
       );
@@ -449,7 +476,7 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
 
   if (!item.ok) {
     const body = item.output.split("\n");
-    return [head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, COLOR.error, item.expanded)];
+    return [...head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, COLOR.error, item.expanded)];
   }
 
   const [summary, ...operations] = item.output.split("\n");
@@ -458,12 +485,12 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
     .map((line) => {
       const marker = line[0] ?? "?";
       const color = marker === "A" ? COLOR.diffAdd : marker === "D" ? COLOR.diffRemove : COLOR.tool;
-      // 先拼成纯文本再按整行预算截断，最后上色 —— 否则 2 格缩进会顶破极窄终端
-      return `${fg(color)}${truncateAnsi(`  ${line}`, width)}${RESET}`;
+      // 操作清单同样折行：路径折在缩进之后，读起来仍然是一条一条对齐的
+      return wrapHanging(`${fg(color)}  `, line, width).map((entry) => `${entry}${RESET}`);
     });
   return [
-    head,
-    `${DIM}${truncateAnsi(summary ?? "", width)}${RESET}`,
-    ...foldTail(colored, DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
+    ...head,
+    ...wrapHanging(`${DIM}`, summary ?? "", width).map((line) => `${line}${RESET}`),
+    ...foldTail(colored.flat(), DIFF_DISPLAY_LINES, COLOR.tool, item.expanded),
   ];
 }

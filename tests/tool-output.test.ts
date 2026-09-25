@@ -11,7 +11,7 @@ import {
   MAX_READ_CHARS,
   MAX_READ_LINES,
 } from "../src/tools/files.ts";
-import { renderDiffTool } from "../src/tui/render-tools.ts";
+import { renderBashTool, renderDiffTool } from "../src/tui/render-tools.ts";
 import { visibleWidth } from "../src/tui/ansi.ts";
 import type { ToolItem } from "../src/tui/renderers.ts";
 import type { ToolCtx } from "../src/tools/types.ts";
@@ -248,10 +248,11 @@ describe("diff 统计徽标", () => {
       expanded: false,
     };
 
-    const [head] = renderDiffTool(item, 30);
-    const plain = head!.replace(/\x1b\[[0-9;]*m/g, "");
+    // 摘要折行之后徽标落在**最后一行**右端，所以整块里找，而不是只看第一行。
+    const lines = renderDiffTool(item, 30);
+    const plain = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
     expect(plain).toContain("+1 -1"); // 徽标不能被挤掉
-    expect(visibleWidth(head!)).toBeLessThanOrEqual(30);
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(30);
   });
 
   test("折叠时保留开头（改动在中段，头尾折叠会把它藏起来）", () => {
@@ -338,4 +339,61 @@ describe("read_file 截断", () => {
     expect(out).toContain("1\ta");
     expect(out).not.toContain("还有");
   });
+describe("bash 头部 · 长命令折行", () => {
+  const command =
+    'for i in 1 2 3; do echo "a very long line $i" | tee /tmp/some/deep/path/out.txt; done';
+
+  function bashItem(): ToolItem {
+    return {
+      kind: "tool",
+      callId: "c1",
+      name: "bash",
+      args: { command },
+      output: "",
+      ok: true,
+      done: false,
+      progress: "tick",
+      expanded: false,
+    };
+  }
+
+  test("命令折行而不是截断 —— 后半段往往才是关键参数", () => {
+    const lines = renderBashTool(bashItem(), 50);
+    const plain = lines.map((line) => Bun.stripANSI(line));
+    const joined = plain.join("");
+    // 整条命令都在（去掉折行带来的空白）
+    expect(joined.replace(/\s+/g, "")).toContain(command.replace(/\s+/g, ""));
+    // 确实折了不止一行
+    expect(plain.filter((line) => line.includes("tee") || line.includes("out.txt")).length).toBeGreaterThan(0);
+    expect(plain.length).toBeGreaterThan(2);
+  });
+
+  test("续行对齐到命令起点（悬挂缩进），不是行首", () => {
+    const lines = renderBashTool(bashItem(), 50);
+    const plain = lines.map((line) => Bun.stripANSI(line));
+    const first = plain[0]!;
+    const commandStart = first.indexOf("for i in");
+    expect(commandStart).toBeGreaterThan(0);
+
+    const continuation = plain[1]!;
+    expect(continuation.slice(0, commandStart).trim()).toBe("");
+    expect(continuation.indexOf(continuation.trimStart())).toBe(commandStart);
+  });
+
+  test("每一行都不超过 width", () => {
+    for (const width of [20, 30, 40, 50, 80, 120]) {
+      for (const line of renderBashTool(bashItem(), width)) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  test("短命令不折行", () => {
+    const short = { ...bashItem(), args: { command: "ls -la" } };
+    const plain = renderBashTool(short, 80).map((line) => Bun.stripANSI(line));
+    expect(plain[0]).toContain("ls -la");
+    expect(plain[0]).not.toContain("…");
+  });
+});
+
 });
