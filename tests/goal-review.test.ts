@@ -116,7 +116,7 @@ describe("Goal P3 · read-only reviewer", () => {
       }),
     );
     expect(reviewResultRejection(result, ["测试通过"])).toEqual([
-      "验收条件未被证明：测试通过",
+      "acceptance criterion not proven: 测试通过",
     ]);
   });
 });

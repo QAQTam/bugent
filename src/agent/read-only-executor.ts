@@ -96,13 +96,13 @@ export function createReadOnlyAgentExecutor(
     async run(context: AgentExecutionContext) {
       const kind = context.spec.identity.kind;
       if (kind !== "reviewer" && kind !== "explorer") {
-        throw new Error(`read-only executor 只支持 reviewer/explorer，收到 ${kind}`);
+        throw new Error(`read-only executor only supports reviewer/explorer, received ${kind}`);
       }
       if (context.spec.sandbox.authority !== "read-only") {
-        throw new Error(`read-only executor 要求 authority=read-only，收到 ${context.spec.sandbox.authority}`);
+        throw new Error(`read-only executor requires authority=read-only, received ${context.spec.sandbox.authority}`);
       }
       if (context.spec.sandbox.capabilities.includes("fs.write")) {
-        throw new Error("read-only executor 不能持有 fs.write capability");
+        throw new Error("read-only executor cannot hold the fs.write capability");
       }
       if (context.signal.aborted) {
         return {

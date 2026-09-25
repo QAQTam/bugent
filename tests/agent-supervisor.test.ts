@@ -240,7 +240,7 @@ describe("P7-B · AgentSupervisor / Handle / EventBus", () => {
           sessionId: "session-main-1",
         }),
       ),
-    ).rejects.toThrow(/不能复用父 session/);
+    ).rejects.toThrow(/cannot reuse the parent session/);
     await supervisor.dispose();
   });
 
@@ -251,7 +251,7 @@ describe("P7-B · AgentSupervisor / Handle / EventBus", () => {
       rootId: "main-ext",
     });
 
-    await expect(supervisor.spawn(child)).rejects.toThrow(/父 agent 不存在/);
+    await expect(supervisor.spawn(child)).rejects.toThrow(/parent agent does not exist/);
 
     const handle = await supervisor.spawn({
       ...child,

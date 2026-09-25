@@ -155,7 +155,7 @@ describe("P7-D · read-only reviewer/explorer executor", () => {
     );
 
     expect(result.status).toBe("error");
-    expect(result.summary).toMatch(/只支持 reviewer\/explorer/);
+    expect(result.summary).toMatch(/only supports reviewer\/explorer/);
     await transport.dispose();
   });
   /**

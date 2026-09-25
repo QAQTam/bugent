@@ -65,7 +65,7 @@ async function readWindow(
 
     let entry = `${lineNumber}\t${line}`;
     if (entry.length > options.maxChars) {
-      entry = `${entry.slice(0, options.maxChars)}…[本行超长，已截断]`;
+      entry = `${entry.slice(0, options.maxChars)}…[line too long, truncated]`;
       clippedLine = true;
     }
     entries.push(entry);
@@ -173,7 +173,7 @@ export const READ_FILE_PARAMETERS: JSONSchema = {
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
-    throw new Error(`${field} 必须是字符串`);
+    throw new Error(`${field} must be a string`);
   }
   return value;
 }
@@ -181,7 +181,7 @@ function requireString(value: unknown, field: string): string {
 function optionalPositiveInt(value: unknown, field: string): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${field} 必须是正整数`);
+    throw new Error(`${field} must be a positive integer`);
   }
   return value;
 }
@@ -215,12 +215,12 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
 
       // 目录单独判断：否则 size 是 0，会掉进"文件不存在"分支，报错完全误导
       if (statSync(absolute, { throwIfNoEntry: false })?.isDirectory() === true) {
-        throw new Error(`这是一个目录，不是文件：${display}。用 bash 的 ls 查看里面有什么`);
+        throw new Error(`not a file, this is a directory: ${display}. Use bash ls to see what is inside`);
       }
 
       const file = Bun.file(absolute);
       if (!(await file.exists())) {
-        throw new Error(`文件不存在：${display}`);
+        throw new Error(`file not found: ${display}`);
       }
 
       let window: ReadWindow;
@@ -233,16 +233,16 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
         });
       } catch (error) {
         if (error instanceof Error && error.message === "__BINARY__") {
-          throw new Error(`拒绝读取二进制文件：${display}`);
+          throw new Error(`refusing to read a binary file: ${display}`);
         }
         throw error;
       }
 
       if (window.entries.length === 0 && window.reachedEnd) {
         if (offset > 1) {
-          throw new Error(`offset ${offset} 超出文件总行数 ${window.totalLines}`);
+          throw new Error(`offset ${offset} is beyond the file's ${window.totalLines} lines`);
         }
-        return `# ${display}（空文件）`;
+        return `# ${display} (empty file)`;
       }
 
       const numbered = window.entries.join("\n");
@@ -252,21 +252,21 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
       const notes: string[] = [];
       if (totalKnown) {
         if (lastLine < window.totalLines) {
-          notes.push(`还有 ${window.totalLines - lastLine} 行未显示，用 offset=${lastLine + 1} 继续读`);
+          notes.push(`${window.totalLines - lastLine} more lines not shown; continue with offset=${lastLine + 1}`);
         }
       } else {
         if (window.hitScanLimit) {
-          notes.push(`文件很大，已扫描 ${MAX_READ_SCAN_BYTES} 字节后停下`);
+          notes.push(`file is large; stopped after scanning ${MAX_READ_SCAN_BYTES} bytes`);
         }
-        notes.push(`用 offset=${lastLine + 1} 继续往后读`);
+        notes.push(`continue with offset=${lastLine + 1}`);
       }
-      if (window.clippedLine) notes.push("其中有单行过长，已被截断");
+      if (window.clippedLine) notes.push("one line was too long and has been truncated");
 
       const header = totalKnown
-        ? `# ${display}（共 ${window.totalLines} 行${
-            notes.length > 0 ? `，已显示 ${offset}-${lastLine}` : ""
+        ? `# ${display} (${window.totalLines} lines${
+            notes.length > 0 ? `, showing ${offset}-${lastLine}` : ""
           }）`
-        : `# ${display}（已显示 ${offset}-${lastLine}，未读到文件末尾）`;
+        : `# ${display} (showing ${offset}-${lastLine}, not yet at end of file)`;
       const footer = notes.length > 0 ? `\n\n[${notes.join("；")}]` : "";
 
       return `${header}\n${numbered}${footer}`;
@@ -316,7 +316,7 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
 
       const bytes = Buffer.byteLength(content, "utf8");
       if (bytes > MAX_WRITE_BYTES) {
-        throw new Error(`内容过大：${bytes} 字节，上限 ${MAX_WRITE_BYTES}`);
+        throw new Error(`content too large: ${bytes} bytes, limit ${MAX_WRITE_BYTES}`);
       }
 
       const absolute = resolveWithin(ctx.cwd, rawPath);
@@ -355,8 +355,8 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
 
       const lineCount = content.split("\n").length;
       const summary = existed
-        ? `已覆盖 ${display}（${bytes} 字节，${lineCount} 行）`
-        : `已创建 ${display}（${bytes} 字节，${lineCount} 行）`;
+        ? `overwrote ${display} (${bytes} bytes, ${lineCount} lines)`
+        : `created ${display} (${bytes} bytes, ${lineCount} lines)`;
 
       // 新建文件不走 diff：空内容 split 出来是一个空行，会被当成"删了 1 行"，
       // 于是新文件显示成 `+3 -1`。直接全标成新增才对。
@@ -423,15 +423,15 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
 
     async run(input: EditFileInput, ctx: ToolCtx): Promise<string> {
       const rawPath = requireString(input.path, "path");
-      if (rawPath.length === 0) throw new Error("path 不能为空");
+      if (rawPath.length === 0) throw new Error("path must not be empty");
       const oldString = requireString(input.old_string, "old_string");
       const newString = requireString(input.new_string, "new_string");
-      if (oldString.length === 0) throw new Error("old_string 不能为空");
+      if (oldString.length === 0) throw new Error("old_string must not be empty");
       if (oldString === newString) {
-        throw new Error("old_string 与 new_string 相同，无需修改");
+        throw new Error("old_string and new_string are identical; nothing to change");
       }
       if (input.replace_all !== undefined && typeof input.replace_all !== "boolean") {
-        throw new Error("replace_all 必须是 boolean");
+        throw new Error("replace_all must be a boolean");
       }
 
       const replaceAll = input.replace_all === true;
@@ -439,22 +439,22 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       const display = relativeTo(ctx.cwd, absolute);
 
       const fileStat = await stat(absolute).catch(() => undefined);
-      if (fileStat === undefined) throw new Error(`文件不存在：${display}`);
-      if (!fileStat.isFile()) throw new Error(`不是普通文件：${display}`);
+      if (fileStat === undefined) throw new Error(`file not found: ${display}`);
+      if (!fileStat.isFile()) throw new Error(`not a regular file: ${display}`);
 
       const original = await Bun.file(absolute).text();
       if (original.includes("\0")) {
-        throw new Error(`拒绝编辑二进制文件：${display}`);
+        throw new Error(`refusing to edit a binary file: ${display}`);
       }
       const occurrences = countOccurrences(original, oldString);
 
       if (occurrences === 0) {
-        throw new Error(`在 ${display} 中找不到 old_string，请先 read_file 确认原文`);
+        throw new Error(`old_string not found in ${display}; read the file first to confirm the exact text`);
       }
       if (occurrences > 1 && !replaceAll) {
         throw new Error(
-          `old_string 在 ${display} 中匹配到 ${occurrences} 处，不唯一。` +
-            `请提供更多上下文使其唯一，或设置 replace_all=true`,
+          `old_string matches ${occurrences} times in ${display}.` +
+            `Add more context to make it unique, or set replace_all=true`,
         );
       }
 
@@ -468,7 +468,7 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
           })();
       const updatedBytes = Buffer.byteLength(updated, "utf8");
       if (updatedBytes > MAX_WRITE_BYTES) {
-        throw new Error(`编辑后内容过大：${updatedBytes} 字节，上限 ${MAX_WRITE_BYTES}`);
+        throw new Error(`edited content too large: ${updatedBytes} bytes, limit ${MAX_WRITE_BYTES}`);
       }
 
       const temp = `${absolute}.bugent-tmp-${process.pid}-${Date.now()}`;
@@ -494,7 +494,7 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       const replaced = replaceAll ? occurrences : 1;
       return formatDiff(
         compactDiff(diffLines(original, updated)),
-        `已编辑 ${display}（替换 ${replaced} 处）`,
+        `edited ${display} (${replaced} replacements)`,
       );
     },
   };

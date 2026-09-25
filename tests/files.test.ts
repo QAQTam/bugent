@@ -41,7 +41,7 @@ describe("P7 · read_file", () => {
     const out = await readTool.run({ path: "a.txt" }, ctxFor(cwd));
 
     // 3 行内容 + 结尾换行 —— 不再把结尾换行算成第 4 行（与 wc -l 一致）
-    expect(out).toContain("共 3 行");
+    expect(out).toContain("(3 lines");
     expect(out).toContain("1\tline1");
     expect(out).toContain("3\tline3");
   });
@@ -59,20 +59,20 @@ describe("P7 · read_file", () => {
 
   test("文件不存在时报错", async () => {
     const cwd = await workspace();
-    await expect(readTool.run({ path: "nope.txt" }, ctxFor(cwd))).rejects.toThrow(/不存在/);
+    await expect(readTool.run({ path: "nope.txt" }, ctxFor(cwd))).rejects.toThrow(/not found/);
   });
 
   test("拒绝读取二进制文件", async () => {
     const cwd = await workspace();
     await writeFile(join(cwd, "bin.dat"), Buffer.from([0x00, 0x01, 0x02, 0x41]));
 
-    await expect(readTool.run({ path: "bin.dat" }, ctxFor(cwd))).rejects.toThrow(/二进制/);
+    await expect(readTool.run({ path: "bin.dat" }, ctxFor(cwd))).rejects.toThrow(/binary file/);
   });
 
   test("非法参数被拒绝", async () => {
     const cwd = await workspace();
-    await expect(readTool.run({ path: 123 }, ctxFor(cwd))).rejects.toThrow(/必须是字符串/);
-    await expect(readTool.run({ path: "a.txt", offset: 0 }, ctxFor(cwd))).rejects.toThrow(/正整数/);
+    await expect(readTool.run({ path: 123 }, ctxFor(cwd))).rejects.toThrow(/must be a string/);
+    await expect(readTool.run({ path: "a.txt", offset: 0 }, ctxFor(cwd))).rejects.toThrow(/positive integer/);
   });
 });
 
@@ -82,7 +82,7 @@ describe("P7 · write_file", () => {
 
     const out = await writeTool.run({ path: "nested/deep/b.txt", content: "hello" }, ctxFor(cwd));
 
-    expect(out).toContain("已创建");
+    expect(out).toContain("created");
     expect(out).toContain("+hello"); // 新内容以 diff 形式呈现
     expect(await readFile(join(cwd, "nested/deep/b.txt"), "utf8")).toBe("hello");
   });
@@ -119,7 +119,7 @@ describe("P7 · write_file", () => {
 
   test("非法参数被拒绝", async () => {
     const cwd = await workspace();
-    await expect(writeTool.run({ path: "a.txt" }, ctxFor(cwd))).rejects.toThrow(/content 必须是字符串/);
+    await expect(writeTool.run({ path: "a.txt" }, ctxFor(cwd))).rejects.toThrow(/content must be a string/);
   });
 });
 
@@ -130,7 +130,7 @@ describe("P7 · edit_file", () => {
 
     const out = await editTool.run({ path: "a.txt", old_string: "beta", new_string: "BETA" }, ctxFor(cwd));
 
-    expect(out).toContain("替换 1 处");
+    expect(out).toContain("1 replacements");
     expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("alpha\nBETA\ngamma\n");
   });
 
@@ -140,7 +140,7 @@ describe("P7 · edit_file", () => {
 
     await expect(
       editTool.run({ path: "a.txt", old_string: "zzz", new_string: "x" }, ctxFor(cwd)),
-    ).rejects.toThrow(/找不到 old_string/);
+    ).rejects.toThrow(/old_string not found/);
   });
 
   test("多处匹配且未开 replace_all 时报错", async () => {
@@ -149,7 +149,7 @@ describe("P7 · edit_file", () => {
 
     await expect(
       editTool.run({ path: "a.txt", old_string: "x", new_string: "y" }, ctxFor(cwd)),
-    ).rejects.toThrow(/不唯一/);
+    ).rejects.toThrow(/matches \d+ times/);
   });
 
   test("replace_all 替换全部匹配", async () => {
@@ -161,7 +161,7 @@ describe("P7 · edit_file", () => {
       ctxFor(cwd),
     );
 
-    expect(out).toContain("替换 2 处");
+    expect(out).toContain("2 replacements");
     expect(await readFile(join(cwd, "a.txt"), "utf8")).toBe("y\ny\n");
   });
 
@@ -199,7 +199,7 @@ describe("P7 · edit_file", () => {
 
     await expect(
       editTool.run({ path: "bin.dat", old_string: "A", new_string: "B" }, ctxFor(cwd)),
-    ).rejects.toThrow(/二进制/);
+    ).rejects.toThrow(/binary file/);
   });
 
   test("replace_all 非 boolean 时拒绝", async () => {
@@ -216,7 +216,7 @@ describe("P7 · edit_file", () => {
         },
         ctxFor(cwd),
       ),
-    ).rejects.toThrow(/replace_all 必须是 boolean/);
+    ).rejects.toThrow(/replace_all must be a boolean/);
   });
 
   test("空 old_string 与无变化替换被拒绝", async () => {
@@ -224,25 +224,25 @@ describe("P7 · edit_file", () => {
     await writeFile(join(cwd, "a.txt"), "abc");
 
     await expect(editTool.run({ path: "a.txt", old_string: "", new_string: "x" }, ctxFor(cwd))).rejects.toThrow(
-      /不能为空/,
+      /must not be empty/,
     );
     await expect(
       editTool.run({ path: "a.txt", old_string: "abc", new_string: "abc" }, ctxFor(cwd)),
-    ).rejects.toThrow(/无需修改/);
+    ).rejects.toThrow(/nothing to change/);
   });
 });
 
 describe("P7 · 路径约束", () => {
   test("../ 逃逸被拒绝", async () => {
     const cwd = await workspace();
-    await expect(readTool.run({ path: "../secret.txt" }, ctxFor(cwd))).rejects.toThrow(/越界/);
+    await expect(readTool.run({ path: "../secret.txt" }, ctxFor(cwd))).rejects.toThrow(/escapes the workspace/);
   });
 
   test("绝对路径指向工作区外被拒绝", async () => {
     const cwd = await workspace();
     await expect(
       writeTool.run({ path: "/tmp/bugent-should-not-be-written.txt", content: "x" }, ctxFor(cwd)),
-    ).rejects.toThrow(/越界/);
+    ).rejects.toThrow(/escapes the workspace/);
   });
 
   test("符号链接逃逸被拒绝（读取）", async () => {
@@ -251,7 +251,7 @@ describe("P7 · 路径约束", () => {
     await writeFile(join(outside, "target.txt"), "secret");
     await symlink(outside, join(cwd, "link"));
 
-    await expect(readTool.run({ path: "link/target.txt" }, ctxFor(cwd))).rejects.toThrow(/越界/);
+    await expect(readTool.run({ path: "link/target.txt" }, ctxFor(cwd))).rejects.toThrow(/escapes the workspace/);
   });
 
   test("符号链接逃逸被拒绝（新建文件）", async () => {
@@ -259,7 +259,7 @@ describe("P7 · 路径约束", () => {
     const outside = await workspace("bugent-outside-");
     await symlink(outside, join(cwd, "link"));
 
-    await expect(writeTool.run({ path: "link/new.txt", content: "x" }, ctxFor(cwd))).rejects.toThrow(/越界/);
+    await expect(writeTool.run({ path: "link/new.txt", content: "x" }, ctxFor(cwd))).rejects.toThrow(/escapes the workspace/);
   });
 
   test("工作目录内的绝对路径是允许的", async () => {
@@ -282,8 +282,8 @@ describe("P7 · read_file 的边界情况", () => {
     await mkdir(join(cwd, "docs"), { recursive: true });
     await writeFile(join(cwd, "docs/README.md"), "hi");
 
-    await expect(readTool.run({ path: "docs" }, ctxFor(cwd))).rejects.toThrow(/这是一个目录/);
-    await expect(readTool.run({ path: "docs/" }, ctxFor(cwd))).rejects.toThrow(/这是一个目录/);
+    await expect(readTool.run({ path: "docs" }, ctxFor(cwd))).rejects.toThrow(/this is a directory/);
+    await expect(readTool.run({ path: "docs/" }, ctxFor(cwd))).rejects.toThrow(/this is a directory/);
   });
 
   test("无后缀文件按文本正常读", async () => {
@@ -300,22 +300,22 @@ describe("P7 · read_file 的边界情况", () => {
     const head = Buffer.from("a".repeat(64 * 1024), "utf8");
     await writeFile(join(cwd, "sneaky.bin"), Buffer.concat([head, Buffer.from([0x00, 0x01])]));
 
-    await expect(readTool.run({ path: "sneaky.bin" }, ctxFor(cwd))).rejects.toThrow(/二进制/);
+    await expect(readTool.run({ path: "sneaky.bin" }, ctxFor(cwd))).rejects.toThrow(/binary file/);
   });
 
   test("行数与 wc -l 一致：结尾换行不算额外一行", async () => {
     const cwd = await workspace();
     await writeFile(join(cwd, "a.txt"), "one\ntwo\nthree\n");
-    expect(await readTool.run({ path: "a.txt" }, ctxFor(cwd))).toContain("共 3 行");
+    expect(await readTool.run({ path: "a.txt" }, ctxFor(cwd))).toContain("(3 lines");
 
     await writeFile(join(cwd, "b.txt"), "one\ntwo\nthree");
-    expect(await readTool.run({ path: "b.txt" }, ctxFor(cwd))).toContain("共 3 行");
+    expect(await readTool.run({ path: "b.txt" }, ctxFor(cwd))).toContain("(3 lines");
   });
 
   test("空文件给出明确提示", async () => {
     const cwd = await workspace();
     await writeFile(join(cwd, "empty.txt"), "");
-    expect(await readTool.run({ path: "empty.txt" }, ctxFor(cwd))).toContain("空文件");
+    expect(await readTool.run({ path: "empty.txt" }, ctxFor(cwd))).toContain("(empty file)");
   });
 
   test("大文件流式读前 N 行，而不是直接拒绝", async () => {
@@ -353,7 +353,7 @@ describe("P7 · read_file 的边界情况", () => {
     await writeFile(join(cwd, "small.txt"), "a\nb\nc\n");
 
     await expect(readTool.run({ path: "small.txt", offset: 999 }, ctxFor(cwd))).rejects.toThrow(
-      /offset 999 超出文件总行数 3/,
+      /offset 999 is beyond the file's 3 lines/,
     );
   });
 });

@@ -260,29 +260,29 @@ export function validateAgentProfile(
   capabilities: readonly AgentCapability[],
 ): void {
   if (authority === "none" && capabilities.length > 0) {
-    throw new Error("agent profile: authority none 不能授予任何工具 capability");
+    throw new Error("agent profile: authority none cannot grant any tool capability");
   }
 
   const allowed = new Set(KIND_ALLOWED_CAPABILITIES[kind]);
   for (const capability of capabilities) {
     if (!allowed.has(capability)) {
-      throw new Error(`agent profile: ${kind} 不允许 capability ${capability}`);
+      throw new Error(`agent profile: ${kind} does not allow capability ${capability}`);
     }
     if (!authorityAtLeast(authority, MINIMUM_AUTHORITY[capability])) {
       throw new Error(
-        `agent profile: authority ${authority} 不足以授予 capability ${capability}`,
+        `agent profile: authority ${authority} cannot grant capability ${capability}`,
       );
     }
   }
 
   if (hasCapability(capabilities, "review.write") && kind !== "reviewer") {
-    throw new Error("agent profile: review.write 只能授予 reviewer");
+    throw new Error("agent profile: review.write can only be granted to reviewer");
   }
   if (
     hasCapability(capabilities, "fs.write") &&
     (kind === "reviewer" || kind === "explorer")
   ) {
-    throw new Error(`agent profile: ${kind} 永久只读，不能授予 fs.write`);
+    throw new Error(`agent profile: ${kind} is permanently read-only and cannot be granted fs.write`);
   }
 }
 
@@ -291,7 +291,7 @@ export function assertAuthorityAttenuation(
   parent: AgentAuthority,
 ): void {
   if (!authorityAtMost(child, parent)) {
-    throw new Error(`agent profile: 子代理 authority ${child} 超过父代理 ${parent}`);
+    throw new Error(`agent profile: subagent authority ${child} exceeds the parent ${parent}`);
   }
 }
 
@@ -302,6 +302,6 @@ export function assertCapabilityAttenuation(
   const parentSet = new Set(parent);
   const escaped = child.filter((capability) => !parentSet.has(capability));
   if (escaped.length > 0) {
-    throw new Error(`agent profile: 子代理 capability 超过父代理：${escaped.join(", ")}`);
+    throw new Error(`agent profile: subagent capability exceeds the parent: ${escaped.join(", ")}`);
   }
 }

@@ -131,7 +131,7 @@ TASKS.study = STUDY_TASK;
 /* ------------------------------------------------------------------ */
 
 type ToolSetName = "zh-baseline" | "en-short" | "core" | "placeholder" | "none";
-type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2" | "pe-min" | "pe-mid" | "pe-narr" | "pe-compact" | "pe-borrow" | "pe-borrow2";
+type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2" | "pe-min" | "pe-mid" | "pe-narr" | "pe-compact" | "pe-borrow" | "pe-borrow2" | "pe-native";
 
 interface VariantSpec {
   readonly id: string;
@@ -361,6 +361,12 @@ const VARIANTS: readonly VariantSpec[] = [
     developerText: "Before an action that is hard to reverse or touches shared state, confirm first. An earlier approval never authorizes unrelated work.\nWhile working, send an update only for a discovery, a tradeoff, or a blocker. Never narrate routine reads or edits.",
   },
   {
+    id: "pe-native",
+    label: "PE + 工具中立 + 原生优先（当前仓库版本）",
+    tools: "en-short",
+    system: "pe-native",
+  },
+  {
     id: "pe-forced-debug",
     label: "PE + 强制句式（简单题，看回答是否还短）",
     tools: "en-short",
@@ -416,6 +422,7 @@ const SYSTEM_FILES: Record<SystemName, string> = {
   "pe-compact": "system-pe-compact.md",
   "pe-borrow": "system-pe-borrow.md",
   "pe-borrow2": "system-pe-borrow2.md",
+  "pe-native": "system-pe-native.md",
 };
 
 async function loadSystem(name: SystemName): Promise<string> {
@@ -610,7 +617,7 @@ function clientFor(extraBody: Record<string, unknown>): ReturnType<typeof create
 
 const systems = Object.fromEntries(
   await Promise.all(
-    (["baseline", "new", "pe", "pe-forced", "pe-forced2", "pe-min", "pe-mid", "pe-narr", "pe-compact", "pe-borrow", "pe-borrow2"] as SystemName[]).map(
+    (["baseline", "new", "pe", "pe-forced", "pe-forced2", "pe-min", "pe-mid", "pe-narr", "pe-compact", "pe-borrow", "pe-borrow2", "pe-native"] as SystemName[]).map(
       async (name) => [name, await loadSystem(name)] as const,
     ),
   ),

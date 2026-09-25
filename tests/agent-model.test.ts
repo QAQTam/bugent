@@ -44,7 +44,7 @@ describe("P7-A · AgentKind / Authority / Capability", () => {
     expect(authorityAtLeast("full", "workspace-write")).toBe(true);
     expect(authorityAtLeast("read-only", "workspace-write")).toBe(false);
     expect(() => assertAuthorityAttenuation("read-only", "workspace-write")).not.toThrow();
-    expect(() => assertAuthorityAttenuation("full", "read-only")).toThrow(/超过父代理/);
+    expect(() => assertAuthorityAttenuation("full", "read-only")).toThrow(/exceeds the parent/);
 
     expect(capabilitiesAreSubset(["fs.read"], ["fs.read", "process.exec"])).toBe(true);
     expect(capabilitiesAreSubset(["fs.write"], ["fs.read", "process.exec"])).toBe(false);
@@ -54,21 +54,21 @@ describe("P7-A · AgentKind / Authority / Capability", () => {
     )).toEqual(["fs.read"]);
     expect(() =>
       assertCapabilityAttenuation(["fs.write"], ["fs.read", "process.exec"]),
-    ).toThrow(/超过父代理/);
+    ).toThrow(/exceeds the parent/);
   });
 
   test("reviewer and explorer cannot be promoted into writers or network users", () => {
     expect(() => validateAgentProfile("reviewer", "read-only", ["fs.write"])).toThrow(
-      /不允许 capability fs.write/,
+      /does not allow capability fs.write/,
     );
     expect(() => validateAgentProfile("explorer", "read-only", ["network"])).toThrow(
-      /不允许 capability network/,
+      /does not allow capability network/,
     );
     expect(() => validateAgentProfile("reviewer", "read-only", ["goal.write"])).toThrow(
-      /不允许 capability goal.write/,
+      /does not allow capability goal.write/,
     );
     expect(() => validateAgentProfile("reviewer", "read-only", ["agent.spawn"])).toThrow(
-      /不允许 capability agent.spawn/,
+      /does not allow capability agent.spawn/,
     );
   });
 
@@ -78,13 +78,13 @@ describe("P7-A · AgentKind / Authority / Capability", () => {
     ).not.toThrow();
     expect(() =>
       validateAgentProfile("explorer", "read-only", ["fs.read", "review.write"]),
-    ).toThrow(/不允许 capability review.write/);
+    ).toThrow(/does not allow capability review.write/);
   });
 
   test("authority none grants no capabilities", () => {
     expect(() => validateAgentProfile("main", "none", [])).not.toThrow();
     expect(() => validateAgentProfile("main", "none", ["fs.read"])).toThrow(
-      /authority none 不能授予/,
+      /authority none cannot grant/,
     );
   });
 });

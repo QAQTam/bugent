@@ -254,7 +254,7 @@ describe("agent model tools", () => {
     );
     await expect(
       otherTools.get(GET_SUBAGENT_TOOL_NAME)!.run({ agent_id: first.id }, CTX),
-    ).rejects.toThrow(/不属于当前 agent/);
+    ).rejects.toThrow(/does not belong to this agent/);
 
     const readOnlyTools = new Map(
       createAgentTools({

@@ -147,7 +147,7 @@ const FOLLOWUP_PARAMETERS: JSONSchema = {
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} 必须是 object`);
+    throw new Error(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
 }
@@ -155,7 +155,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function requiredString(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${key} 必须是非空字符串`);
+    throw new Error(`${key} must be a non-empty string`);
   }
   return value.trim();
 }
@@ -167,7 +167,7 @@ function optionalPositiveInteger(
   const value = source[key];
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
-    throw new Error(`${key} 必须是正的安全整数`);
+    throw new Error(`${key} must be a positive safe integer`);
   }
   return value as number;
 }
@@ -178,10 +178,10 @@ function optionalStringArray(
 ): string[] | undefined {
   const value = source[key];
   if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw new Error(`${key} 必须是字符串数组`);
+  if (!Array.isArray(value)) throw new Error(`${key} must be an array of strings`);
   return value.map((item, index) => {
     if (typeof item !== "string" || item.trim().length === 0) {
-      throw new Error(`${key}[${index}] 必须是非空字符串`);
+      throw new Error(`${key}[${index}] must be a non-empty string`);
     }
     return item.trim();
   });
@@ -243,23 +243,23 @@ function terminalNotification(event: {
 export function createAgentTools(options: AgentToolsOptions): Tool[] {
   const parent = options.parent;
   if (!hasCapability(parent.capabilities, "agent.spawn")) {
-    throw new Error("agent tools: 父代理没有 agent.spawn capability");
+    throw new Error("agent tools: parent has no agent.spawn capability");
   }
 
   const idFactory = options.idFactory ?? ((prefix: string) => `${prefix}_${randomUUID()}`);
 
   function requireOwned(agentId: string): AgentHandle {
     const handle = options.transport.get(agentId);
-    if (handle === undefined) throw new Error(`未知子代理：${agentId}`);
+    if (handle === undefined) throw new Error(`unknown subagent: ${agentId}`);
     if (handle.parentId !== parent.agentId) {
-      throw new Error(`子代理 ${agentId} 不属于当前 agent`);
+      throw new Error(`subagent ${agentId} does not belong to this agent`);
     }
     return handle;
   }
 
   function assertContext(ctx: ToolCtx): void {
     if (ctx.sessionId !== parent.sessionId) {
-      throw new Error("agent tools: 当前 ToolCtx 不属于父 session");
+      throw new Error("agent tools: ToolCtx does not belong to the parent session");
     }
   }
 
@@ -278,7 +278,7 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
       const source = record(input, "spawn_subagent input");
       const kind = requiredString(source, "kind");
       if (!SPAWNABLE_KINDS.includes(kind as (typeof SPAWNABLE_KINDS)[number])) {
-        throw new Error(`spawn_subagent kind 必须是 ${SPAWNABLE_KINDS.join(" / ")}`);
+        throw new Error(`spawn_subagent kind must be ${SPAWNABLE_KINDS.join(" / ")}`);
       }
       const task = requiredString(source, "task");
       const title =
@@ -439,7 +439,7 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
       const handle = requireOwned(requiredString(source, "agent_id"));
       const type = requiredString(source, "type");
       if (type !== "task.answer" && type !== "task.artifact" && type !== "task.progress") {
-        throw new Error("send_subagent type 非法");
+        throw new Error("send_subagent type is invalid");
       }
       await options.transport.send(handle, { type, payload: source.payload });
       return { delivered: true, agent_id: handle.id, type };
@@ -547,10 +547,10 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
       assertContext(ctx);
       const source = record(input, "apply_subagent_patch input");
       const handle = requireOwned(requiredString(source, "agent_id"));
-      if (handle.kind !== "worker") throw new Error("apply_subagent_patch 只能应用 worker 结果");
+      if (handle.kind !== "worker") throw new Error("apply_subagent_patch can only apply worker results");
       const result = handle.result;
       if (result === undefined || result.status !== "completed") {
-        throw new Error("worker 尚未成功完成，不能应用 patch");
+        throw new Error("the worker has not finished successfully; cannot apply the patch");
       }
       const workerOutput = result.data as WorkerAgentOutput | undefined;
       if (
@@ -559,7 +559,7 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         typeof workerOutput.diffHash !== "string" ||
         typeof workerOutput.patchArtifact !== "string"
       ) {
-        throw new Error("worker 没有可应用的 patch metadata");
+        throw new Error("the worker has no applicable patch metadata");
       }
       const artifact = result.artifacts.find(
         (candidate) =>
@@ -567,13 +567,13 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
           candidate.path === workerOutput.patchArtifact &&
           candidate.digest === workerOutput.diffHash,
       );
-      if (artifact === undefined) throw new Error("worker patch artifact 不存在或不匹配");
+      if (artifact === undefined) throw new Error("worker patch artifact is missing or does not match");
       const verificationCommands = optionalStringArray(source, "verify_commands") ?? [];
       if (verificationCommands.length > 5) {
-        throw new Error("verify_commands 最多允许 5 条");
+        throw new Error("verify_commands allows at most 5 commands");
       }
       if (verificationCommands.some((command) => command.length > 2000)) {
-        throw new Error("verify_commands 单条不能超过 2000 字符");
+        throw new Error("a single verify_commands entry must not exceed 2000 characters");
       }
 
       const applied = await applyWorkerPatch({
@@ -613,7 +613,7 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         await options.onIntegration?.(integrationRecord);
       } catch (error) {
         throw new Error(
-          `patch 已处理，但集成证据落库失败：${error instanceof Error ? error.message : String(error)}`,
+          `patch applied, but persisting the integration record failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
       return {

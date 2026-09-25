@@ -62,9 +62,9 @@ export async function applyWorkerPatch(
 ): Promise<ApplyWorkerPatchResult> {
   const patchPath = resolve(options.patchPath);
   const info = await stat(patchPath);
-  if (!info.isFile()) throw new Error(`integrator: patch 不是文件：${patchPath}`);
+  if (!info.isFile()) throw new Error(`integrator: patch is not a file: ${patchPath}`);
   if (info.size > MAX_PATCH_BYTES) {
-    throw new Error(`integrator: patch 超过 ${MAX_PATCH_BYTES} bytes 限制`);
+    throw new Error(`integrator: patch exceeds the ${MAX_PATCH_BYTES} byte limit`);
   }
 
   const bytes = await readFile(patchPath);
@@ -73,24 +73,24 @@ export async function applyWorkerPatch(
   const digest = `sha256:${hasher.digest("hex")}`;
   if (options.expectedDigest !== undefined && options.expectedDigest !== digest) {
     throw new Error(
-      `integrator: patch digest 不匹配，期望 ${options.expectedDigest}，实际 ${digest}`,
+      `integrator: patch digest mismatch, expected ${options.expectedDigest}, got ${digest}`,
     );
   }
 
   const capability = await probeGit(options.cwd, { timeoutMs: options.timeoutMs });
   if (!capability.available || capability.binary === undefined || capability.repoRoot === undefined) {
-    throw new Error(`integrator: Git 不可用：${capability.reason ?? "unknown"}`);
+    throw new Error(`integrator: Git unavailable: ${capability.reason ?? "unknown"}`);
   }
   if (!capability.workerReady) {
-    throw new Error("integrator: 主工作区不是 clean 状态，拒绝应用 patch");
+    throw new Error("integrator: the parent workspace is not clean; refusing to apply the patch");
   }
   if (capability.head !== options.baseRevision) {
     throw new Error(
-      `integrator: base revision 已漂移，worker=${options.baseRevision}，当前=${capability.head ?? "unknown"}`,
+      `integrator: base revision drifted, worker=${options.baseRevision}, current=${capability.head ?? "unknown"}`,
     );
   }
   const baseRevision = capability.head;
-  if (baseRevision === undefined) throw new Error("integrator: 当前仓库没有 HEAD");
+  if (baseRevision === undefined) throw new Error("integrator: the repository has no HEAD");
   const repoRoot = capability.repoRoot;
   const gitBinary = capability.binary;
 
@@ -100,7 +100,7 @@ export async function applyWorkerPatch(
     { binary: gitBinary, timeoutMs: options.timeoutMs },
   );
   if (check.code !== 0) {
-    throw new Error(`integrator: git apply --check 失败：${check.stderr.trim() || check.stdout.trim()}`);
+    throw new Error(`integrator: git apply --check failed: ${check.stderr.trim() || check.stdout.trim()}`);
   }
 
   const numstat = await runGit(
@@ -109,7 +109,7 @@ export async function applyWorkerPatch(
     { binary: gitBinary, timeoutMs: options.timeoutMs },
   );
   if (numstat.code !== 0) {
-    throw new Error(`integrator: 无法解析 patch 文件列表：${numstat.stderr.trim()}`);
+    throw new Error(`integrator: cannot parse the patch file list: ${numstat.stderr.trim()}`);
   }
 
   const apply = await runGit(
@@ -118,7 +118,7 @@ export async function applyWorkerPatch(
     { binary: gitBinary, timeoutMs: options.timeoutMs },
   );
   if (apply.code !== 0) {
-    throw new Error(`integrator: git apply 失败：${apply.stderr.trim() || apply.stdout.trim()}`);
+    throw new Error(`integrator: git apply failed: ${apply.stderr.trim() || apply.stdout.trim()}`);
   }
 
   const changedFiles = patchChangedFiles(numstat.stdout);
@@ -131,8 +131,8 @@ export async function applyWorkerPatch(
     );
     if (reverse.code !== 0) {
       throw new Error(
-        `integrator: 自动回滚失败：${reverse.stderr.trim() || reverse.stdout.trim()}；` +
-          `请手工执行 git apply -R ${patchPath}`,
+        `integrator: automatic rollback failed: ${reverse.stderr.trim() || reverse.stdout.trim()}; ` +
+          `run git apply -R ${patchPath} manually`,
       );
     }
     const status = await runGit(["status", "--porcelain=v1", "--untracked-files=all"], repoRoot, {
@@ -141,7 +141,7 @@ export async function applyWorkerPatch(
     });
     if (status.code !== 0 || status.stdout.trim().length > 0) {
       throw new Error(
-        `integrator: 自动回滚后工作区仍不干净：${status.stdout.trim() || status.stderr.trim()}`,
+        `integrator: the workspace is still dirty after rollback: ${status.stdout.trim() || status.stderr.trim()}`,
       );
     }
     return {
@@ -161,24 +161,24 @@ export async function applyWorkerPatch(
     timeoutMs: options.timeoutMs,
   });
   if (diffCheck.code !== 0) {
-    return rollback(`git diff --check 失败：${diffCheck.stdout.trim() || diffCheck.stderr.trim()}`);
+    return rollback(`git diff --check failed: ${diffCheck.stdout.trim() || diffCheck.stderr.trim()}`);
   }
 
   const commands = options.verificationCommands ?? [];
   if (commands.length > 0 && options.verificationRunner === undefined) {
-    return rollback("integrator: 提供了验证命令，但没有 verificationRunner");
+    return rollback("integrator: verification commands were given but no verificationRunner exists");
   }
   for (const command of commands) {
     if (options.signal?.aborted) {
-      return rollback("integrator: 验证被取消");
+      return rollback("integrator: verification was cancelled");
     }
     const result = await options.verificationRunner!(command, options.signal ?? new AbortController().signal);
     verifications.push(result);
-    if (result.aborted) return rollback(`验证被取消：${command}`);
-    if (result.timedOut) return rollback(`验证超时：${command}`);
+    if (result.aborted) return rollback(`verification cancelled: ${command}`);
+    if (result.timedOut) return rollback(`verification timed out: ${command}`);
     if (result.exitCode !== 0) {
       return rollback(
-        `验证失败（exit=${String(result.exitCode)}）：${command}\n${result.stderr || result.stdout}`,
+        `verification failed (exit=${String(result.exitCode)}): ${command}\n${result.stderr || result.stdout}`,
       );
     }
   }

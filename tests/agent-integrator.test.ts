@@ -245,7 +245,7 @@ describe("workspace integrator", () => {
         patchPath: artifact.path,
         expectedDigest: artifact.digest,
       }),
-    ).rejects.toThrow(/漂移/);
+    ).rejects.toThrow(/drifted/);
   });
 
   test("apply_subagent_patch only accepts an owned completed worker artifact", async () => {

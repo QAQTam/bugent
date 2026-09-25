@@ -282,7 +282,7 @@ describe("P4 · ResourceLockManager", () => {
     const waiting = locks.acquire([{ key: "workspace/a.txt", access: "write" }], controller.signal);
 
     controller.abort();
-    await expect(waiting).rejects.toThrow("等待工具资源锁时被取消");
+    await expect(waiting).rejects.toThrow("cancelled while waiting for a tool resource lock");
     release();
   });
 });

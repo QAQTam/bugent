@@ -29,7 +29,7 @@ interface Waiter {
 
 export class ResourceLockAbortError extends Error {
   constructor() {
-    super("等待工具资源锁时被取消");
+    super("cancelled while waiting for a tool resource lock");
     this.name = "ResourceLockAbortError";
   }
 }

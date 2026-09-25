@@ -166,8 +166,8 @@ describe("P4 · tool batch 协议安全", () => {
     const tools = session.messages.filter((message) => message.role === "tool");
     expect(tools.map((message) => message.toolCallId)).toEqual(["c1", "c2", "c3"]);
     expect(storedText(tools[0]!)).toBe("tr1");
-    expect(storedText(tools[1]!)).toMatch(/取消|missing due abort/);
-    expect(storedText(tools[2]!)).toMatch(/取消|missing due abort/);
+    expect(storedText(tools[1]!)).toMatch(/cancelled|missing due abort/);
+    expect(storedText(tools[2]!)).toMatch(/cancelled|missing due abort/);
     expect(session.hasOpenToolBatch()).toBe(false);
   });
 });

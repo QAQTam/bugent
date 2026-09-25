@@ -84,17 +84,17 @@ describe("todo_write · 参数校验", () => {
   });
 
   test("拒绝非数组", () => {
-    expect(() => parseTodos("nope")).toThrow(/必须是数组/);
-    expect(() => parseTodos(undefined)).toThrow(/必须是数组/);
+    expect(() => parseTodos("nope")).toThrow(/must be an array/);
+    expect(() => parseTodos(undefined)).toThrow(/must be an array/);
   });
 
   test("拒绝空数组（要求保留已完成项而不是清空）", () => {
-    expect(() => parseTodos([])).toThrow(/不能为空/);
+    expect(() => parseTodos([])).toThrow(/must not be empty/);
   });
 
   test("拒绝空 content", () => {
-    expect(() => parseTodos([{ content: "   ", status: "pending" }])).toThrow(/content 必须是非空字符串/);
-    expect(() => parseTodos([{ status: "pending" }])).toThrow(/content 必须是非空字符串/);
+    expect(() => parseTodos([{ content: "   ", status: "pending" }])).toThrow(/content must be a non-empty string/);
+    expect(() => parseTodos([{ status: "pending" }])).toThrow(/content must be a non-empty string/);
   });
 
   test("拒绝非法 status，并在报错里给出收到的值", () => {
@@ -107,7 +107,7 @@ describe("todo_write · 参数校验", () => {
         { content: "a", status: "in_progress" },
         { content: "b", status: "in_progress" },
       ]),
-    ).toThrow(/最多只能有一项 in_progress/);
+    ).toThrow(/at most one item may be in_progress/);
   });
 
   test("content 被 trim，空 activeForm 被丢弃，缺失 id 自动生成", () => {
@@ -123,7 +123,7 @@ describe("todo_write · 参数校验", () => {
         { id: "same", content: "a", status: "pending" },
         { id: "same", content: "b", status: "pending" },
       ]),
-    ).toThrow(/id 重复/);
+    ).toThrow(/id is duplicated/);
   });
 
   test("completion 只允许出现在 completed 项", () => {
@@ -133,7 +133,7 @@ describe("todo_write · 参数校验", () => {
     ).toBe("338 tests pass");
     expect(() =>
       parseTodos([{ content: "x", status: "in_progress", completion: "done" }]),
-    ).toThrow(/completion 只能用于 completed/);
+    ).toThrow(/completion is only allowed on completed/);
   });
 
   test("tryParseTodos 对畸形输入返回 undefined 而不抛错", () => {
@@ -261,11 +261,11 @@ describe("todo_write · 工具行为", () => {
       { summary: "重构 todo", todos: sample },
       { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" },
     );
-    expect(out).toContain("计划：重构 todo");
-    expect(out).toContain("共 3 项");
-    expect(out).toContain("1 已完成");
-    expect(out).toContain("1 进行中");
-    expect(out).toContain("1 待办");
+    expect(out).toContain("plan: 重构 todo");
+    expect(out).toContain("3 items");
+    expect(out).toContain("1 completed");
+    expect(out).toContain("1 in progress");
+    expect(out).toContain("1 pending");
     expect(out).toContain("read-loop=completed");
   });
 
@@ -276,7 +276,7 @@ describe("todo_write · 工具行为", () => {
       { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "test-session" },
     );
     expect(result.ok).toBe(false);
-    expect(result.output).toContain("必须是数组");
+    expect(result.output).toContain("must be an array");
   });
 
   test("工具自报 defaultPermission，组装后自动放行不打扰用户", async () => {

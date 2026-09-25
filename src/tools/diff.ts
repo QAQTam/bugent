@@ -25,7 +25,7 @@ export function diffLines(before: string, after: string): DiffLine[] {
 
   if (a.length > MAX_DIFF_LINES || b.length > MAX_DIFF_LINES) {
     return [
-      { kind: "-", text: `(原内容 ${a.length} 行，超过 ${MAX_DIFF_LINES} 行不做逐行 diff)` },
+      { kind: "-", text: `(original has ${a.length} lines; over ${MAX_DIFF_LINES}, so no line-by-line diff)` },
       { kind: "+", text: `(新内容 ${b.length} 行)` },
     ];
   }

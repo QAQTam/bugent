@@ -105,6 +105,6 @@ describe("apply_patch tool", () => {
         { patch: "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch" },
         ctx,
       ),
-    ).rejects.toThrow(/越界/);
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });

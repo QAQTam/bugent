@@ -57,7 +57,7 @@ describe("Git capability probe", () => {
 
     expect(capability.available).toBe(false);
     expect(capability.workerReady).toBe(false);
-    expect(capability.reason).toMatch(/Git|worktree|目录/);
+    expect(capability.reason).toMatch(/Git|worktree|directory/);
   });
 
   test("clean repository is worker-ready; dirty repository is not", async () => {
@@ -112,6 +112,6 @@ describe("Git worktree backend", () => {
     const artifactRoot = await tempDir("bugent-artifacts-dirty-");
     const manager = new GitWorktreeManager({ worktreeRoot, artifactRoot });
 
-    await expect(manager.create(capability, "worker-1")).rejects.toThrow(/未提交修改/);
+    await expect(manager.create(capability, "worker-1")).rejects.toThrow(/uncommitted changes/);
   });
 });

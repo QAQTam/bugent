@@ -49,21 +49,21 @@ export async function verifyCheckpointDeterministically(
   input: DeterministicVerificationInput,
 ): Promise<DeterministicVerificationResult> {
   const errors: string[] = [];
-  if (input.todos.length === 0) errors.push("当前 Checkpoint 没有 Todo snapshot");
+  if (input.todos.length === 0) errors.push("the active checkpoint has no todo snapshot");
   for (const todo of input.todos) {
     if (todo.status !== "completed") {
-      errors.push(`Todo 未完成：${todo.id} (${todo.status})`);
+      errors.push(`todo not completed: ${todo.id} (${todo.status})`);
     }
     if (
       todo.status === "completed" &&
       (todo.completionEvidence === undefined || todo.completionEvidence.length === 0)
     ) {
-      errors.push(`Todo 缺少 completionEvidence：${todo.id}`);
+      errors.push(`todo is missing completionEvidence: ${todo.id}`);
     }
   }
 
   if (input.evidence.length === 0) {
-    errors.push("Checkpoint 至少需要一条 Evidence");
+    errors.push("a checkpoint needs at least one piece of evidence");
   }
 
   const kinds = new Set(input.evidence.map((evidence) => evidence.kind));
@@ -72,22 +72,22 @@ export async function verifyCheckpointDeterministically(
       (kind) => requirement.toLowerCase().includes(kind),
     );
     if (requiredKind !== undefined && !kinds.has(requiredKind)) {
-      errors.push(`Evidence 缺少要求类型 ${requiredKind}：${requirement}`);
+      errors.push(`evidence is missing required kind ${requiredKind}: ${requirement}`);
     }
   }
 
   for (let index = 0; index < input.evidence.length; index += 1) {
     const evidence = input.evidence[index]!;
     const at = `evidence[${index}]`;
-    if (evidence.summary.trim().length === 0) errors.push(`${at}.summary 不能为空`);
-    if (evidence.reference.trim().length === 0) errors.push(`${at}.reference 不能为空`);
+    if (evidence.summary.trim().length === 0) errors.push(`${at}.summary must not be empty`);
+    if (evidence.reference.trim().length === 0) errors.push(`${at}.reference must not be empty`);
 
     if (evidence.kind === "test" || evidence.kind === "command" || evidence.kind === "runtime") {
       if (evidence.command === undefined || evidence.command.trim().length === 0) {
-        errors.push(`${at} 缺少 command`);
+        errors.push(`${at} is missing command`);
       }
       if (evidence.exitCode !== 0) {
-        errors.push(`${at} 命令退出码不是 0：${String(evidence.exitCode)}`);
+        errors.push(`${at} command exit code is not 0: ${String(evidence.exitCode)}`);
       }
     }
 
@@ -96,16 +96,16 @@ export async function verifyCheckpointDeterministically(
         const path = resolveWithin(input.cwd, evidence.reference);
         const stat = statSync(path);
         if (!stat.isFile()) {
-          errors.push(`${at} 不是普通文件：${evidence.reference}`);
+          errors.push(`${at} is not a regular file: ${evidence.reference}`);
         } else if (evidence.digest !== undefined) {
           const actual = await hashFile(path);
           if (normalizeDigest(evidence.digest).toLowerCase() !== actual.toLowerCase()) {
-            errors.push(`${at} 文件 hash 不匹配：${evidence.reference}`);
+            errors.push(`${at} file hash mismatch: ${evidence.reference}`);
           }
         }
       } catch (error) {
         errors.push(
-          `${at} 文件不可验证：${error instanceof Error ? error.message : String(error)}`,
+          `${at} file could not be verified: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }

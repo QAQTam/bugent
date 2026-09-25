@@ -238,7 +238,7 @@ function applyNarrativePatch(
   actor: HandoffActor,
 ): string {
   const content = patch.content.trim();
-  if (content.length === 0) throw new Error("handoff patch content 不能为空");
+  if (content.length === 0) throw new Error("handoff patch content must not be empty");
   const sectionTitle = SECTION_TITLES[patch.section];
   const current = extractSection(markdown, sectionTitle) ?? EMPTY_NARRATIVE[patch.section];
   const entryId = `${patch.section === "work_log" ? "W" : "H"}-${Date.now().toString(36)}-${Math.random()
@@ -320,7 +320,7 @@ export class LivingHandoffBuilder {  readonly repository: GoalRepository;
     const body = [
       `# Goal Handoff: ${goal.objective}`,
       "",
-      "> 这是持续维护的权威工作文档。事实章节由系统维护；叙事章节只追加或订正，不删除旧事实。",
+      "> This is the continuously maintained authoritative work document. Fact sections are maintained by the system; narrative sections are appended or corrected, never deleting earlier facts.",
       "",
       "## 1. Goal Contract",
       "",
@@ -431,20 +431,20 @@ export class LivingHandoffBuilder {  readonly repository: GoalRepository;
     patches: readonly HandoffPatch[],
   ): Promise<HandoffRevision> {
     const current = this.repository.getCanonicalHandoff(this.goalId);
-    if (current === undefined) throw new Error("canonical Handoff 尚未建立");
+    if (current === undefined) throw new Error("canonical handoff has not been created");
     if (current.revision !== baseRevision) {
-      throw new Error(`Handoff base revision 已过期：期望 ${current.revision}，收到 ${baseRevision}`);
+      throw new Error(`handoff base revision is stale: expected ${current.revision}, received ${baseRevision}`);
     }
-    if (patches.length === 0) throw new Error("handoff patch 不能为空");
+    if (patches.length === 0) throw new Error("handoff patch must not be empty");
 
     let markdown = await this.readCanonical();
-    if (markdown === undefined) throw new Error("canonical HANDOFF.md 不存在");
+    if (markdown === undefined) throw new Error("canonical HANDOFF.md does not exist");
     for (const patch of patches) {
       if (!Object.prototype.hasOwnProperty.call(SECTION_TITLES, patch.section)) {
-        throw new Error(`不允许 patch 系统事实章节：${patch.section}`);
+        throw new Error(`patching system fact sections is not allowed: ${patch.section}`);
       }
       if (patch.operation !== "append" && patch.operation !== "correct") {
-        throw new Error(`不支持的 handoff patch operation：${String(patch.operation)}`);
+        throw new Error(`unsupported handoff patch operation: ${String(patch.operation)}`);
       }
       markdown = applyNarrativePatch(markdown, patch, actor);
     }
@@ -481,7 +481,7 @@ export class LivingHandoffBuilder {  readonly repository: GoalRepository;
     path: string;
   }> {
     const markdown = await this.readCanonical();
-    if (markdown === undefined) throw new Error("canonical HANDOFF.md 不存在");
+    if (markdown === undefined) throw new Error("canonical HANDOFF.md does not exist");
     const path = this.snapshotPath(epochId);
     const hash = canonicalHash(markdown);
     await mkdir(dirname(path), { recursive: true });

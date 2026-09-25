@@ -256,8 +256,8 @@ export class ToolRegistry {
   async execute(call: ToolCall, ctx: ToolCtx): Promise<ToolExecution> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) {
-      const known = this.list().map((t) => t.name).join(", ") || "(空)";
-      return { ok: false, output: `未知工具 "${call.name}"，可用：${known}` };
+      const known = this.list().map((t) => t.name).join(", ") || "(none)";
+      return { ok: false, output: `unknown tool "${call.name}"; available: ${known}` };
     }
 
     let claims: readonly ResourceClaim[];
@@ -287,7 +287,7 @@ export class ToolRegistry {
       }
 
       if (ctx.signal.aborted) {
-        return { ok: false, output: "工具执行已取消" };
+        return { ok: false, output: "tool execution was cancelled" };
       }
       const workspace: WorkspaceFileEdit[] = [];
       let presentation: ToolPresentation | undefined;

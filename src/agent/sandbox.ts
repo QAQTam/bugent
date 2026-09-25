@@ -142,9 +142,9 @@ function fail(message: string): never {
 
 function nonEmpty(value: string, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    fail(`${field} 必须是非空字符串`);
+    fail(`${field} must be a non-empty string`);
   }
-  if (value.includes("\0")) fail(`${field} 不能包含 NUL`);
+  if (value.includes("\0")) fail(`${field} must not contain NUL`);
   return value.trim();
 }
 
@@ -163,14 +163,14 @@ function uniqueStrings(values: readonly string[], field: string): string[] {
 
 function normalizeAbsolutePath(value: string, field: string): string {
   const cleaned = nonEmpty(value, field);
-  if (!isAbsolute(cleaned)) fail(`${field} 必须是绝对路径：${cleaned}`);
+  if (!isAbsolute(cleaned)) fail(`${field} must be an absolute path: ${cleaned}`);
   return normalize(cleaned);
 }
 
 function normalizeWorkspacePath(value: string, root: string, field: string): string {
   const cleaned = nonEmpty(value, field);
   const absolute = normalize(isAbsolute(cleaned) ? cleaned : resolve(root, cleaned));
-  if (!isWithin(root, absolute)) fail(`${field} 必须位于 workspace root 内：${absolute}`);
+  if (!isWithin(root, absolute)) fail(`${field} must stay inside the workspace root: ${absolute}`);
   return absolute;
 }
 
@@ -190,14 +190,14 @@ function validateNoOverlap(
   for (const writable of writablePaths) {
     for (const readonly of readonlyPaths) {
       if (pathsOverlap(writable, readonly)) {
-        fail(`writablePaths 与 readonlyPaths 重叠：${writable} <-> ${readonly}`);
+        fail(`writablePaths overlaps readonlyPaths: ${writable} <-> ${readonly}`);
       }
     }
   }
 }
 
 function positiveInteger(value: number, field: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0) fail(`${field} 必须是正的安全整数`);
+  if (!Number.isSafeInteger(value) || value <= 0) fail(`${field} must be a positive safe integer`);
   return value;
 }
 
@@ -222,16 +222,16 @@ function validateCapabilityWorkspace(
   const canWrite = hasCapability(capabilities, "fs.write");
 
   if (workspace.access === "none" && canRead) {
-    fail("fs.read capability 与 workspace.access=none 冲突");
+    fail("fs.read conflicts with workspace.access=none");
   }
   if (workspace.access !== "none" && !canRead) {
-    fail(`workspace.access=${workspace.access} 需要 fs.read capability`);
+    fail(`workspace.access=${workspace.access} requires the fs.read capability`);
   }
   if (canWrite && workspace.access !== "write") {
-    fail("fs.write capability 需要 workspace.access=write");
+    fail("fs.write requires workspace.access=write");
   }
   if (workspace.access === "write" && !canWrite) {
-    fail("workspace.access=write 需要 fs.write capability");
+    fail("workspace.access=write requires the fs.write capability");
   }
 }
 
@@ -240,7 +240,7 @@ function validateProcessCapability(
   processSpec: AgentProcessSpec,
 ): void {
   if (hasCapability(capabilities, "process.exec") && processSpec.isolation === "none") {
-    fail("process.exec capability 在没有进程隔离时必须关闭");
+    fail("process.exec must be off when there is no process isolation");
   }
 }
 
@@ -250,43 +250,43 @@ function validateNetworkCapability(
 ): void {
   const hasNetwork = hasCapability(capabilities, "network");
   if (network.mode !== "none" && !hasNetwork) {
-    fail(`network.mode=${network.mode} 需要 network capability`);
+    fail(`network.mode=${network.mode} requires the network capability`);
   }
   if (hasNetwork && network.mode === "none") {
-    fail("network capability 需要显式 network.mode，不能保持 none");
+    fail("the network capability needs an explicit network.mode; it cannot stay none");
   }
   if (network.mode === "none" && network.allow.length > 0) {
-    fail("network.mode=none 时不能提供 network.allow");
+    fail("network.allow must not be set when network.mode=none");
   }
   if (network.mode === "one-shot" && network.oneShotGrantId === undefined) {
-    fail("network.mode=one-shot 必须提供 oneShotGrantId");
+    fail("network.mode=one-shot requires oneShotGrantId");
   }
   if (network.mode !== "one-shot" && network.oneShotGrantId !== undefined) {
-    fail("oneShotGrantId 只能用于 network.mode=one-shot");
+    fail("oneShotGrantId is only valid with network.mode=one-shot");
   }
   if (network.mode === "allowlist" && network.allow.length === 0) {
-    fail("network.mode=allowlist 必须提供 network.allow");
+    fail("network.mode=allowlist requires network.allow");
   }
   if (network.mode === "all" && network.allow.length > 0) {
-    fail("network.mode=all 不能同时提供 network.allow");
+    fail("network.mode=all must not also set network.allow");
   }
 }
 
 function validateEnv(env: AgentEnvSpec): void {
   const allowed = new Set(env.allow);
   for (const name of env.allow) {
-    if (!ENV_NAME.test(name)) fail(`env.allow 非法变量名：${name}`);
-    if (env.unset.includes(name)) fail(`环境变量不能同时 allow 和 unset：${name}`);
+    if (!ENV_NAME.test(name)) fail(`env.allow has an invalid variable name: ${name}`);
+    if (env.unset.includes(name)) fail(`a variable cannot be both allowed and unset: ${name}`);
   }
   for (const name of env.unset) {
-    if (!ENV_NAME.test(name)) fail(`env.unset 非法变量名：${name}`);
+    if (!ENV_NAME.test(name)) fail(`env.unset has an invalid variable name: ${name}`);
   }
   for (const [name, value] of Object.entries(env.extra)) {
-    if (!ENV_NAME.test(name)) fail(`env.extra 非法变量名：${name}`);
-    if (value.includes("\0")) fail(`env.extra.${name} 不能包含 NUL`);
-    if (RESERVED_EXTRA_ENV.has(name)) fail(`env.extra 不允许覆盖保留变量：${name}`);
-    if (allowed.has(name)) fail(`环境变量不能同时 allow 和 extra：${name}`);
-    if (env.unset.includes(name)) fail(`环境变量不能同时 extra 和 unset：${name}`);
+    if (!ENV_NAME.test(name)) fail(`env.extra has an invalid variable name: ${name}`);
+    if (value.includes("\0")) fail(`env.extra.${name} must not contain NUL`);
+    if (RESERVED_EXTRA_ENV.has(name)) fail(`env.extra must not override reserved variables: ${name}`);
+    if (allowed.has(name)) fail(`a variable cannot be both allowed and extra: ${name}`);
+    if (env.unset.includes(name)) fail(`a variable cannot be both extra and unset: ${name}`);
   }
 }
 
@@ -305,7 +305,7 @@ function buildWorkspace(
   );
 
   if (access !== "write" && writablePaths.length > 0) {
-    fail("workspace.writablePaths 只能用于 workspace.access=write");
+    fail("workspace.writablePaths is only valid with workspace.access=write");
   }
   validateNoOverlap(writablePaths, readonlyPaths);
 
@@ -383,16 +383,16 @@ export function compileAgentSandboxSpec(
   request: AgentSandboxRequest,
   platform: string = process.platform,
 ): AgentSandboxSpec {
-  if (!isAgentKind(request.kind)) fail(`未知 AgentKind：${String(request.kind)}`);
+  if (!isAgentKind(request.kind)) fail(`unknown AgentKind: ${String(request.kind)}`);
 
   const agentId = nonEmpty(request.agentId, "agentId");
   const authority = request.authority ?? defaultAuthorityForKind(request.kind);
-  if (!isAgentAuthority(authority)) fail(`未知 authority：${String(authority)}`);
+  if (!isAgentAuthority(authority)) fail(`unknown authority: ${String(authority)}`);
 
   const requestedCapabilities =
     request.capabilities ?? defaultCapabilitiesForKind(request.kind, authority, platform);
   for (const capability of requestedCapabilities) {
-    if (!isAgentCapability(capability)) fail(`未知 capability：${String(capability)}`);
+    if (!isAgentCapability(capability)) fail(`unknown capability: ${String(capability)}`);
   }
   const capabilities = uniqueCapabilities([...requestedCapabilities]);
   validateAgentProfile(request.kind, authority, capabilities);
@@ -410,13 +410,13 @@ export function compileAgentSandboxSpec(
   const maxDepth = request.maxDepth ?? (request.kind === "main" ? 1 : 0);
 
   if (!Number.isSafeInteger(maxDepth) || maxDepth < 0) {
-    fail("maxDepth 必须是非负安全整数");
+    fail("maxDepth must be a non-negative safe integer");
   }
   if (hasCapability(capabilities, "agent.spawn") && maxDepth === 0) {
-    fail("agent.spawn capability 需要 maxDepth > 0");
+    fail("the agent.spawn capability requires maxDepth > 0");
   }
   if (mcpServerIds.length > 0 && !hasCapability(capabilities, "mcp.use")) {
-    fail("mcpServerIds 非空需要 mcp.use capability");
+    fail("non-empty mcpServerIds requires the mcp.use capability");
   }
 
   validateCapabilityWorkspace(capabilities, workspace);

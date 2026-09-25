@@ -68,7 +68,7 @@ function installHint(platform: NodeJS.Platform = process.platform): string {
   if (platform === "darwin") {
     return "xcode-select --install 或 brew install git";
   }
-  return "使用系统包管理器安装 git（例如 sudo apt install git）";
+  return "install git with your system package manager (for example: sudo apt install git)";
 }
 
 function outputText(value: ReadableStream<Uint8Array> | undefined): Promise<string> {
@@ -163,7 +163,7 @@ export async function probeGit(
 ): Promise<GitCapability> {
   const binary = options.binary ?? Bun.which("git") ?? undefined;
   if (binary === undefined) {
-    return unavailable("未找到 Git");
+    return unavailable("Git not found");
   }
 
   const versionResult = await runGit(["--version"], cwd, {
@@ -176,7 +176,7 @@ export async function probeGit(
       process.platform === "darwin" &&
       (stderr.includes("xcode-select") || stderr.includes("command line developer tools"));
     return unavailable(
-      macShim ? "系统 Git 需要先安装 Xcode Command Line Tools" : "无法执行 Git",
+      macShim ? "system Git needs Xcode Command Line Tools first" : "cannot execute Git",
       {
         binary,
         installHint: macShim ? "xcode-select --install" : installHint(),
@@ -186,14 +186,14 @@ export async function probeGit(
 
   const parsedVersion = parseVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   if (parsedVersion === undefined) {
-    return unavailable("无法识别 Git 版本", {
+    return unavailable("cannot determine the Git version", {
       binary,
       installHint: installHint(),
     });
   }
   const version = `${parsedVersion[0]}.${parsedVersion[1]}.${parsedVersion[2]}`;
   if (!versionAtLeast(parsedVersion, MINIMUM_GIT_VERSION)) {
-    return unavailable(`Git ${version} 太旧，至少需要 2.5`, {
+    return unavailable(`Git ${version} is too old; 2.5 or newer is required`, {
       binary,
       version,
     });
@@ -204,10 +204,10 @@ export async function probeGit(
     timeoutMs: options.timeoutMs,
   });
   if (rootResult.code !== 0) {
-    return unavailable("当前目录不是 Git 工作树", {
+    return unavailable("the current directory is not a Git work tree", {
       binary,
       version,
-      installHint: "可在项目目录执行 git init，但必须先得到用户明确确认",
+      installHint: "git init is possible, but only with explicit user confirmation",
     });
   }
   const repoRoot = resolve(rootResult.stdout.trim());
@@ -217,7 +217,7 @@ export async function probeGit(
     timeoutMs: options.timeoutMs,
   });
   if (bareResult.stdout.trim() === "true") {
-    return unavailable("bare repository 不能创建 worker worktree", {
+    return unavailable("a bare repository cannot host a worker worktree", {
       binary,
       version,
       repoRoot,
@@ -229,11 +229,11 @@ export async function probeGit(
     timeoutMs: options.timeoutMs,
   });
   if (headResult.code !== 0) {
-    return unavailable("Git 仓库还没有初始 commit", {
+    return unavailable("the Git repository has no initial commit yet", {
       binary,
       version,
       repoRoot,
-      installHint: "先创建初始 commit，再启用 worker 隔离",
+      installHint: "create an initial commit before enabling worker isolation",
     });
   }
   const head = headResult.stdout.trim();
@@ -243,7 +243,7 @@ export async function probeGit(
     timeoutMs: options.timeoutMs,
   });
   if (worktreeResult.code !== 0) {
-    return unavailable("当前 Git 不支持 worktree", {
+    return unavailable("this Git build does not support worktrees", {
       binary,
       version,
       repoRoot,
@@ -261,7 +261,7 @@ export async function probeGit(
     },
   );
   if (statusResult.code !== 0) {
-    return unavailable("无法读取 Git 工作区状态", {
+    return unavailable("cannot read the Git worktree status", {
       binary,
       version,
       repoRoot,
@@ -278,7 +278,7 @@ export async function probeGit(
     repoRoot,
     head,
     dirty,
-    reason: dirty ? "工作区有未提交修改；worker 默认不启动" : undefined,
+    reason: dirty ? "the workspace has uncommitted changes; workers stay off by default" : undefined,
     installHint: undefined,
   };
 }
@@ -286,7 +286,7 @@ export async function probeGit(
 function safeSegment(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9_.-]/g, "_");
   if (safe.length === 0 || safe === "." || safe === "..") {
-    throw new Error("git worktree: agentId 无法转换为安全目录名");
+    throw new Error("git worktree: agentId cannot be turned into a safe directory name");
   }
   return safe;
 }
@@ -309,23 +309,23 @@ export class GitWorktreeManager {
 
   async create(capability: GitCapability, agentId: string): Promise<GitWorktreeLease> {
     if (!capability.available || capability.binary === undefined || capability.repoRoot === undefined) {
-      throw new Error(`worker 隔离不可用：${capability.reason ?? "Git capability 缺失"}`);
+      throw new Error(`worker isolation unavailable: ${capability.reason ?? "missing Git capability"}`);
     }
     if (capability.dirty) {
-      throw new Error("worker 隔离不可用：Git 工作区有未提交修改，请先 commit 或 stash");
+      throw new Error("worker isolation unavailable: the Git workspace has uncommitted changes; commit or stash first");
     }
     if (capability.head === undefined) {
-      throw new Error("worker 隔离不可用：仓库没有 HEAD");
+      throw new Error("worker isolation unavailable: the repository has no HEAD");
     }
 
     const segment = safeSegment(agentId);
     const path = join(this.worktreeRoot, segment);
     if (!isWithin(this.worktreeRoot, path)) {
-      throw new Error("git worktree: 目标路径越界");
+      throw new Error("git worktree: target path escapes the workspace");
     }
     await mkdir(this.worktreeRoot, { recursive: true, mode: 0o700 });
     if (existsSync(path)) {
-      throw new Error(`git worktree: 目标路径已存在：${path}`);
+      throw new Error(`git worktree: target path already exists: ${path}`);
     }
 
     const add = await runGit(
@@ -334,7 +334,7 @@ export class GitWorktreeManager {
       { binary: capability.binary, timeoutMs: this.#timeoutMs },
     );
     if (add.code !== 0) {
-      throw new Error(`git worktree add 失败：${add.stderr.trim() || add.stdout.trim()}`);
+      throw new Error(`git worktree add failed: ${add.stderr.trim() || add.stdout.trim()}`);
     }
 
     const lock = await runGit(
@@ -352,13 +352,13 @@ export class GitWorktreeManager {
   }
 
   async diff(lease: GitWorktreeLease, capability: GitCapability): Promise<WorktreeDiff> {
-    if (capability.binary === undefined) throw new Error("git worktree diff: Git binary 缺失");
+    if (capability.binary === undefined) throw new Error("git worktree diff: Git binary is missing");
     const addIntent = await runGit(["add", "-N", "--", "."], lease.path, {
       binary: capability.binary,
       timeoutMs: this.#timeoutMs,
     });
     if (addIntent.code !== 0) {
-      throw new Error(`git add -N 失败：${addIntent.stderr.trim()}`);
+      throw new Error(`git add -N failed: ${addIntent.stderr.trim()}`);
     }
     const diff = await runGit(
       ["diff", "--binary", "--no-ext-diff", "--no-color", "--", "."],
@@ -366,7 +366,7 @@ export class GitWorktreeManager {
       { binary: capability.binary, timeoutMs: this.#timeoutMs },
     );
     if (diff.code !== 0) {
-      throw new Error(`git diff 失败：${diff.stderr.trim()}`);
+      throw new Error(`git diff failed: ${diff.stderr.trim()}`);
     }
     const status = await runGit(["status", "--porcelain=v1", "--untracked-files=all"], lease.path, {
       binary: capability.binary,

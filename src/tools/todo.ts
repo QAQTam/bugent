@@ -107,10 +107,10 @@ export const TODO_PARAMETERS: JSONSchema = {
  */
 export function parseTodos(raw: unknown): Todo[] {
   if (!Array.isArray(raw)) {
-    throw new Error("todos 必须是数组");
+    throw new Error("todos must be an array");
   }
   if (raw.length === 0) {
-    throw new Error("todos 不能为空；如果任务已全部完成，请保留清单并把各项标为 completed");
+    throw new Error("todos must not be empty; when everything is done, keep the list and mark each item completed");
   }
 
   // 先收集显式 id，避免“某项省略 id 时自动生成的值撞上后面显式 id”。
@@ -121,11 +121,11 @@ export function parseTodos(raw: unknown): Todo[] {
     const id = (item as Record<string, unknown>).id;
     if (id === undefined) continue;
     if (typeof id !== "string" || id.trim().length === 0) {
-      throw new Error(`todos[${index}].id 必须是非空字符串`);
+      throw new Error(`todos[${index}].id must be a non-empty string`);
     }
     const normalized = id.trim();
     if (explicitIds.has(normalized)) {
-      throw new Error(`todos[${index}].id 重复：${normalized}`);
+      throw new Error(`todos[${index}].id is duplicated: ${normalized}`);
     }
     explicitIds.add(normalized);
   }
@@ -139,52 +139,52 @@ export function parseTodos(raw: unknown): Todo[] {
     const at = `todos[${index}]`;
 
     if (item === null || typeof item !== "object") {
-      throw new Error(`${at} 必须是对象`);
+      throw new Error(`${at} must be an object`);
     }
 
     const record = item as Record<string, unknown>;
     const content = record.content;
     if (typeof content !== "string" || content.trim().length === 0) {
-      throw new Error(`${at}.content 必须是非空字符串`);
+      throw new Error(`${at}.content must be a non-empty string`);
     }
 
     const status = record.status;
     if (typeof status !== "string" || !VALID_STATUSES.includes(status as TodoStatus)) {
-      throw new Error(`${at}.status 必须是 pending / in_progress / completed 之一，收到 ${JSON.stringify(status)}`);
+      throw new Error(`${at}.status must be one of pending / in_progress / completed, received ${JSON.stringify(status)}`);
     }
 
     const activeForm = record.activeForm;
     if (activeForm !== undefined && typeof activeForm !== "string") {
-      throw new Error(`${at}.activeForm 必须是字符串`);
+      throw new Error(`${at}.activeForm must be a string`);
     }
 
     const completion = record.completion;
     if (completion !== undefined && typeof completion !== "string") {
-      throw new Error(`${at}.completion 必须是字符串`);
+      throw new Error(`${at}.completion must be a string`);
     }
     if (completion !== undefined && status !== "completed") {
-      throw new Error(`${at}.completion 只能用于 completed 项`);
+      throw new Error(`${at}.completion is only allowed on completed items`);
     }
 
     const checkpointId = record.checkpointId;
     if (checkpointId !== undefined && typeof checkpointId !== "string") {
-      throw new Error(`${at}.checkpointId 必须是字符串`);
+      throw new Error(`${at}.checkpointId must be a string`);
     }
 
     let completionEvidence: string[] | undefined;
     if (record.completionEvidence !== undefined) {
       if (!Array.isArray(record.completionEvidence)) {
-        throw new Error(`${at}.completionEvidence 必须是字符串数组`);
+        throw new Error(`${at}.completionEvidence must be an array of strings`);
       }
       completionEvidence = record.completionEvidence.map((evidence, evidenceIndex) => {
         if (typeof evidence !== "string" || evidence.trim().length === 0) {
-          throw new Error(`${at}.completionEvidence[${evidenceIndex}] 必须是非空字符串`);
+          throw new Error(`${at}.completionEvidence[${evidenceIndex}] must be a non-empty string`);
         }
         return evidence.trim();
       });
     }
     if (status === "completed" && completionEvidence !== undefined && completionEvidence.length === 0) {
-      throw new Error(`${at}.completionEvidence 不能为空数组`);
+      throw new Error(`${at}.completionEvidence must not be an empty array`);
     }
 
     let id: string;
@@ -223,7 +223,7 @@ export function parseTodos(raw: unknown): Todo[] {
 
   if (inProgress > 1) {
     throw new Error(
-      `同一时刻最多只能有一项 in_progress，收到 ${inProgress} 项。请把其余项改为 pending，一次只专注一件事`,
+      `at most one item may be in_progress, received ${inProgress}. Set the others back to pending and focus on one thing at a time`,
     );
   }
 
@@ -394,7 +394,7 @@ export function createTodoWriteTool(
             .filter((value): value is string => value !== undefined),
         );
         if (checkpointIds.size !== 1) {
-          throw new Error("Goal 模式下必须提供唯一的 checkpoint_id");
+          throw new Error("checkpoint_id is required in goal mode");
         }
         const checkpointId = [...checkpointIds][0]!;
         const snapshot = options.goalController!.writeTodos({
@@ -405,24 +405,24 @@ export function createTodoWriteTool(
         return [
           `Goal Checkpoint：${checkpointId}`,
           `Todo snapshot revision：${snapshot.revision}`,
-          `共 ${todos.length} 项`,
-          counts.completed > 0 ? `${counts.completed} 已完成（含 evidence）` : "",
-          counts.in_progress > 0 ? `${counts.in_progress} 进行中` : "",
-          counts.pending > 0 ? `${counts.pending} 待办` : "",
+          `${todos.length} items`,
+          counts.completed > 0 ? `${counts.completed} completed (with evidence)` : "",
+          counts.in_progress > 0 ? `${counts.in_progress} in progress` : "",
+          counts.pending > 0 ? `${counts.pending} pending` : "",
         ]
           .filter((line) => line.length > 0)
           .join("\n");
       }
 
-      const parts = [`共 ${todos.length} 项`];
-      if (counts.completed > 0) parts.push(`${counts.completed} 已完成`);
-      if (counts.in_progress > 0) parts.push(`${counts.in_progress} 进行中`);
-      if (counts.pending > 0) parts.push(`${counts.pending} 待办`);
+      const parts = [`${todos.length} items`];
+      if (counts.completed > 0) parts.push(`${counts.completed} completed`);
+      if (counts.in_progress > 0) parts.push(`${counts.in_progress} in progress`);
+      if (counts.pending > 0) parts.push(`${counts.pending} pending`);
 
       const idLine = todos.map((todo) => `${todo.id}=${todo.status}`).join(", ");
       return [
-        ...(summary !== undefined ? [`计划：${summary}`] : []),
-        `待办清单已更新：${parts.join("，")}`,
+        ...(summary !== undefined ? [`plan: ${summary}`] : []),
+        `todo list updated: ${parts.join(", ")}`,
         `id：${idLine}`,
       ].join("\n");
     },

@@ -154,7 +154,7 @@ describe("isolated worker executor", () => {
           repoRoot: undefined,
           head: undefined,
           dirty: false,
-          reason: "未找到 Git",
+          reason: "Git not found",
           installHint: "winget install --id Git.Git -e --source winget",
         }),
       }),
@@ -162,8 +162,8 @@ describe("isolated worker executor", () => {
 
     const result = await transport.wait(await transport.start(workerSpec("worker-1", root)));
     expect(result.status).toBe("error");
-    expect(result.summary).toContain("未找到 Git");
-    expect(result.summary).toContain("隔离修改");
+    expect(result.summary).toContain("Git not found");
+    expect(result.summary).toContain("isolates changes");
     expect(result.summary).toContain("winget install");
     await transport.dispose();
   });
@@ -186,7 +186,7 @@ describe("isolated worker executor", () => {
 
     const result = await transport.wait(await transport.start(workerSpec("worker-1", repo)));
     expect(result.status).toBe("error");
-    expect(result.summary).toMatch(/未提交修改/);
+    expect(result.summary).toMatch(/uncommitted changes/);
     expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("dirty\n");
     await transport.dispose();
   });

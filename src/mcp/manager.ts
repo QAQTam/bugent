@@ -155,7 +155,7 @@ export class McpManager {
 
   async start(config: McpStdioServerConfig): Promise<McpServerHandle> {
     if (this.#servers.has(config.id)) {
-      throw new Error(`MCP server ${config.id} 已存在`);
+      throw new Error(`MCP server ${config.id} already exists`);
     }
     const client = new McpStdioClient(config);
     await client.start();
@@ -204,7 +204,7 @@ export class McpManager {
    */
   async reload(id: string): Promise<McpToolsChanged> {
     const handle = this.#servers.get(id);
-    if (handle === undefined) throw new Error(`MCP server ${id} 未运行`);
+    if (handle === undefined) throw new Error(`MCP server ${id} is not running`);
     const tools = await handle.client.listTools();
     const nextNames = new Set(tools.map((tool) => mcpToolName(id, tool.name)));
     const previousNames = new Set(
@@ -262,7 +262,7 @@ export class McpManager {
     const incoming = handle.tools.map((tool) => mcpToolName(handle.id, tool.name));
     for (const name of incoming) {
       if (!names.has(name) && registry.get(name) !== undefined) {
-        throw new Error(`MCP 工具名冲突：${name}`);
+        throw new Error(`MCP tool name conflict: ${name}`);
       }
     }
     const added: string[] = [];
@@ -289,7 +289,7 @@ export class McpManager {
     const nextNames = tools.map((tool) => mcpToolName(handle.id, tool.name));
     for (const name of nextNames) {
       if (!oldNames.has(name) && registry.get(name) !== undefined) {
-        throw new Error(`MCP 工具名冲突：${name}`);
+        throw new Error(`MCP tool name conflict: ${name}`);
       }
     }
     for (const name of oldNames) {

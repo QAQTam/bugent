@@ -104,19 +104,19 @@ export function createWorkerAgentExecutor(
   return {
     async run(context: AgentExecutionContext) {
       if (context.spec.identity.kind !== "worker") {
-        throw new Error(`worker executor 只支持 worker，收到 ${context.spec.identity.kind}`);
+        throw new Error(`worker executor only supports worker, received ${context.spec.identity.kind}`);
       }
       if (context.spec.sandbox.workspace.isolation !== "worktree") {
-        throw new Error("worker executor 要求 workspace.isolation=worktree");
+        throw new Error("worker executor requires workspace.isolation=worktree");
       }
       if (
         context.spec.sandbox.authority !== "workspace-write" &&
         context.spec.sandbox.authority !== "full"
       ) {
-        throw new Error(`worker executor 要求可写 authority，收到 ${context.spec.sandbox.authority}`);
+        throw new Error(`worker executor requires a writable authority, received ${context.spec.sandbox.authority}`);
       }
       if (!context.spec.sandbox.capabilities.includes("fs.write")) {
-        throw new Error("worker executor 要求 fs.write capability");
+        throw new Error("worker executor requires the fs.write capability");
       }
       if (context.signal.aborted) {
         return {
@@ -131,9 +131,9 @@ export function createWorkerAgentExecutor(
       const capability = await probe(sourceRoot);
       if (!capability.available || !capability.workerReady) {
         throw new Error(
-          `worker 隔离不可用：${capability.reason ?? "Git capability 缺失"}。` +
-            "Git worktree 用于隔离修改、导出 patch，并避免子代理污染主工作区。" +
-            (capability.installHint !== undefined ? ` 安装建议：${capability.installHint}` : ""),
+          `worker isolation unavailable: ${capability.reason ?? "missing Git capability"}. ` +
+            "A Git worktree isolates changes, exports a patch, and keeps subagents from touching the parent workspace. " +
+            (capability.installHint !== undefined ? ` Install hint: ${capability.installHint}` : ""),
         );
       }
 

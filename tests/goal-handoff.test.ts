@@ -135,7 +135,7 @@ describe("Goal P4 · living handoff", () => {
       builder.applyPatches(first.revision, "worker", [
         { section: "work_log", operation: "append", content: "stale" },
       ]),
-    ).rejects.toThrow("base revision 已过期");
+    ).rejects.toThrow("base revision is stale");
   });
 
   test("Context Epoch 从 msgid0 新分支生成不可变 snapshot", async () => {

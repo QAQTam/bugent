@@ -69,12 +69,12 @@ describe("diff", () => {
   test("超大内容退化为行数摘要，不建 DP 表", () => {
     const huge = Array.from({ length: 2000 }, (_, i) => `l${i}`).join("\n");
     const lines = diffLines(huge, "small");
-    expect(lines[0]?.text).toContain("超过");
+    expect(lines[0]?.text).toContain("no line-by-line diff");
   });
 
   test("formatDiff 首行是统计头", () => {
-    const text = formatDiff(diffLines("a\n", "b\n"), "已编辑 x.ts");
-    expect(text.split("\n")[0]).toBe("已编辑 x.ts");
+    const text = formatDiff(diffLines("a\n", "b\n"), "edited x.ts");
+    expect(text.split("\n")[0]).toBe("edited x.ts");
   });
 });
 
@@ -92,12 +92,12 @@ describe("bash 输出截断与落盘", () => {
         ctxFor(cwd),
       );
 
-      expect(out).toContain("已省略");
-      expect(out).toContain("完整输出共");
+      expect(out).toContain("characters omitted");
+      expect(out).toContain("full output is");
       expect(out).toContain("read_file");
 
       // 落盘文件确实存在且是完整内容
-      const match = /已写入：(.+?)\]/u.exec(out);
+      const match = /written to: (.+?)\]/u.exec(out);
       expect(match).not.toBeNull();
       const path = match![1]!;
       const full = await readFile(path, "utf8");
@@ -123,10 +123,10 @@ describe("bash 输出截断与落盘", () => {
         ctxFor(cwd),
       );
 
-      expect(out).toContain("已截断");
-      expect(out).toContain("完整输出共");
+      expect(out).toContain("was truncated");
+      expect(out).toContain("full output is");
 
-      const match = /已写入：(.+?)\]/u.exec(out);
+      const match = /written to: (.+?)\]/u.exec(out);
       expect(match).not.toBeNull();
       const full = await readFile(match![1]!, "utf8");
       expect(full.length).toBeGreaterThan(200_000);
@@ -148,7 +148,7 @@ describe("bash 输出截断与落盘", () => {
       const tool = createBashTool(createShellRunner());
       const out = await tool.run({ command: "echo short" }, ctxFor(cwd));
       expect(out).toContain("short");
-      expect(out).not.toContain("已省略");
+      expect(out).not.toContain("characters omitted");
 
       // 临时 spool 必须被清理，不能给短命令留下垃圾文件。
       expect(await readdir(join(home, ".bugent", "output", "s1"))).toEqual([]);
@@ -324,7 +324,7 @@ describe("diff 统计徽标", () => {
     };
 
     const lines = renderDiffTool(item, 80);
-    expect(lines.some((line) => line.includes("还有"))).toBe(false);
+    expect(lines.some((line) => line.includes("more lines not shown"))).toBe(false);
   });
 
   test("失败时不显示徽标", () => {
@@ -373,7 +373,7 @@ describe("read_file 截断", () => {
 
     const out = await createReadFileTool().run({ path: "small.txt" }, ctxFor(cwd));
     expect(out).toContain("1\ta");
-    expect(out).not.toContain("还有");
+    expect(out).not.toContain("more lines not shown");
   });
 describe("bash 头部 · 长命令折行", () => {
   const command =

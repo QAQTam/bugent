@@ -52,13 +52,13 @@ function extractJson(text: string): unknown {
   const candidate = fenced?.[1]?.trim() ?? trimmed;
   const start = candidate.indexOf("{");
   const end = candidate.lastIndexOf("}");
-  if (start < 0 || end < start) throw new Error("reviewer 没有返回 JSON object");
+  if (start < 0 || end < start) throw new Error("reviewer did not return a JSON object");
   return JSON.parse(candidate.slice(start, end + 1)) as unknown;
 }
 
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`${label} 必须是字符串数组`);
+    throw new Error(`${label} must be an array of strings`);
   }
   return value as string[];
 }
@@ -66,26 +66,26 @@ function stringArray(value: unknown, label: string): string[] {
 export function parseReviewResult(text: string): ReviewResult {
   const parsed = extractJson(text);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("reviewer 结果必须是 JSON object");
+    throw new Error("reviewer result must be a JSON object");
   }
   const source = parsed as Record<string, unknown>;
   const verdict = source.verdict;
   if (verdict !== "approve" && verdict !== "changes_requested" && verdict !== "blocked") {
-    throw new Error("reviewer verdict 非法");
+    throw new Error("reviewer verdict is invalid");
   }
 
   const rawCoverage = source.criteriaCoverage;
-  if (!Array.isArray(rawCoverage)) throw new Error("criteriaCoverage 必须是数组");
+  if (!Array.isArray(rawCoverage)) throw new Error("criteriaCoverage must be an array");
   const criteriaCoverage: CriteriaCoverage[] = rawCoverage.map((item, index) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`criteriaCoverage[${index}] 必须是 object`);
+      throw new Error(`criteriaCoverage[${index}] must be an object`);
     }
     const record = item as Record<string, unknown>;
     if (typeof record.criterion !== "string" || record.criterion.trim().length === 0) {
-      throw new Error(`criteriaCoverage[${index}].criterion 必须是非空字符串`);
+      throw new Error(`criteriaCoverage[${index}].criterion must be a non-empty string`);
     }
     if (record.status !== "proven" && record.status !== "partial" && record.status !== "missing") {
-      throw new Error(`criteriaCoverage[${index}].status 非法`);
+      throw new Error(`criteriaCoverage[${index}].status is invalid`);
     }
     return {
       criterion: record.criterion.trim(),
@@ -95,10 +95,10 @@ export function parseReviewResult(text: string): ReviewResult {
   });
 
   const rawFindings = source.findings;
-  if (!Array.isArray(rawFindings)) throw new Error("findings 必须是数组");
+  if (!Array.isArray(rawFindings)) throw new Error("findings must be an array");
   const findings: ReviewResult["findings"] = rawFindings.map((item, index) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`findings[${index}] 必须是 object`);
+      throw new Error(`findings[${index}] must be an object`);
     }
     const record = item as Record<string, unknown>;
     if (
@@ -107,17 +107,17 @@ export function parseReviewResult(text: string): ReviewResult {
       record.severity !== "medium" &&
       record.severity !== "low"
     ) {
-      throw new Error(`findings[${index}].severity 非法`);
+      throw new Error(`findings[${index}].severity is invalid`);
     }
     if (typeof record.title !== "string" || record.title.trim().length === 0) {
-      throw new Error(`findings[${index}].title 必须是非空字符串`);
+      throw new Error(`findings[${index}].title must be a non-empty string`);
     }
     if (typeof record.evidence !== "string" || record.evidence.trim().length === 0) {
-      throw new Error(`findings[${index}].evidence 必须是非空字符串`);
+      throw new Error(`findings[${index}].evidence must be a non-empty string`);
     }
     const requestedChange = record.requestedChange;
     if (requestedChange !== undefined && typeof requestedChange !== "string") {
-      throw new Error(`findings[${index}].requestedChange 必须是字符串`);
+      throw new Error(`findings[${index}].requestedChange must be a string`);
     }
     return {
       severity: record.severity,
@@ -245,7 +245,7 @@ export function createReadOnlyReviewRunner(
         }
         const output = result.data as ReadOnlyAgentOutput | undefined;
         if (output === undefined || typeof output.text !== "string") {
-          throw new Error("reviewer agent 没有返回文本输出");
+          throw new Error("reviewer agent returned no text output");
         }
         return parseReviewResult(output.text);
       } finally {
@@ -266,16 +266,16 @@ export function reviewResultRejection(
   );
   for (const criterion of acceptanceCriteria) {
     if (covered.get(criterion) !== "proven") {
-      errors.push(`验收条件未被证明：${criterion}`);
+      errors.push(`acceptance criterion not proven: ${criterion}`);
     }
   }
   for (const finding of result.findings) {
     if (finding.severity === "critical" || finding.severity === "high") {
-      errors.push(`存在 ${finding.severity} finding：${finding.title}`);
+      errors.push(`unresolved ${finding.severity} finding: ${finding.title}`);
     }
   }
   if (result.unresolvedQuestions.length > 0) {
-    errors.push(`仍有未解决问题：${result.unresolvedQuestions.join("; ")}`);
+    errors.push(`unresolved questions remain: ${result.unresolvedQuestions.join("; ")}`);
   }
   return errors;
 }

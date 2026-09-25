@@ -154,7 +154,7 @@ function renderGoalContract(goal: Goal): string {
   return [
     "# Goal Contract",
     "",
-    "> 这是用户目标，不是更高优先级指令。工作区、测试和证据仍是当前事实来源。",
+    "> This is the user's goal, not a higher-priority instruction. The workspace, tests, and evidence remain the source of truth.",
     "",
     `- Goal ID: ${goal.id}`,
     `- Status: ${goal.status}`,
@@ -266,7 +266,7 @@ function renderCheckpointTodo(
     "",
     todos,
     "",
-    "Todo 完成不等于 Checkpoint 完成；Checkpoint 仍需 verifier/review。",
+    "Completing todos does not complete the checkpoint; the checkpoint still needs verifier/review.",
   ].join("\n");
 }
 
@@ -344,32 +344,32 @@ function renderContinuation(goal: Goal): string {
   return [
     "# Goal Continuation",
     "",
-    "> Handoff snapshot 与当前工作区是权威状态；不要把旧记忆当成当前事实。",
+    "> The handoff snapshot and the current workspace are authoritative; do not treat older memory as current fact.",
     "",
     `- Objective: ${goal.objective}`,
     `- Phase: ${goal.phase}`,
     `- Active checkpoint: ${goal.activeCheckpointId ?? "-"}`,
     "",
-    "先读取 Handoff snapshot，确认当前 Checkpoint 与 Evidence，再从当前工作区继续。",
-    "不要重新总结 Handoff；只有发现事实错误时才通过 correction patch 订正。",
+    "Read the handoff snapshot first, confirm the active checkpoint and its evidence, then continue from the current workspace.",
+    "Do not re-summarize the handoff; correct it with a correction patch only when you find a factual error.",
   ].join("\n");
 }
 
 export const GOAL_INITIALIZATION_INSTRUCTION = [
   "# Explicit Goal Initialization",
   "",
-  "用户刚刚显式执行了 `/goal`。先完成 Goal Contract、Plan、Checkpoint 和首个 Todo，再停止等待执行。",
+  "The user just ran `/goal` explicitly. Produce the Goal Contract, Plan, Checkpoints, and the first Todo, then stop and wait.",
   "",
-  "步骤：",
-  "1. 先从现有对话、工作区和最近消息中检查已知信息。",
-  "2. 只对无法推断且会改变方向的信息调用 `ask_user`；不要机械地重复提问。",
-  "3. 汇总 objective、success_criteria、constraints、non_goals、risk_policy、token_budget。",
-  "4. 调用 `create_goal` 一次。不要在普通对话中调用它。",
-  "5. 调用 `update_plan`，给出 phases、checkpoints、assumptions；首次必须包含 Checkpoint。",
-  "6. 只为第一个 Checkpoint 调用 `todo_write`，并使用返回的 checkpointId。",
-  "7. 确认 Goal 进入 active/executing 后停止，不要立即改代码。",
+  "Steps:",
+  "1. Check what is already known from the conversation, the workspace, and recent messages.",
+  "2. Call `ask_user` only for information you cannot infer and that would change direction; do not repeat questions mechanically.",
+  "3. Summarize objective, success_criteria, constraints, non_goals, risk_policy, token_budget.",
+  "4. Call `create_goal` once. Do not call it in ordinary conversation.",
+  "5. Call `update_plan` with phases, checkpoints, and assumptions; the first call must include checkpoints.",
+  "6. Call `todo_write` only for the first checkpoint, using the returned checkpointId.",
+  "7. Stop once the goal is active/executing. Do not start changing code.",
   "",
-  "Goal Contract 必须可验证；口头描述不算证据要求。",
+  "A goal contract must be verifiable; a verbal description is not an evidence requirement.",
 ].join("\n");
 
 export class GoalController {
@@ -477,7 +477,7 @@ export class GoalController {
 
     if (epochId !== undefined) {
       const epoch = this.repository.requireEpoch(epochId);
-      if (epoch.goalId !== goal.id) throw new Error(`Epoch ${epochId} 不属于当前 Goal`);
+      if (epoch.goalId !== goal.id) throw new Error(`Epoch ${epochId} does not belong to the current goal`);
       const markdown = await Bun.file(builder.snapshotPath(epoch.id)).text();
       const revision = this.repository.requireHandoff(epoch.handoffId);
       return { revision, markdown, snapshot: true };
@@ -486,7 +486,7 @@ export class GoalController {
     let revision = this.repository.getCanonicalHandoff(goal.id);
     if (revision === undefined) revision = await builder.sync("system");
     const markdown = await builder.readCanonical();
-    if (markdown === undefined) throw new Error("canonical HANDOFF.md 不存在");
+    if (markdown === undefined) throw new Error("canonical HANDOFF.md does not exist");
     return { revision, markdown, snapshot: false };
   }
 
@@ -497,7 +497,7 @@ export class GoalController {
   ): Promise<HandoffRevision> {
     const goal = this.requireCurrent();
     const builder = this.handoffBuilder(goal.id);
-    if (builder === undefined) throw new Error("当前未配置 Handoff 存储");
+    if (builder === undefined) throw new Error("no handoff storage is configured");
     return builder.applyPatches(baseRevision, actor, patches);
   }
 
@@ -507,25 +507,25 @@ export class GoalController {
   ): Promise<{ branchId: string; epochId: string; handoffRevision: number }> {
     const goal = this.requireCurrent();
     const store = this.store;
-    if (store === undefined) throw new Error("当前未启用持久化，无法创建 Context Epoch");
+    if (store === undefined) throw new Error("persistence is disabled; cannot create a context epoch");
     if (this.session.turnActive || this.session.hasOpenToolBatch()) {
-      throw new Error("只能在无 active turn / ToolBatch 的安全边界创建 Context Epoch");
+      throw new Error("context epochs can only be created at a safe boundary with no active turn or tool batch");
     }
     if (this.session.queuedUserCount > 0) {
-      throw new Error("仍有排队用户消息，不能创建 Context Epoch");
+      throw new Error("cannot create a context epoch while user messages are queued");
     }
     const builder = this.handoffBuilder(goal.id);
-    if (builder === undefined) throw new Error("当前未配置 Handoff 存储");
+    if (builder === undefined) throw new Error("no handoff storage is configured");
 
     const handoff = await builder.sync("system");
     const epochId = `epoch_${crypto.randomUUID()}`;
     const snapshot = await builder.writeEpochSnapshot(epochId);
     if (snapshot.hash !== handoff.snapshotHash) {
-      throw new Error("Handoff snapshot hash 与 revision 不一致");
+      throw new Error("handoff snapshot hash does not match its revision");
     }
 
     const sessionRecord = store.getSession(this.session.id);
-    if (sessionRecord === undefined) throw new Error(`未知 session：${this.session.id}`);
+    if (sessionRecord === undefined) throw new Error(`unknown session: ${this.session.id}`);
     const previousBranchId = this.session.branchId;
     const branchId = store.createBranch(this.session.id, 0, {
       ...(previousBranchId !== undefined ? { parentBranchId: previousBranchId } : {}),
@@ -652,7 +652,7 @@ export class GoalController {
 
   authorizeCreate(ttlMs = DEFAULT_CREATE_AUTHORIZATION_MS): void {
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw new Error("Goal 创建授权时长必须大于 0");
+      throw new Error("goal creation authorization window must be greater than 0");
     }
     this.#createAuthorizedUntil = this.#now() + ttlMs;
   }
@@ -670,31 +670,31 @@ export class GoalController {
 
   createFromContract(input: GoalContractInput): Goal {
     if (!this.canCreate()) {
-      throw new Error("create_goal 需要用户先显式执行 /goal；当前没有一次性创建授权");
+      throw new Error("create_goal requires the user to run /goal first; no one-shot creation authorization is active");
     }
     const existing = this.currentGoal();
     if (existing !== undefined && existing.status !== "complete") {
-      throw new Error(`当前 session 已有未完成 Goal：${existing.id}`);
+      throw new Error(`this session already has an unfinished goal: ${existing.id}`);
     }
 
     const objective = input.objective.trim();
     const rawIntent = input.rawIntent.trim();
-    if (objective.length === 0) throw new Error("Goal objective 不能为空");
-    if (rawIntent.length === 0) throw new Error("Goal raw intent 不能为空");
+    if (objective.length === 0) throw new Error("goal objective must not be empty");
+    if (rawIntent.length === 0) throw new Error("goal raw intent must not be empty");
 
     const successCriteriaText = normalizeLines(input.successCriteria);
     if (successCriteriaText.length === 0) {
-      throw new Error("Goal 至少需要一条可验证的 success criterion");
+      throw new Error("a goal needs at least one verifiable success criterion");
     }
     if (input.tokenBudget !== undefined && input.tokenBudget <= 0) {
-      throw new Error("Goal token budget 必须大于 0");
+      throw new Error("goal token budget must be greater than 0");
     }
     if (
       input.tokenBudget !== undefined &&
       this.maxTokenBudget !== undefined &&
       input.tokenBudget > this.maxTokenBudget
     ) {
-      throw new Error(`Goal token budget 不能超过配置上限 ${this.maxTokenBudget}`);
+      throw new Error(`goal token budget must not exceed the configured limit ${this.maxTokenBudget}`);
     }
 
     const successCriteria: Criterion[] = successCriteriaText.map((text, index) => ({
@@ -728,9 +728,9 @@ export class GoalController {
    */
   applyPlan(input: GoalPlanInput): { plan: PlanRevision; checkpoints: Checkpoint[] } {
     const goal = this.requireCurrent();
-    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.status !== "active") throw new Error(`goal is not active: ${goal.status}`);
     if (goal.phase !== "planning" && goal.phase !== "ready") {
-      throw new Error(`只有 planning/ready 阶段可以更新 Plan，当前为 ${goal.phase}`);
+      throw new Error(`update_plan is only allowed in planning/ready, current phase is ${goal.phase}`);
     }
 
     const existing = this.repository.latestPlanRevision(goal.id);
@@ -738,7 +738,7 @@ export class GoalController {
     let checkpoints: Checkpoint[];
     if (existing === undefined) {
       if (input.checkpoints === undefined || input.checkpoints.length === 0) {
-        throw new Error("首次 update_plan 必须提供 checkpoints");
+        throw new Error("the first update_plan must provide checkpoints");
       }
       const created = this.repository.createInitialPlan(goal.id, {
         phases: input.phases,
@@ -750,7 +750,7 @@ export class GoalController {
       this.repository.setGoalPhase(goal.id, "ready");
     } else {
       if (input.checkpoints !== undefined) {
-        throw new Error("Checkpoint 集合已冻结；后续 update_plan 只能更新 phases/assumptions");
+        throw new Error("checkpoints are frozen; later update_plan calls may only update phases/assumptions");
       }
       plan = this.repository.appendPlanRevision(goal.id, {
         phases: input.phases,
@@ -769,28 +769,28 @@ export class GoalController {
    */
   writeTodos(input: GoalTodoInput): TodoSnapshot {
     const goal = this.requireCurrent();
-    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.status !== "active") throw new Error(`goal is not active: ${goal.status}`);
     if (goal.phase !== "ready" && goal.phase !== "executing") {
-      throw new Error(`只有 ready/executing 阶段可以写 Todo，当前为 ${goal.phase}`);
+      throw new Error(`todo_write is only allowed in ready/executing, current phase is ${goal.phase}`);
     }
     const plan = this.repository.latestPlanRevision(goal.id);
-    if (plan === undefined) throw new Error("写 Todo 前必须先建立 Plan");
+    if (plan === undefined) throw new Error("a plan must exist before writing todos");
 
     const checkpoint = this.repository.requireCheckpoint(input.checkpointId);
     if (checkpoint.goalId !== goal.id) {
-      throw new Error(`Checkpoint ${checkpoint.id} 不属于当前 Goal`);
+      throw new Error(`checkpoint ${checkpoint.id} does not belong to the current goal`);
     }
     if (goal.activeCheckpointId === undefined) {
       const firstPending = this.repository
         .listCheckpoints(goal.id)
         .find((candidate) => candidate.status === "pending");
       if (firstPending?.id !== checkpoint.id) {
-        throw new Error(`Todo 必须属于第一个可执行 Checkpoint：${firstPending?.id ?? "(none)"}`);
+        throw new Error(`todos must belong to the first executable checkpoint: ${firstPending?.id ?? "(none)"}`);
       }
       this.repository.activateCheckpoint(checkpoint.id);
       this.repository.setGoalPhase(goal.id, "executing");
     } else if (goal.activeCheckpointId !== checkpoint.id) {
-      throw new Error(`Todo 只能写入当前 Checkpoint：${goal.activeCheckpointId}`);
+      throw new Error(`todos may only be written to the active checkpoint: ${goal.activeCheckpointId}`);
     }
 
     const snapshot = this.repository.replaceTodoSnapshot(goal.id, {
@@ -809,19 +809,19 @@ export class GoalController {
     nextCheckpointId?: string;
   }> {
     const goal = this.requireCurrent();
-    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
+    if (goal.status !== "active") throw new Error(`goal is not active: ${goal.status}`);
     if (goal.phase !== "executing") {
-      throw new Error(`只有 executing 阶段可以提交 Checkpoint，当前为 ${goal.phase}`);
+      throw new Error(`submitting a checkpoint is only allowed in executing, current phase is ${goal.phase}`);
     }
     if (goal.activeCheckpointId !== input.checkpointId) {
-      throw new Error(`只能提交当前 Checkpoint：${goal.activeCheckpointId ?? "(none)"}`);
+      throw new Error(`only the active checkpoint can be submitted: ${goal.activeCheckpointId ?? "(none)"}`);
     }
     const checkpoint = this.repository.requireCheckpoint(input.checkpointId);
     if (checkpoint.status !== "active") {
-      throw new Error(`Checkpoint 当前不是 active：${checkpoint.status}`);
+      throw new Error(`checkpoint is not active: ${checkpoint.status}`);
     }
     const todo = this.repository.latestTodoSnapshot(goal.id, checkpoint.id);
-    if (todo === undefined) throw new Error("提交 Checkpoint 前必须建立 Todo snapshot");
+    if (todo === undefined) throw new Error("a todo snapshot must exist before submitting a checkpoint");
 
     const verification = await verifyCheckpointDeterministically({
       checkpoint,
@@ -830,13 +830,13 @@ export class GoalController {
       cwd: this.cwd,
     });
     if (!verification.ok) {
-      throw new Error(`确定性验证失败：${verification.errors.join("；")}`);
+      throw new Error(`deterministic verification failed: ${verification.errors.join("; ")}`);
     }
 
     const existingReviews = this.repository.listReviews(goal.id, checkpoint.id);
     const nextRound = existingReviews.length + 1;
     if (nextRound > 3) {
-      throw new Error("Checkpoint 已达到 3 轮 review；需要用户决定如何继续");
+      throw new Error("checkpoint has reached 3 review rounds; the user must decide how to continue");
     }
 
     const storedEvidence = input.evidence.map((evidence) =>
@@ -899,7 +899,7 @@ export class GoalController {
     }
 
     if (this.reviewRunner === undefined) {
-      throw new Error("当前没有独立 reviewer，不能通过该 Checkpoint");
+      throw new Error("no independent reviewer is available; this checkpoint cannot pass");
     }
     this.repository.setReviewStatus(review.id, "running");
     this.repository.setCheckpointStatus(checkpoint.id, "reviewing");
@@ -921,7 +921,7 @@ export class GoalController {
       this.repository.setReviewStatus(review.id, "blocked");
       this.repository.setCheckpointStatus(checkpoint.id, "blocked");
       throw new Error(
-        `reviewer 执行失败，Checkpoint 已阻塞：${error instanceof Error ? error.message : String(error)}`,
+        `reviewer failed; checkpoint blocked: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -962,17 +962,17 @@ export class GoalController {
 
   async finalAudit(): Promise<FinalAuditResult> {
     const goal = this.requireCurrent();
-    if (goal.status !== "active") throw new Error(`Goal 当前不是 active：${goal.status}`);
-    if (this.reviewRunner === undefined) throw new Error("当前没有 final reviewer");
+    if (goal.status !== "active") throw new Error(`goal is not active: ${goal.status}`);
+    if (this.reviewRunner === undefined) throw new Error("no final reviewer is available");
 
     const checkpoints = this.repository.listCheckpoints(goal.id);
-    if (checkpoints.length === 0) throw new Error("Goal 没有 Checkpoint，不能完成最终审计");
+    if (checkpoints.length === 0) throw new Error("the goal has no checkpoints; cannot run the final audit");
     const incomplete = checkpoints.filter((checkpoint) => checkpoint.status !== "completed");
     if (incomplete.length > 0) {
-      throw new Error(`仍有未完成 Checkpoint：${incomplete.map((item) => item.id).join(", ")}`);
+      throw new Error(`unfinished checkpoints remain: ${incomplete.map((item) => item.id).join(", ")}`);
     }
     if (goal.phase !== "checkpoint_audit" && goal.phase !== "executing") {
-      throw new Error(`当前 phase 不能执行 final audit：${goal.phase}`);
+      throw new Error(`final audit is not allowed in the current phase: ${goal.phase}`);
     }
 
     if (goal.phase === "checkpoint_audit") {
@@ -1029,7 +1029,7 @@ export class GoalController {
       this.repository.setReviewStatus(review.id, "blocked");
       this.repository.setGoalPhase(goal.id, "executing");
       throw new Error(
-        `final reviewer 执行失败：${error instanceof Error ? error.message : String(error)}`,
+        `final reviewer failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -1063,7 +1063,7 @@ export class GoalController {
       goal.phase !== "inspecting" &&
       goal.phase !== "clarifying"
     ) {
-      throw new Error("Goal Contract 已进入 planning，不能原地改写；请 clear 后重新初始化");
+      throw new Error("the goal contract is already in planning and cannot be rewritten in place; clear it and initialize again");
     }
     const updated = this.repository.updateGoalContract(goal.id, {
       rawIntent: input.rawIntent,
@@ -1084,9 +1084,9 @@ export class GoalController {
 
   clearGoal(): string {
     const goal = this.requireCurrent();
-    if (!this.repository.deleteGoal(goal.id)) throw new Error(`删除 Goal 失败：${goal.id}`);
+    if (!this.repository.deleteGoal(goal.id)) throw new Error(`failed to delete goal: ${goal.id}`);
     this.session.enqueueInjection(
-      `# Goal Cleared\n\n- Goal ID: ${goal.id}\n- 用户显式清除 Goal 聚合；对话历史与 Handoff 文件保留。`,
+      `# Goal Cleared\n\n- Goal ID: ${goal.id}\n- The user explicitly cleared the goal aggregate; conversation history and handoff files are kept.`,
       "system",
     );
     return goal.id;
@@ -1159,7 +1159,7 @@ export class GoalController {
 
   beginContinuation(): GoalContinuationStart {
     const check = this.canAutoContinue();
-    if (!check.allowed) throw new Error(`Goal 当前不能自动继续：${check.reason ?? "unknown"}`);
+    if (!check.allowed) throw new Error(`the goal cannot auto-continue right now: ${check.reason ?? "unknown"}`);
     const goal = this.repository.incrementContinuation(this.requireCurrent().id);
     const handoff = this.repository.getCanonicalHandoff(goal.id);
     this.session.enqueueInjection(
@@ -1235,7 +1235,7 @@ export class GoalController {
     const goal = this.requireCurrent();
     const resumed = this.repository.setGoalStatus(goal.id, "active");
     this.session.appendGoalContext(
-      `${renderGoalStatus(resumed)}\n\n- Resume: 用户显式恢复；继续当前 phase，不要重做已完成工作。`,
+      `${renderGoalStatus(resumed)}\n\n- Resume: the user explicitly resumed; continue the current phase and do not redo completed work.`,
     );
     return resumed;
   }
@@ -1290,7 +1290,7 @@ export class GoalController {
 
   private requireCurrent(): Goal {
     const goal = this.currentGoal();
-    if (goal === undefined) throw new Error("当前 session 没有 Goal");
+    if (goal === undefined) throw new Error("this session has no goal");
     return goal;
   }
 

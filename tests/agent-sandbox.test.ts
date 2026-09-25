@@ -72,7 +72,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/不允许 capability fs.write/);
+    ).toThrow(/does not allow capability fs.write/);
 
     expect(() =>
       compileAgentSandboxSpec(
@@ -85,7 +85,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/不允许 capability network/);
+    ).toThrow(/does not allow capability network/);
   });
 
   test("process.exec fails closed without a process isolation provider", () => {
@@ -99,7 +99,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/没有进程隔离/);
+    ).toThrow(/no process isolation/);
   });
 
   test("network capability requires an explicit one-shot grant", () => {
@@ -159,7 +159,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/必须位于 workspace root/);
+    ).toThrow(/must stay inside the workspace root/);
 
     expect(() =>
       compileAgentSandboxSpec(
@@ -174,7 +174,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/重叠/);
+    ).toThrow(/overlaps/);
   });
 
   test("returned spec is deeply frozen", () => {
@@ -218,7 +218,7 @@ describe("P7-A · AgentSandboxSpec compiler", () => {
         },
         "linux",
       ),
-    ).toThrow(/保留变量/);
+    ).toThrow(/reserved variables/);
   });
 
   test("agent.spawn requires an explicit positive maxDepth", () => {

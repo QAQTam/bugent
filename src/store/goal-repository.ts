@@ -346,13 +346,13 @@ function isOneOf<T extends string>(value: unknown, values: readonly T[]): value 
 function nonEmpty(value: string, field: string): string {
   const normalized = value.trim();
   if (normalized.length === 0) {
-    throw new GoalRepositoryError(`${field} 不能为空`);
+    throw new GoalRepositoryError(`${field} must not be empty`);
   }
   return normalized;
 }
 
 function nonEmptyList(values: readonly string[], field: string): string[] {
-  if (values.length === 0) throw new GoalRepositoryError(`${field} 至少需要一项`);
+  if (values.length === 0) throw new GoalRepositoryError(`${field} needs at least one entry`);
   return values.map((value) => nonEmpty(value, field));
 }
 
@@ -536,9 +536,9 @@ function assertAcyclic(
     const unique = new Set(dependencies);
     for (const dependency of unique) {
       if (!idSet.has(dependency)) {
-        throw new GoalRepositoryError(`${label} ${id} 依赖不存在的 ${dependency}`);
+        throw new GoalRepositoryError(`${label} ${id} depends on missing ${dependency}`);
       }
-      if (dependency === id) throw new GoalRepositoryError(`${label} ${id} 不能依赖自身`);
+      if (dependency === id) throw new GoalRepositoryError(`${label} ${id} cannot depend on itself`);
       const targets = outgoing.get(dependency) ?? [];
       targets.push(id);
       outgoing.set(dependency, targets);
@@ -558,7 +558,7 @@ function assertAcyclic(
     }
   }
 
-  if (visited !== ids.length) throw new GoalRepositoryError(`${label} 依赖存在环`);
+  if (visited !== ids.length) throw new GoalRepositoryError(`${label} dependency graph has a cycle`);
 }
 
 export class GoalRepository {
@@ -578,10 +578,10 @@ export class GoalRepository {
     const status = input.status ?? "active";
     const phase = input.phase ?? "draft";
     if (!isOneOf(status, GOAL_STATUSES)) {
-      throw new GoalRepositoryError(`未知 Goal status：${String(status)}`);
+      throw new GoalRepositoryError(`unknown goal status: ${String(status)}`);
     }
     if (!isOneOf(phase, GOAL_PHASES)) {
-      throw new GoalRepositoryError(`未知 Goal phase：${String(phase)}`);
+      throw new GoalRepositoryError(`unknown goal phase: ${String(phase)}`);
     }
 
     const successCriteria = [...(input.successCriteria ?? [])];
@@ -594,10 +594,10 @@ export class GoalRepository {
       "final_audit",
     ];
     if (executionPhases.includes(phase) && successCriteria.length === 0) {
-      throw new GoalRepositoryError(`${phase} 阶段至少需要一条 success criterion`);
+      throw new GoalRepositoryError(`phase ${phase} needs at least one success criterion`);
     }
     if (input.tokenBudget !== undefined && input.tokenBudget <= 0) {
-      throw new GoalRepositoryError("token_budget 必须大于 0");
+      throw new GoalRepositoryError("token_budget must be greater than 0");
     }
 
     const riskPolicy: RiskPolicy = input.riskPolicy ?? {
@@ -644,7 +644,7 @@ export class GoalRepository {
 
   requireGoal(goalId: string): Goal {
     const goal = this.getGoal(goalId);
-    if (goal === undefined) throw new GoalRepositoryError(`未知 Goal：${goalId}`);
+    if (goal === undefined) throw new GoalRepositoryError(`unknown goal: ${goalId}`);
     return goal;
   }
 
@@ -685,7 +685,7 @@ export class GoalRepository {
   updateGoalContract(goalId: string, patch: GoalContractPatch): Goal {
     const current = this.requireGoal(goalId);
     if (current.status === "complete") {
-      throw new GoalRepositoryError("complete Goal 不能再修改 contract");
+      throw new GoalRepositoryError("a completed goal contract cannot be modified");
     }
     const successCriteria = patch.successCriteria ?? current.successCriteria;
     const objective =
@@ -694,7 +694,7 @@ export class GoalRepository {
       patch.rawIntent === undefined ? current.rawIntent : nonEmpty(patch.rawIntent, "raw_intent");
     if (current.phase !== "draft" && current.phase !== "inspecting" && current.phase !== "clarifying") {
       if (patch.objective !== undefined || patch.successCriteria !== undefined) {
-        throw new GoalRepositoryError("Goal 进入 planning 后不能静默改写 objective/success criteria");
+        throw new GoalRepositoryError("objective and success criteria cannot be silently rewritten once a goal is in planning");
       }
     }
     if (
@@ -706,10 +706,10 @@ export class GoalRepository {
         current.phase === "final_audit") &&
       successCriteria.length === 0
     ) {
-      throw new GoalRepositoryError("执行中的 Goal 必须有 success criteria");
+      throw new GoalRepositoryError("a running goal must have success criteria");
     }
     if (patch.tokenBudget !== undefined && patch.tokenBudget <= 0) {
-      throw new GoalRepositoryError("token_budget 必须大于 0");
+      throw new GoalRepositoryError("token_budget must be greater than 0");
     }
 
     const now = Date.now();
@@ -738,15 +738,15 @@ export class GoalRepository {
     const current = this.requireGoal(goalId);
     if (current.status === status) return current;
     if (!GOAL_STATUS_TRANSITIONS[current.status].includes(status)) {
-      throw new GoalRepositoryError(`非法 Goal 状态转换：${current.status} -> ${status}`);
+      throw new GoalRepositoryError(`invalid goal status transition: ${current.status} -> ${status}`);
     }
     if (status === "complete") {
       const checkpoints = this.listCheckpoints(goalId);
       if (current.phase !== "final_audit") {
-        throw new GoalRepositoryError("Goal 只能从 final_audit 进入 complete");
+        throw new GoalRepositoryError("a goal can only become complete from final_audit");
       }
       if (checkpoints.length === 0 || checkpoints.some((checkpoint) => checkpoint.status !== "completed")) {
-        throw new GoalRepositoryError("所有 Checkpoint 完成后才能完成 Goal");
+        throw new GoalRepositoryError("a goal can only complete after every checkpoint is done");
       }
     }
     this.#db
@@ -759,7 +759,7 @@ export class GoalRepository {
     const current = this.requireGoal(goalId);
     if (current.phase === phase) return current;
     if (!GOAL_PHASE_TRANSITIONS[current.phase].includes(phase)) {
-      throw new GoalRepositoryError(`非法 Goal phase 转换：${current.phase} -> ${phase}`);
+      throw new GoalRepositoryError(`invalid goal phase transition: ${current.phase} -> ${phase}`);
     }
     if (
       (phase === "ready" ||
@@ -770,7 +770,7 @@ export class GoalRepository {
         phase === "final_audit") &&
       current.successCriteria.length === 0
     ) {
-      throw new GoalRepositoryError(`${phase} 阶段至少需要一条 success criterion`);
+      throw new GoalRepositoryError(`phase ${phase} needs at least one success criterion`);
     }
     this.#db
       .query("UPDATE session_goals SET phase = ?, updated_at = ? WHERE goal_id = ?")
@@ -783,7 +783,7 @@ export class GoalRepository {
     if (checkpointId !== undefined) {
       const checkpoint = this.requireCheckpoint(checkpointId);
       if (checkpoint.goalId !== goalId) {
-        throw new GoalRepositoryError(`Checkpoint ${checkpointId} 不属于 Goal ${goalId}`);
+        throw new GoalRepositoryError(`checkpoint ${checkpointId} does not belong to goal ${goalId}`);
       }
     }
     this.#db
@@ -797,7 +797,7 @@ export class GoalRepository {
     if (epochId !== undefined) {
       const epoch = this.requireEpoch(epochId);
       if (epoch.goalId !== goalId) {
-        throw new GoalRepositoryError(`Epoch ${epochId} 不属于 Goal ${goalId}`);
+        throw new GoalRepositoryError(`epoch ${epochId} does not belong to goal ${goalId}`);
       }
     }
     this.#db
@@ -809,10 +809,10 @@ export class GoalRepository {
   recordTurn(goalId: string, input: TurnAccountingInput): TurnAccounting {
     this.requireGoal(goalId);
     if (input.inputTokens < 0 || input.outputTokens < 0 || (input.cachedTokens ?? 0) < 0) {
-      throw new GoalRepositoryError("token 计数不能为负数");
+      throw new GoalRepositoryError("token counts must not be negative");
     }
-    if (input.activeSeconds < 0) throw new GoalRepositoryError("active_seconds 不能为负数");
-    if (input.endedAt < input.startedAt) throw new GoalRepositoryError("ended_at 不能早于 started_at");
+    if (input.activeSeconds < 0) throw new GoalRepositoryError("active_seconds must not be negative");
+    if (input.endedAt < input.startedAt) throw new GoalRepositoryError("ended_at must not be earlier than started_at");
 
     const tx = this.#db.transaction(() => {
       this.#db
@@ -853,7 +853,7 @@ export class GoalRepository {
     const row = this.#db
       .query("SELECT * FROM goal_turn_accounting WHERE goal_id = ? AND turn_id = ?")
       .get(goalId, input.turnId) as TurnAccountingRow | null;
-    if (row === null) throw new GoalRepositoryError("turn accounting 写入失败");
+    if (row === null) throw new GoalRepositoryError("failed to write turn accounting");
     return rowToTurnAccounting(row);
   }
 
@@ -882,7 +882,7 @@ export class GoalRepository {
 
   setBlockedStreak(goalId: string, streak: number): Goal {
     if (!Number.isInteger(streak) || streak < 0) {
-      throw new GoalRepositoryError("blocked_streak 必须是非负整数");
+      throw new GoalRepositoryError("blocked_streak must be a non-negative integer");
     }
     this.requireGoal(goalId);
     this.#db
@@ -899,9 +899,9 @@ export class GoalRepository {
     now = Date.now(),
   ): Checkpoint[] {
     this.requireGoal(goalId);
-    if (definitions.length === 0) throw new GoalRepositoryError("Checkpoint 不能为空");
+    if (definitions.length === 0) throw new GoalRepositoryError("checkpoints must not be empty");
     if (definitions.length > 20) {
-      throw new GoalRepositoryError("单个 Goal 最多 20 个 Checkpoint；请合并微步骤");
+      throw new GoalRepositoryError("a goal allows at most 20 checkpoints; merge micro-steps");
     }
 
     const ids = definitions.map((definition) => definition.id ?? newId("cp"));
@@ -910,13 +910,13 @@ export class GoalRepository {
     for (let index = 0; index < definitions.length; index += 1) {
       const id = ids[index]!;
       const definition = definitions[index]!;
-      if (idSet.has(id)) throw new GoalRepositoryError(`Checkpoint id 重复：${id}`);
+      if (idSet.has(id)) throw new GoalRepositoryError(`duplicate checkpoint id: ${id}`);
       idSet.add(id);
       if (!Number.isInteger(definition.order) || definition.order <= 0) {
-        throw new GoalRepositoryError("Checkpoint order 必须是正整数");
+        throw new GoalRepositoryError("checkpoint order must be a positive integer");
       }
       if (orderSet.has(definition.order)) {
-        throw new GoalRepositoryError(`Checkpoint order 重复：${definition.order}`);
+        throw new GoalRepositoryError(`duplicate checkpoint order: ${definition.order}`);
       }
       orderSet.add(definition.order);
       nonEmpty(definition.title, "checkpoint.title");
@@ -931,10 +931,10 @@ export class GoalRepository {
     const existing = this.listCheckpoints(goalId);
     for (const checkpoint of existing) {
       if (idSet.has(checkpoint.id)) {
-        throw new GoalRepositoryError(`Checkpoint id 已存在：${checkpoint.id}`);
+        throw new GoalRepositoryError(`checkpoint id already exists: ${checkpoint.id}`);
       }
       if (orderSet.has(checkpoint.order)) {
-        throw new GoalRepositoryError(`Checkpoint order 已存在：${checkpoint.order}`);
+        throw new GoalRepositoryError(`checkpoint order already exists: ${checkpoint.order}`);
       }
     }
 
@@ -987,7 +987,7 @@ export class GoalRepository {
   requireCheckpoint(checkpointId: string): Checkpoint {
     const checkpoint = this.getCheckpoint(checkpointId);
     if (checkpoint === undefined) {
-      throw new GoalRepositoryError(`未知 Checkpoint：${checkpointId}`);
+      throw new GoalRepositoryError(`unknown checkpoint: ${checkpointId}`);
     }
     return checkpoint;
   }
@@ -1018,7 +1018,7 @@ export class GoalRepository {
       (dependencyId) => this.requireCheckpoint(dependencyId).status !== "completed",
     );
     if (incompleteDependency !== undefined) {
-      throw new GoalRepositoryError(`前置 Checkpoint 尚未完成：${incompleteDependency}`);
+      throw new GoalRepositoryError(`preceding checkpoint is not complete: ${incompleteDependency}`);
     }
     if (
       goal.activeCheckpointId !== undefined &&
@@ -1114,15 +1114,15 @@ export class GoalRepository {
   ): { plan: PlanRevision; checkpoints: Checkpoint[] } {
     this.requireGoal(goalId);
     if (this.listPlanRevisions(goalId).length > 0) {
-      throw new GoalRepositoryError("初始 Plan 已存在；后续变化请使用 appendPlanRevision");
+      throw new GoalRepositoryError("an initial plan already exists; use appendPlanRevision for later changes");
     }
     if (this.listCheckpoints(goalId).length > 0) {
-      throw new GoalRepositoryError("Goal 已有 Checkpoint，不能再创建初始 Plan");
+      throw new GoalRepositoryError("the goal already has checkpoints; cannot create another initial plan");
     }
-    if (input.phases.length === 0) throw new GoalRepositoryError("Plan 至少需要一个 phase");
-    if (input.checkpoints.length === 0) throw new GoalRepositoryError("Checkpoint 不能为空");
+    if (input.phases.length === 0) throw new GoalRepositoryError("a plan needs at least one phase");
+    if (input.checkpoints.length === 0) throw new GoalRepositoryError("checkpoints must not be empty");
     if (input.checkpoints.length > 20) {
-      throw new GoalRepositoryError("单个 Goal 最多 20 个 Checkpoint；请合并微步骤");
+      throw new GoalRepositoryError("a goal allows at most 20 checkpoints; merge micro-steps");
     }
 
     const checkpointIds = input.checkpoints.map(
@@ -1138,10 +1138,10 @@ export class GoalRepository {
       }
       checkpointIdSet.add(checkpointId);
       if (!Number.isInteger(definition.order) || definition.order <= 0) {
-        throw new GoalRepositoryError("Checkpoint order 必须是正整数");
+        throw new GoalRepositoryError("checkpoint order must be a positive integer");
       }
       if (checkpointOrderSet.has(definition.order)) {
-        throw new GoalRepositoryError(`Checkpoint order 重复：${definition.order}`);
+        throw new GoalRepositoryError(`duplicate checkpoint order: ${definition.order}`);
       }
       checkpointOrderSet.add(definition.order);
       nonEmpty(definition.title, "checkpoint.title");
@@ -1160,7 +1160,7 @@ export class GoalRepository {
 
     const phaseIds = input.phases.map((phase) => phase.id);
     if (new Set(phaseIds).size !== phaseIds.length) {
-      throw new GoalRepositoryError("Plan phase id 重复");
+      throw new GoalRepositoryError("duplicate plan phase id");
     }
     for (const phase of input.phases) {
       nonEmpty(phase.id, "plan_phase.id");
@@ -1168,7 +1168,7 @@ export class GoalRepository {
       nonEmpty(phase.objective, "plan_phase.objective");
       nonEmptyList(phase.verification, "plan_phase.verification");
       if (phase.checkpointIds.length === 0) {
-        throw new GoalRepositoryError(`Plan phase ${phase.id} 至少需要关联一个 Checkpoint`);
+        throw new GoalRepositoryError(`plan phase ${phase.id} needs at least one checkpoint`);
       }
       for (const checkpointId of phase.checkpointIds) {
         if (!checkpointIdSet.has(checkpointId)) {
@@ -1232,21 +1232,21 @@ export class GoalRepository {
 
   appendPlanRevision(goalId: string, input: PlanRevisionInput): PlanRevision {
     this.requireGoal(goalId);
-    if (input.phases.length === 0) throw new GoalRepositoryError("Plan 至少需要一个 phase");
+    if (input.phases.length === 0) throw new GoalRepositoryError("a plan needs at least one phase");
     const ids = input.phases.map((phase) => phase.id);
-    if (new Set(ids).size !== ids.length) throw new GoalRepositoryError("Plan phase id 重复");
+    if (new Set(ids).size !== ids.length) throw new GoalRepositoryError("duplicate plan phase id");
     for (const phase of input.phases) {
       nonEmpty(phase.id, "plan_phase.id");
       nonEmpty(phase.title, "plan_phase.title");
       nonEmpty(phase.objective, "plan_phase.objective");
       nonEmptyList(phase.verification, "plan_phase.verification");
       if (phase.checkpointIds.length === 0) {
-        throw new GoalRepositoryError(`Plan phase ${phase.id} 至少需要关联一个 Checkpoint`);
+        throw new GoalRepositoryError(`plan phase ${phase.id} needs at least one checkpoint`);
       }
       for (const checkpointId of phase.checkpointIds) {
         const checkpoint = this.requireCheckpoint(checkpointId);
         if (checkpoint.goalId !== goalId) {
-          throw new GoalRepositoryError(`Plan 引用了其他 Goal 的 Checkpoint：${checkpointId}`);
+          throw new GoalRepositoryError(`the plan references a checkpoint from another goal: ${checkpointId}`);
         }
       }
     }
@@ -1289,7 +1289,7 @@ export class GoalRepository {
 
   requirePlanRevision(planId: string): PlanRevision {
     const plan = this.getPlanRevision(planId);
-    if (plan === undefined) throw new GoalRepositoryError(`未知 Plan revision：${planId}`);
+    if (plan === undefined) throw new GoalRepositoryError(`unknown plan revision: ${planId}`);
     return plan;
   }
 
@@ -1321,19 +1321,19 @@ export class GoalRepository {
       throw new GoalRepositoryError(`Checkpoint ${input.checkpointId} 不属于 Goal ${goalId}`);
     }
     if (input.todos.length === 0) {
-      throw new GoalRepositoryError("Todo snapshot 不能为空");
+      throw new GoalRepositoryError("todo snapshot must not be empty");
     }
 
     const ids = new Set<string>();
     let inProgress = 0;
     const todos: GoalTodo[] = input.todos.map((todo, index) => {
       const id = nonEmpty(todo.id, `todos[${index}].id`);
-      if (ids.has(id)) throw new GoalRepositoryError(`Todo id 重复：${id}`);
+      if (ids.has(id)) throw new GoalRepositoryError(`duplicate todo id: ${id}`);
       ids.add(id);
       const content = nonEmpty(todo.content, `todos[${index}].content`);
       if (todo.status === "in_progress") inProgress += 1;
       if (todo.status === "completed" && (todo.completionEvidence?.length ?? 0) === 0) {
-        throw new GoalRepositoryError(`Todo ${id} 标记 completed 时必须提供 completionEvidence`);
+        throw new GoalRepositoryError(`todo ${id} must provide completionEvidence when marked completed`);
       }
       return {
         id,
@@ -1346,7 +1346,7 @@ export class GoalRepository {
           : {}),
       };
     });
-    if (inProgress > 1) throw new GoalRepositoryError("同一时刻最多只能有一项 in_progress");
+    if (inProgress > 1) throw new GoalRepositoryError("at most one item may be in_progress");
 
     const next = this.#db
       .query(
@@ -1386,7 +1386,7 @@ export class GoalRepository {
   requireTodoSnapshot(snapshotId: string): TodoSnapshot {
     const snapshot = this.getTodoSnapshot(snapshotId);
     if (snapshot === undefined) {
-      throw new GoalRepositoryError(`未知 Todo snapshot：${snapshotId}`);
+      throw new GoalRepositoryError(`unknown todo snapshot: ${snapshotId}`);
     }
     return snapshot;
   }
@@ -1427,7 +1427,7 @@ export class GoalRepository {
   addEvidence(goalId: string, input: EvidenceInput): Evidence {
     this.requireGoal(goalId);
     if (!isOneOf(input.kind, EVIDENCE_KINDS)) {
-      throw new GoalRepositoryError(`未知 Evidence kind：${String(input.kind)}`);
+      throw new GoalRepositoryError(`unknown evidence kind: ${String(input.kind)}`);
     }
     if (input.checkpointId !== undefined) {
       const checkpoint = this.requireCheckpoint(input.checkpointId);
@@ -1471,7 +1471,7 @@ export class GoalRepository {
 
   requireEvidence(evidenceId: string): Evidence {
     const evidence = this.getEvidence(evidenceId);
-    if (evidence === undefined) throw new GoalRepositoryError(`未知 Evidence：${evidenceId}`);
+    if (evidence === undefined) throw new GoalRepositoryError(`unknown evidence: ${evidenceId}`);
     return evidence;
   }
 
@@ -1499,12 +1499,12 @@ export class GoalRepository {
     this.requireGoal(goalId);
     const status = input.status ?? "active";
     if (status !== "active" && status !== "frozen" && status !== "archived") {
-      throw new GoalRepositoryError(`未知 Handoff status：${String(status)}`);
+      throw new GoalRepositoryError(`unknown handoff status: ${String(status)}`);
     }
     if (input.supersedesRevision !== undefined) {
       const previous = this.getHandoffRevision(goalId, input.supersedesRevision);
       if (previous === undefined) {
-        throw new GoalRepositoryError(`被替代的 Handoff revision 不存在：${input.supersedesRevision}`);
+        throw new GoalRepositoryError(`superseded handoff revision does not exist: ${input.supersedesRevision}`);
       }
     }
 
@@ -1564,7 +1564,7 @@ export class GoalRepository {
 
   requireHandoff(handoffId: string): HandoffRevision {
     const handoff = this.getHandoff(handoffId);
-    if (handoff === undefined) throw new GoalRepositoryError(`未知 Handoff：${handoffId}`);
+    if (handoff === undefined) throw new GoalRepositoryError(`unknown handoff: ${handoffId}`);
     return handoff;
   }
 
@@ -1600,16 +1600,16 @@ export class GoalRepository {
     this.requireGoal(goalId);
     const handoff = this.requireHandoff(input.handoffId);
     if (handoff.goalId !== goalId) {
-      throw new GoalRepositoryError(`Handoff ${input.handoffId} 不属于 Goal ${goalId}`);
+      throw new GoalRepositoryError(`handoff ${input.handoffId} does not belong to goal ${goalId}`);
     }
     if (handoff.snapshotHash === undefined) {
-      throw new GoalRepositoryError("创建 Epoch 前必须为 Handoff 生成 snapshot hash");
+      throw new GoalRepositoryError("the handoff needs a snapshot hash before creating an epoch");
     }
     const handoffSnapshotHash = handoff.snapshotHash;
     if (input.parentEpochId !== undefined) {
       const parent = this.requireEpoch(input.parentEpochId);
       if (parent.goalId !== goalId) {
-        throw new GoalRepositoryError(`父 Epoch 不属于 Goal ${goalId}`);
+        throw new GoalRepositoryError(`parent epoch does not belong to goal ${goalId}`);
       }
     }
     if (input.checkpointId !== undefined) {
@@ -1662,7 +1662,7 @@ export class GoalRepository {
 
   requireEpoch(epochId: string): ContextEpoch {
     const epoch = this.getEpoch(epochId);
-    if (epoch === undefined) throw new GoalRepositoryError(`未知 Epoch：${epochId}`);
+    if (epoch === undefined) throw new GoalRepositoryError(`unknown epoch: ${epochId}`);
     return epoch;
   }
 
@@ -1694,7 +1694,7 @@ export class GoalRepository {
       round = row.round;
     }
     if (!Number.isInteger(round) || round <= 0) {
-      throw new GoalRepositoryError("review round 必须是正整数");
+      throw new GoalRepositoryError("review round must be a positive integer");
     }
 
     const id = input.id ?? newId("review");
@@ -1732,7 +1732,7 @@ export class GoalRepository {
 
   requireReview(reviewId: string): GoalReview {
     const review = this.getReview(reviewId);
-    if (review === undefined) throw new GoalRepositoryError(`未知 Review：${reviewId}`);
+    if (review === undefined) throw new GoalRepositoryError(`unknown review: ${reviewId}`);
     return review;
   }
 
@@ -1758,10 +1758,10 @@ export class GoalRepository {
     const review = this.requireReview(reviewId);
     if (review.status === status) return review;
     if (!isOneOf(status, REVIEW_STATUSES)) {
-      throw new GoalRepositoryError(`未知 Review status：${String(status)}`);
+      throw new GoalRepositoryError(`unknown review status: ${String(status)}`);
     }
     if (!REVIEW_STATUS_TRANSITIONS[review.status].includes(status)) {
-      throw new GoalRepositoryError(`非法 Review 状态转换：${review.status} -> ${status}`);
+      throw new GoalRepositoryError(`invalid review status transition: ${review.status} -> ${status}`);
     }
     this.#db
       .query("UPDATE goal_reviews SET status = ?, updated_at = ? WHERE review_id = ?")
@@ -1772,7 +1772,7 @@ export class GoalRepository {
   completeReview(reviewId: string, result: ReviewResult): GoalReview {
     const review = this.requireReview(reviewId);
     if (review.status !== "running") {
-      throw new GoalRepositoryError(`Review 只能在 running 时提交结果，当前为 ${review.status}`);
+      throw new GoalRepositoryError(`review results can only be submitted while running, current status is ${review.status}`);
     }
     const status: ReviewStatus =
       result.verdict === "approve"
@@ -1781,7 +1781,7 @@ export class GoalRepository {
           ? "changes_requested"
           : "blocked";
     if (!REVIEW_STATUS_TRANSITIONS[review.status].includes(status)) {
-      throw new GoalRepositoryError(`非法 Review 结果：${review.status} -> ${status}`);
+      throw new GoalRepositoryError(`invalid review result: ${review.status} -> ${status}`);
     }
 
     const tx = this.#db.transaction(() => {

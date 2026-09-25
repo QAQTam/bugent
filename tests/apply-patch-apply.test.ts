@@ -106,6 +106,6 @@ describe("apply_patch workspace transaction", () => {
         "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch",
         cwd,
       ),
-    ).rejects.toThrow(/越界/);
+    ).rejects.toThrow(/escapes the workspace/);
   });
 });

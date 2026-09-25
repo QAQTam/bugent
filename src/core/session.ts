@@ -472,7 +472,7 @@ export class AgentSession {
     for (let i = 0; i < trailing.length; i += 1) {
       if (trailing[i]?.toolCallId !== calls[i]?.id) {
         throw new Error(
-          `无法自动修复孤立的 tool call：历史中的 tool result 顺序与 assistant tool_calls 不匹配（msgid ${assistant.msgid}）`,
+          `cannot repair the orphaned tool call: tool result order does not match assistant tool_calls (msgid ${assistant.msgid})`,
         );
       }
     }
@@ -507,7 +507,7 @@ export class AgentSession {
         const call = calls[offset]!;
         if (result === undefined || result.role !== "tool" || result.toolCallId !== call.id) {
           throw new Error(
-            `无法自动修复 tool call 序列：assistant msgid ${message.msgid} 的 tool call ${call.id} 后没有连续的对应 tool result`,
+            `cannot repair the tool call sequence: tool call ${call.id} of assistant msgid ${message.msgid} has no consecutive matching tool result`,
           );
         }
         consumed.add(resultIndex);
@@ -517,7 +517,7 @@ export class AgentSession {
     for (let index = 0; index < this.#messages.length; index += 1) {
       const message = this.#messages[index]!;
       if (message.role === "tool" && !consumed.has(index)) {
-        throw new Error(`无法自动修复 tool call 序列：msgid ${message.msgid} 的 tool result 没有对应 assistant tool call`);
+        throw new Error(`cannot repair the tool call sequence: tool result for msgid ${message.msgid} has no matching assistant tool call`);
       }
     }
   }

@@ -35,9 +35,9 @@ async function readExisting(path: string): Promise<ExistingFile> {
     }
     throw error;
   }
-  if (!fileStat.isFile()) throw new Error(`不是普通文件：${path}`);
+  if (!fileStat.isFile()) throw new Error(`not a regular file: ${path}`);
   const bytes = await readFile(path);
-  if (bytes.includes(0)) throw new Error(`拒绝修改二进制文件：${path}`);
+  if (bytes.includes(0)) throw new Error(`refusing to modify a binary file: ${path}`);
   return { exists: true, text: bytes.toString("utf8"), mode: fileStat.mode & 0o777 };
 }
 
@@ -83,7 +83,7 @@ export async function applyPatchToWorkspace(
 
   const currentText = async (path: string, operation: string): Promise<string> => {
     const current = states.has(path) ? states.get(path) : (await load(path)).text;
-    if (current === undefined) throw new Error(`${operation} 失败：文件不存在 ${relativeTo(cwd, path)}`);
+    if (current === undefined) throw new Error(`${operation} failed: file not found ${relativeTo(cwd, path)}`);
     return current;
   };
 
@@ -172,7 +172,7 @@ export async function applyPatchToWorkspace(
       await restoreFiles(originals);
     } catch (rollbackError) {
       throw new Error(
-        `apply_patch 提交失败，且回滚失败：${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        `apply_patch commit failed and rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
       );
     }
     throw error;

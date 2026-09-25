@@ -21,7 +21,7 @@ export class PathEscapeError extends Error {
   readonly input: string;
 
   constructor(input: string, root: string) {
-    super(`路径越界：${JSON.stringify(input)} 不在工作目录 ${root} 内`);
+    super(`path escapes the workspace: ${JSON.stringify(input)} is outside ${root}`);
     this.name = "PathEscapeError";
     this.input = input;
   }

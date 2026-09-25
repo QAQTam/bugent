@@ -40,7 +40,7 @@ export function createSubagentExecutor(options: SubagentExecutorOptions): AgentE
       if (context.spec.identity.kind === "worker") {
         return worker.run(context);
       }
-      throw new Error(`subagent executor 不支持 kind=${context.spec.identity.kind}`);
+      throw new Error(`subagent executor does not support kind=${context.spec.identity.kind}`);
     },
   };
 }

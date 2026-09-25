@@ -101,7 +101,7 @@ describe("P4 · agent loop", () => {
     expect(result.steps).toBe(2);
     const toolMessage = session.messages.find((m) => m.role === "tool");
     expect(toolMessage).toBeDefined();
-    expect(storedText(toolMessage!)).toContain("未知工具");
+    expect(storedText(toolMessage!)).toContain("unknown tool");
   });
 
   test("工具抛异常时被转成错误文本，不会炸穿 loop", async () => {

@@ -25,16 +25,16 @@ const APPLY_PATCH_PARAMETERS: JSONSchema = {
 
 function patchText(input: unknown): string {
   if (typeof input === "string") {
-    if (input.trim().length === 0) throw new Error("patch 必须是非空字符串");
+    if (input.trim().length === 0) throw new Error("patch must be a non-empty string");
     return input;
   }
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new Error("apply_patch input 必须是 patch 字符串或 object");
+    throw new Error("apply_patch input must be a patch string or an object");
   }
   const record = input as Record<string, unknown>;
   const value = record.patch ?? (record._parseError === true ? record._raw : undefined);
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error("patch 必须是非空字符串");
+    throw new Error("patch must be a non-empty string");
   }
   return value;
 }

@@ -192,7 +192,7 @@ export function canTransitionAgentStatus(from: AgentStatus, to: AgentStatus): bo
 
 function requireNonEmpty(value: string, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`agent supervisor: ${field} 必须是非空字符串`);
+    throw new Error(`agent supervisor: ${field} must be a non-empty string`);
   }
   return value.trim();
 }
@@ -203,7 +203,7 @@ function validateBudget(budget: AgentBudget): void {
     number,
   ][]) {
     if (!Number.isSafeInteger(value) || value <= 0) {
-      throw new Error(`agent supervisor: budget.${key} 必须是正的安全整数`);
+      throw new Error(`agent supervisor: budget.${key} must be a positive safe integer`);
     }
   }
 }
@@ -334,7 +334,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
     this.#validateSpec(spec);
     const identity = spec.identity;
     if (this.#agents.has(identity.agentId)) {
-      throw new Error(`agent supervisor: agent 已存在：${identity.agentId}`);
+      throw new Error(`agent supervisor: agent already exists: ${identity.agentId}`);
     }
 
     let depth = 0;
@@ -342,39 +342,39 @@ export class AgentSupervisorImpl implements AgentSupervisor {
       const parent = this.#agents.get(identity.parentId);
       if (parent !== undefined) {
         if (identity.rootId !== parent.spec.identity.rootId) {
-          throw new Error("agent supervisor: 子 agent rootId 必须与父 agent 一致");
+          throw new Error("agent supervisor: child rootId must match its parent agent");
         }
         if (identity.sessionId === parent.spec.identity.sessionId) {
-          throw new Error("agent supervisor: 子 agent 不能复用父 session");
+          throw new Error("agent supervisor: a child agent cannot reuse the parent session");
         }
         assertAuthorityAttenuation(spec.sandbox.authority, parent.spec.sandbox.authority);
         assertCapabilityAttenuation(spec.sandbox.capabilities, parent.spec.sandbox.capabilities);
         depth = parent.depth + 1;
         if (depth > parent.spec.sandbox.maxDepth) {
-          throw new Error(`agent supervisor: 超过父 agent maxDepth=${parent.spec.sandbox.maxDepth}`);
+          throw new Error(`agent supervisor: exceeds parent agent maxDepth=${parent.spec.sandbox.maxDepth}`);
         }
       } else {
         const external = spec.externalParent;
         if (external === undefined || external.agentId !== identity.parentId) {
-          throw new Error(`agent supervisor: 父 agent 不存在：${identity.parentId}`);
+          throw new Error(`agent supervisor: parent agent does not exist: ${identity.parentId}`);
         }
         if (identity.rootId !== external.rootId) {
-          throw new Error("agent supervisor: 子 agent rootId 必须与外部父 agent 一致");
+          throw new Error("agent supervisor: child rootId must match the external parent agent");
         }
         assertAuthorityAttenuation(spec.sandbox.authority, external.authority);
         assertCapabilityAttenuation(spec.sandbox.capabilities, external.capabilities);
         depth = external.depth + 1;
         if (depth > external.maxDepth) {
-          throw new Error(`agent supervisor: 超过外部父 agent maxDepth=${external.maxDepth}`);
+          throw new Error(`agent supervisor: exceeds external parent agent maxDepth=${external.maxDepth}`);
         }
       }
     } else if (identity.rootId !== identity.agentId) {
-      throw new Error("agent supervisor: 根 agent 的 rootId 必须等于 agentId");
+      throw new Error("agent supervisor: a root agent rootId must equal its agentId");
     }
 
     for (const existing of this.#agents.values()) {
       if (existing.spec.identity.sessionId === identity.sessionId) {
-        throw new Error(`agent supervisor: session 已被 agent 使用：${identity.sessionId}`);
+        throw new Error(`agent supervisor: session is already used by an agent: ${identity.sessionId}`);
       }
     }
 
@@ -452,7 +452,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("agent supervisor: wait 已取消"));
+        reject(new Error("agent supervisor: wait was cancelled"));
       };
       const timer =
         options.timeoutMs === undefined
@@ -461,7 +461,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
               if (settled) return;
               settled = true;
               cleanup();
-              reject(new Error(`agent supervisor: wait 超时（${options.timeoutMs}ms）`));
+              reject(new Error(`agent supervisor: wait timed out (${options.timeoutMs}ms)`));
             }, options.timeoutMs);
 
       internal.waiters.add(onResult);
@@ -473,7 +473,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
   async send(agentId: string, draft: AgentMessageDraft): Promise<void> {
     const internal = this.requireInternal(agentId);
     if (internal.status === "completed" || internal.status === "aborted") {
-      throw new Error(`agent supervisor: agent ${agentId} 已结束，不能接收消息`);
+      throw new Error(`agent supervisor: agent ${agentId} has finished and cannot receive messages`);
     }
     const from = internal.spec.identity.parentId ?? "supervisor";
     await this.#post(from, internal, draft);
@@ -482,7 +482,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
   async followup(agentId: string, task: string): Promise<void> {
     const internal = this.requireInternal(agentId);
     if (internal.status === "completed" || internal.status === "aborted") {
-      throw new Error(`agent supervisor: agent ${agentId} 已结束，不能 followup`);
+      throw new Error(`agent supervisor: agent ${agentId} has finished and cannot be followed up`);
     }
     if (
       internal.status === "idle" ||
@@ -543,7 +543,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
 
   requireInternal(agentId: string): InternalAgent {
     const internal = this.#agents.get(agentId);
-    if (internal === undefined) throw new Error(`agent supervisor: 未知 agent：${agentId}`);
+    if (internal === undefined) throw new Error(`agent supervisor: unknown agent: ${agentId}`);
     return internal;
   }
 
@@ -706,7 +706,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
     const previous = internal.status;
     if (previous === next) return;
     if (!canTransitionAgentStatus(previous, next)) {
-      throw new Error(`agent supervisor: 非法状态迁移 ${previous} -> ${next}`);
+      throw new Error(`agent supervisor: invalid state transition ${previous} -> ${next}`);
     }
     internal.status = next;
     this.#events.append({
@@ -733,20 +733,20 @@ export class AgentSupervisorImpl implements AgentSupervisor {
     validateBudget(spec.budget);
 
     if (spec.sandbox.agentId !== identity.agentId) {
-      throw new Error("agent supervisor: sandbox.agentId 必须与 identity.agentId 一致");
+      throw new Error("agent supervisor: sandbox.agentId must match identity.agentId");
     }
     if (spec.sandbox.kind !== identity.kind) {
-      throw new Error("agent supervisor: sandbox.kind 必须与 identity.kind 一致");
+      throw new Error("agent supervisor: sandbox.kind must match identity.kind");
     }
     if (identity.taskId !== undefined && identity.taskId !== spec.task.id) {
-      throw new Error("agent supervisor: identity.taskId 必须与 task.id 一致");
+      throw new Error("agent supervisor: identity.taskId must match task.id");
     }
     if (spec.externalParent !== undefined) {
       if (identity.parentId === undefined) {
-        throw new Error("agent supervisor: externalParent 只能用于有 parentId 的 agent");
+        throw new Error("agent supervisor: externalParent is only valid for an agent with a parentId");
       }
       if (spec.externalParent.agentId !== identity.parentId) {
-        throw new Error("agent supervisor: externalParent.agentId 必须等于 identity.parentId");
+        throw new Error("agent supervisor: externalParent.agentId must equal identity.parentId");
       }
       requireNonEmpty(spec.externalParent.rootId, "externalParent.rootId");
       if (
@@ -755,7 +755,7 @@ export class AgentSupervisorImpl implements AgentSupervisor {
         !Number.isSafeInteger(spec.externalParent.maxDepth) ||
         spec.externalParent.maxDepth < 0
       ) {
-        throw new Error("agent supervisor: externalParent depth/maxDepth 必须是非负安全整数");
+        throw new Error("agent supervisor: externalParent depth/maxDepth must be non-negative safe integers");
       }
     }
   }

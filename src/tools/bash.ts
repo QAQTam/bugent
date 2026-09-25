@@ -526,9 +526,9 @@ function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: nu
   const parts: string[] = [];
 
   if (result.timedOut) {
-    parts.push(`[超时] 命令在 ${timeoutMs}ms 内未结束，已强制终止`);
+    parts.push(`[timeout] command did not finish within ${timeoutMs}ms and was killed`);
   } else if (result.aborted) {
-    parts.push("[中断] 命令被取消");
+    parts.push("[aborted] command was cancelled");
   }
 
   const stdout = result.stdout.replace(/\s+$/, "");
@@ -536,8 +536,8 @@ function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: nu
 
   if (stdout.length > 0) parts.push(stdout);
   if (stderr.length > 0) parts.push(`--- stderr ---\n${stderr}`);
-  if (result.truncated) parts.push(`[输出超过 ${maxOutputBytes} 字节，已截断]`);
-  if (parts.length === 0) parts.push("(无输出)");
+  if (result.truncated) parts.push(`[output exceeded ${maxOutputBytes} bytes and was truncated]`);
+  if (parts.length === 0) parts.push("(no output)");
 
   parts.push(`[exit code: ${result.exitCode ?? "unknown"}]`);
 
@@ -554,9 +554,9 @@ function buildBashPresentation(
   const segments: ToolOutputSegment[] = [];
 
   if (result.timedOut) {
-    segments.push({ kind: "meta", text: `[超时] 命令在 ${timeoutMs}ms 内未结束，已强制终止` });
+    segments.push({ kind: "meta", text: `[timeout] command did not finish within ${timeoutMs}ms and was killed` });
   } else if (result.aborted) {
-    segments.push({ kind: "meta", text: "[中断] 命令被取消" });
+    segments.push({ kind: "meta", text: "[aborted] command was cancelled" });
   }
 
   const stdout = result.stdout.replace(/\s+$/, "");
@@ -564,9 +564,9 @@ function buildBashPresentation(
   if (stdout.length > 0) segments.push({ kind: "stdout", text: stdout });
   if (stderr.length > 0) segments.push({ kind: "stderr", text: stderr });
   if (result.truncated) {
-    segments.push({ kind: "meta", text: `[输出超过 ${maxOutputBytes} 字节，已截断]` });
+    segments.push({ kind: "meta", text: `[output exceeded ${maxOutputBytes} bytes and was truncated]` });
   }
-  if (segments.length === 0) segments.push({ kind: "meta", text: "(无输出)" });
+  if (segments.length === 0) segments.push({ kind: "meta", text: "(no output)" });
 
   return {
     kind: "bash",
@@ -597,8 +597,8 @@ async function clampForModel(
 
   const spilled = await spool.promote();
   const pathHint = [
-    `[完整输出共 ${spilled.bytes} 字节，已写入：${spilled.path}]`,
-    `[需要细节时用 read_file 读取该路径]`,
+    `[full output is ${spilled.bytes} bytes, written to: ${spilled.path}]`,
+    `[use read_file on that path when you need the details]`,
   ];
 
   if (text.length <= MAX_MODEL_OUTPUT_CHARS) {
@@ -612,7 +612,7 @@ async function clampForModel(
   return [
     text.slice(0, headBudget),
     "",
-    `[... 已省略 ${omitted} 字符 ...]`,
+    `[... ${omitted} characters omitted ...]`,
     text.slice(text.length - tailBudget),
     "",
     ...pathHint,
@@ -651,7 +651,7 @@ export function createBashTool(
     async run(input: BashInput, ctx: ToolCtx): Promise<string> {
       const command = input.command;
       if (typeof command !== "string" || command.trim().length === 0) {
-        throw new Error("bash: `command` 必须是非空字符串");
+        throw new Error("bash: `command` must be a non-empty string");
       }
 
       let timeoutMs = defaultTimeoutMs;
@@ -661,7 +661,7 @@ export function createBashTool(
           !Number.isFinite(input.timeoutMs) ||
           input.timeoutMs <= 0
         ) {
-          throw new Error("bash: `timeoutMs` 必须是正数");
+          throw new Error("bash: `timeoutMs` must be a positive number");
         }
         timeoutMs = Math.min(input.timeoutMs, MAX_TIMEOUT_MS);
       }

@@ -42,9 +42,9 @@ export function createSkillLoadTool(skill: SkillDefinition): Tool<Record<string,
   return {
     name,
     description: [
-      `加载 skill "${skill.name}" 的 SKILL.md 指令。`,
+      `Load the SKILL.md instructions for the "${skill.name}" skill.`,
       skill.description,
-      "只有当任务与该 description 匹配时调用。",
+      "Call it only when the task matches that description.",
     ].join(" "),
     parameters: LOAD_PARAMETERS,
     defaultPermission: "allow",
@@ -61,10 +61,10 @@ export function createSkillLoadTool(skill: SkillDefinition): Tool<Record<string,
     },
 
     async run(_input: Record<string, never>, ctx: ToolCtx): Promise<string> {
-      if (ctx.signal.aborted) throw new Error("skill 加载已取消");
+      if (ctx.signal.aborted) throw new Error("skill load was cancelled");
       const body =
         skill.body.length > MAX_SKILL_OUTPUT_CHARS
-          ? `${skill.body.slice(0, MAX_SKILL_OUTPUT_CHARS)}\n\n[skill 正文已截断]`
+          ? `${skill.body.slice(0, MAX_SKILL_OUTPUT_CHARS)}\n\n[skill body truncated]`
           : skill.body;
       return [
         `<activated_skill name="${escapeAttribute(skill.name)}">`,
@@ -84,7 +84,7 @@ export function registerSkillTools(
     for (const skill of skills) {
       const tool = createSkillLoadTool(skill);
       if (registry.get(tool.name) !== undefined) {
-        throw new Error(`skill 工具名冲突：${tool.name}`);
+        throw new Error(`skill tool name conflict: ${tool.name}`);
       }
       registry.register(tool);
       names.push(tool.name);

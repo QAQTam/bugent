@@ -129,7 +129,7 @@ describe("Goal P1 · controller", () => {
         objective: "实现完整 Goal",
         successCriteria: ["测试通过"],
       }),
-    ).toThrow("显式执行 /goal");
+    ).toThrow("run /goal first");
 
     controller.authorizeCreate();
     const goal = controller.createFromContract({
@@ -343,7 +343,7 @@ describe("Goal P1 · controller", () => {
       ctx,
     );
     expect(wrongCheckpoint.ok).toBe(false);
-    expect(wrongCheckpoint.output).toContain("当前 Checkpoint");
+    expect(wrongCheckpoint.output).toContain("active checkpoint");
   });
 
   test("resume 到新分支时会幂等补回 plan 与 checkpoint/todo", async () => {
@@ -443,7 +443,7 @@ describe("Goal P1 · tools", () => {
 
     const denied = await registry.execute({ id: "c1", name: "create_goal", args: input }, ctx);
     expect(denied.ok).toBe(false);
-    expect(denied.output).toContain("显式执行 /goal");
+    expect(denied.output).toContain("run /goal first");
 
     controller.authorizeCreate();
     const created = await registry.execute({ id: "c2", name: "create_goal", args: input }, ctx);
@@ -453,7 +453,7 @@ describe("Goal P1 · tools", () => {
 
     const repeated = await registry.execute({ id: "c3", name: "create_goal", args: input }, ctx);
     expect(repeated.ok).toBe(false);
-    expect(repeated.output).toContain("没有一次性创建授权");
+    expect(repeated.output).toContain("no one-shot creation authorization");
   });
 
   test("update_plan 工具创建 Plan 并返回首个 Checkpoint", async () => {
@@ -638,7 +638,7 @@ describe("Goal P3 · verification and review", () => {
         summary: "失败命令",
         evidence: [{ ...evidence[0]!, exitCode: 1 }],
       }),
-    ).rejects.toThrow("退出码不是 0");
+    ).rejects.toThrow("exit code is not 0");
     expect(reviewCalled).toBe(false);
     expect(controller.repository.requireCheckpoint("cp1").status).toBe("active");
   });

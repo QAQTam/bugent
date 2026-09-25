@@ -39,7 +39,7 @@ function assertUniqueToolNames(skills: readonly SkillDefinition[]): void {
   const names = new Set<string>();
   for (const skill of skills) {
     const name = createSkillLoadTool(skill).name;
-    if (names.has(name)) throw new Error(`skill 工具名冲突：${name}`);
+    if (names.has(name)) throw new Error(`skill tool name conflict: ${name}`);
     names.add(name);
   }
 }
@@ -158,7 +158,7 @@ export class SkillManager {
     for (const [registry, attachment] of this.#attachments) {
       for (const name of nextNames) {
         if (!attachment.names.has(name) && registry.get(name) !== undefined) {
-          throw new Error(`skill 工具名冲突：${name}`);
+          throw new Error(`skill tool name conflict: ${name}`);
         }
       }
     }

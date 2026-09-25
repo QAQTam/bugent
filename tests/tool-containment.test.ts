@@ -174,7 +174,7 @@ describe("工具收容 · 悬空符号链接（已修的真实洞）", () => {
    */
   test("workspace-fs 不会跟随悬空链接写到工作区外", async () => {
     const f = await fixture("dangling");
-    await expect(createWorkspaceFs(f.ws).write("link", "PWNED")).rejects.toThrow(/路径越界/);
+    await expect(createWorkspaceFs(f.ws).write("link", "PWNED")).rejects.toThrow(/escapes the workspace/);
     await expectOutsideUntouched(f);
   });
 

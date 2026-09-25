@@ -48,28 +48,28 @@ describe("ask_user · 参数校验", () => {
 
   test(`最多 ${MAX_QUESTIONS} 个问题`, () => {
     const tooMany = Array.from({ length: MAX_QUESTIONS + 1 }, (_, i) => ({ question: `Q${i}` }));
-    expect(() => parseQuestions(tooMany)).toThrow(/最多问 5 个问题/);
+    expect(() => parseQuestions(tooMany)).toThrow(/at most 5 questions/);
   });
 
   test(`每题最多 ${MAX_OPTIONS} 个选项`, () => {
     expect(() =>
       parseQuestions([{ question: "Q", options: ["a", "b", "c", "d", "e"] }]),
-    ).toThrow(/最多 4 个/);
+    ).toThrow(/allows at most 4/);
   });
 
   test("拒绝空问题、空选项、非布尔 multiple", () => {
-    expect(() => parseQuestions([{ question: "  " }])).toThrow(/非空字符串/);
-    expect(() => parseQuestions([{ question: "Q", options: [""] }])).toThrow(/非空字符串/);
-    expect(() => parseQuestions([{ question: "Q", multiple: "yes" }])).toThrow(/布尔值/);
+    expect(() => parseQuestions([{ question: "  " }])).toThrow(/non-empty string/);
+    expect(() => parseQuestions([{ question: "Q", options: [""] }])).toThrow(/non-empty string/);
+    expect(() => parseQuestions([{ question: "Q", multiple: "yes" }])).toThrow(/must be a boolean/);
   });
 
   test("多选必须有选项", () => {
-    expect(() => parseQuestions([{ question: "Q", multiple: true }])).toThrow(/没有选项/);
+    expect(() => parseQuestions([{ question: "Q", multiple: true }])).toThrow(/has no options/);
   });
 
   test("拒绝空数组与非数组", () => {
-    expect(() => parseQuestions([])).toThrow(/不能为空/);
-    expect(() => parseQuestions("nope")).toThrow(/必须是数组/);
+    expect(() => parseQuestions([])).toThrow(/must not be empty/);
+    expect(() => parseQuestions("nope")).toThrow(/must be an array/);
   });
 });
 
@@ -86,7 +86,7 @@ describe("ask_user · 工具", () => {
     const tool = createAskUserTool();
     const ctx = { cwd: "/tmp", signal: new AbortController().signal, callId: "c1", sessionId: "s" };
 
-    await expect(tool.run({ questions: QUESTIONS }, ctx)).rejects.toThrow(/没有可交互的界面/);
+    await expect(tool.run({ questions: QUESTIONS }, ctx)).rejects.toThrow(/no interactive UI/);
   });
 
   test("用户中止时返回 abort 说明，引导模型继续", async () => {
@@ -101,7 +101,7 @@ describe("ask_user · 工具", () => {
 
     const out = await tool.run({ questions: QUESTIONS }, ctx);
     expect(out).toContain("abort");
-    expect(out).toContain("不要再追问");
+    expect(out).toContain("Do not ask again");
   });
 
   test("默认权限是 allow（它本身就是问用户，不该再被拦一道）", () => {

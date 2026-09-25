@@ -50,7 +50,7 @@ const UPDATE_STATUSES = ["paused", "blocked", "complete"] as const;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} 必须是 object`);
+    throw new Error(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
 }
@@ -58,7 +58,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function requiredString(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${key} 必须是非空字符串`);
+    throw new Error(`${key} must be a non-empty string`);
   }
   return value.trim();
 }
@@ -66,10 +66,10 @@ function requiredString(source: Record<string, unknown>, key: string): string {
 function optionalStrings(source: Record<string, unknown>, key: string): string[] | undefined {
   const value = source[key];
   if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw new Error(`${key} 必须是字符串数组`);
+  if (!Array.isArray(value)) throw new Error(`${key} must be an array of strings`);
   return value.map((item, index) => {
     if (typeof item !== "string" || item.trim().length === 0) {
-      throw new Error(`${key}[${index}] 必须是非空字符串`);
+      throw new Error(`${key}[${index}] must be a non-empty string`);
     }
     return item.trim();
   });
@@ -78,7 +78,7 @@ function optionalStrings(source: Record<string, unknown>, key: string): string[]
 function requiredStrings(source: Record<string, unknown>, key: string): string[] {
   const values = optionalStrings(source, key);
   if (values === undefined || values.length === 0) {
-    throw new Error(`${key} 至少需要一项`);
+    throw new Error(`${key} needs at least one entry`);
   }
   return values;
 }
@@ -86,7 +86,7 @@ function requiredStrings(source: Record<string, unknown>, key: string): string[]
 function objects(source: Record<string, unknown>, key: string): Record<string, unknown>[] {
   const value = source[key];
   if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${key} 必须是非空数组`);
+    throw new Error(`${key} must be a non-empty array`);
   }
   return value.map((item, index) => record(item, `${key}[${index}]`));
 }
@@ -98,7 +98,7 @@ function optionalObjects(
   const value = source[key];
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${key} 必须是非空数组`);
+    throw new Error(`${key} must be a non-empty array`);
   }
   return value.map((item, index) => record(item, `${key}[${index}]`));
 }
@@ -107,7 +107,7 @@ function riskPolicy(source: Record<string, unknown>): RiskPolicy | undefined {
   const raw = source.risk_level;
   if (raw === undefined) return undefined;
   if (typeof raw !== "string" || !RISK_LEVELS.includes(raw as RiskLevel)) {
-    throw new Error(`risk_level 必须是 ${RISK_LEVELS.join(" / ")}`);
+    throw new Error(`risk_level must be ${RISK_LEVELS.join(" / ")}`);
   }
   const level = raw as RiskLevel;
   const requireUserApproval = level === "high" || level === "critical";
@@ -334,14 +334,14 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const source = record(input, "create_goal input");
       const criteria = optionalStrings(source, "success_criteria");
       if (criteria === undefined || criteria.length === 0) {
-        throw new Error("success_criteria 至少需要一项");
+        throw new Error("success_criteria needs at least one entry");
       }
       const tokenBudget = source.token_budget;
       if (
         tokenBudget !== undefined &&
         (typeof tokenBudget !== "number" || !Number.isInteger(tokenBudget) || tokenBudget <= 0)
       ) {
-        throw new Error("token_budget 必须是正整数");
+        throw new Error("token_budget must be a positive integer");
       }
       const constraints = optionalStrings(source, "constraints");
       const nonGoals = optionalStrings(source, "non_goals");
@@ -362,7 +362,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
         goalId: goal.id,
         status: goal.status,
         phase: goal.phase,
-        note: "Goal Contract 将在下一个安全边界作为 developer context 注入。",
+        note: "The goal contract is injected as developer context at the next safe boundary.",
       };
     },
   };
@@ -384,11 +384,11 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const source = record(input, "update_goal input");
       const status = requiredString(source, "status");
       if (!UPDATE_STATUSES.includes(status as (typeof UPDATE_STATUSES)[number])) {
-        throw new Error(`update_goal.status 只能是 ${UPDATE_STATUSES.join(" / ")}`);
+        throw new Error(`update_goal.status must be ${UPDATE_STATUSES.join(" / ")}`);
       }
       const reason = source.reason;
       if (reason !== undefined && typeof reason !== "string") {
-        throw new Error("update_goal.reason 必须是字符串");
+        throw new Error("update_goal.reason must be a string");
       }
       const goal = controller.updateStatus(
         status as (typeof UPDATE_STATUSES)[number],
@@ -435,11 +435,11 @@ export function createGoalTools(controller: GoalController): Tool[] {
           : rawCheckpoints.map((checkpoint, index) => {
               const order = checkpoint.order;
               if (typeof order !== "number" || !Number.isInteger(order) || order <= 0) {
-                throw new Error(`checkpoints[${index}].order 必须是正整数`);
+                throw new Error(`checkpoints[${index}].order must be a positive integer`);
               }
               const id = checkpoint.id;
               if (id !== undefined && typeof id !== "string") {
-                throw new Error(`checkpoints[${index}].id 必须是字符串`);
+                throw new Error(`checkpoints[${index}].id must be a string`);
               }
               return {
                 ...(typeof id === "string" && id.trim().length > 0 ? { id: id.trim() } : {}),
@@ -471,7 +471,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
         next: {
           action: "todo_write",
           checkpointId: firstPending?.id ?? null,
-          note: "只为该 Checkpoint 生成 Todo；completed 项必须带 completionEvidence。",
+          note: "Generate todos only for this checkpoint; completed items must carry completionEvidence.",
         },
       };
     },
@@ -499,19 +499,19 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const evidence = objects(source, "evidence").map((item, index) => {
         const kind = requiredString(item, "kind");
         if (!EVIDENCE_KINDS.includes(kind as EvidenceKind)) {
-          throw new Error(`evidence[${index}].kind 非法：${kind}`);
+          throw new Error(`evidence[${index}].kind is invalid: ${kind}`);
         }
         const digest = item.digest;
         if (digest !== undefined && typeof digest !== "string") {
-          throw new Error(`evidence[${index}].digest 必须是字符串`);
+          throw new Error(`evidence[${index}].digest must be a string`);
         }
         const command = item.command;
         if (command !== undefined && typeof command !== "string") {
-          throw new Error(`evidence[${index}].command 必须是字符串`);
+          throw new Error(`evidence[${index}].command must be a string`);
         }
         const exitCode = item.exit_code;
         if (exitCode !== undefined && (typeof exitCode !== "number" || !Number.isInteger(exitCode))) {
-          throw new Error(`evidence[${index}].exit_code 必须是整数`);
+          throw new Error(`evidence[${index}].exit_code must be an integer`);
         }
         return {
           kind: kind as EvidenceKind,
@@ -552,7 +552,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const source = record(input, "get_handoff input");
       const epochId = source.epoch_id;
       if (epochId !== undefined && typeof epochId !== "string") {
-        throw new Error("epoch_id 必须是字符串");
+        throw new Error("epoch_id must be a string");
       }
       return {
         resource: typeof epochId === "string" ? `epoch ${epochId}` : "canonical handoff",
@@ -563,7 +563,7 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const source = record(input, "get_handoff input");
       const epochId = source.epoch_id;
       if (epochId !== undefined && typeof epochId !== "string") {
-        throw new Error("epoch_id 必须是字符串");
+        throw new Error("epoch_id must be a string");
       }
       const handoff = await controller.getHandoff(
         typeof epochId === "string" ? epochId : undefined,
@@ -595,30 +595,30 @@ export function createGoalTools(controller: GoalController): Tool[] {
       const source = record(input, "handoff_update input");
       const baseRevision = source.base_revision;
       if (typeof baseRevision !== "number" || !Number.isInteger(baseRevision)) {
-        throw new Error("base_revision 必须是整数");
+        throw new Error("base_revision must be an integer");
       }
       const patches = objects(source, "patches").map((patch, index) => {
         const section = requiredString(patch, "section");
         if (!HANDOFF_SECTIONS.includes(section as HandoffNarrativeSection)) {
-          throw new Error(`patches[${index}].section 不允许：${section}`);
+          throw new Error(`patches[${index}].section is not allowed: ${section}`);
         }
         const operation = requiredString(patch, "operation");
         if (operation !== "append" && operation !== "correct") {
-          throw new Error(`patches[${index}].operation 非法：${operation}`);
+          throw new Error(`patches[${index}].operation is invalid: ${operation}`);
         }
         const target = patch.target;
         if (target !== undefined && typeof target !== "string") {
-          throw new Error(`patches[${index}].target 必须是字符串`);
+          throw new Error(`patches[${index}].target must be a string`);
         }
         const reason = patch.reason;
         if (reason !== undefined && typeof reason !== "string") {
-          throw new Error(`patches[${index}].reason 必须是字符串`);
+          throw new Error(`patches[${index}].reason must be a string`);
         }
         if (operation === "correct" && (typeof target !== "string" || target.trim().length === 0)) {
-          throw new Error(`patches[${index}] correction 必须提供 target`);
+          throw new Error(`patches[${index}] correction must provide target`);
         }
         if (operation === "correct" && (typeof reason !== "string" || reason.trim().length === 0)) {
-          throw new Error(`patches[${index}] correction 必须提供 reason`);
+          throw new Error(`patches[${index}] correction must provide reason`);
         }
         const evidence = optionalStrings(patch, "evidence");
         return {

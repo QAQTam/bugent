@@ -56,46 +56,46 @@ const DESCRIPTION = "Ask the user a question and wait for the answer.";
 
 export function parseQuestions(raw: unknown): AskUserQuestion[] {
   if (!Array.isArray(raw)) {
-    throw new Error("questions 必须是数组");
+    throw new Error("questions must be an array");
   }
   if (raw.length === 0) {
-    throw new Error("questions 不能为空");
+    throw new Error("questions must not be empty");
   }
   if (raw.length > MAX_QUESTIONS) {
-    throw new Error(`一次最多问 ${MAX_QUESTIONS} 个问题，收到 ${raw.length} 个。请先自己调研再问`);
+    throw new Error(`at most ${MAX_QUESTIONS} questions per call, received ${raw.length}. Investigate first, then ask`);
   }
 
   return raw.map((item, index) => {
     const at = `questions[${index}]`;
     if (item === null || typeof item !== "object") {
-      throw new Error(`${at} 必须是对象`);
+      throw new Error(`${at} must be an object`);
     }
 
     const record = item as Record<string, unknown>;
     const question = record.question;
     if (typeof question !== "string" || question.trim().length === 0) {
-      throw new Error(`${at}.question 必须是非空字符串`);
+      throw new Error(`${at}.question must be a non-empty string`);
     }
 
     let options: string[] = [];
     if (record.options !== undefined) {
-      if (!Array.isArray(record.options)) throw new Error(`${at}.options 必须是字符串数组`);
+      if (!Array.isArray(record.options)) throw new Error(`${at}.options must be an array of strings`);
       if (record.options.length > MAX_OPTIONS) {
-        throw new Error(`${at}.options 最多 ${MAX_OPTIONS} 个，收到 ${record.options.length} 个`);
+        throw new Error(`${at}.options allows at most ${MAX_OPTIONS}, received ${record.options.length}`);
       }
       for (const option of record.options) {
         if (typeof option !== "string" || option.trim().length === 0) {
-          throw new Error(`${at}.options 里每一项都必须是非空字符串`);
+          throw new Error(`every entry in ${at}.options must be a non-empty string`);
         }
       }
       options = (record.options as string[]).map((option) => option.trim());
     }
 
     if (record.multiple !== undefined && typeof record.multiple !== "boolean") {
-      throw new Error(`${at}.multiple 必须是布尔值`);
+      throw new Error(`${at}.multiple must be a boolean`);
     }
     if (record.multiple === true && options.length === 0) {
-      throw new Error(`${at} 是多选但没有选项，用户无从勾选`);
+      throw new Error(`${at} is multi-select but has no options`);
     }
 
     return {
@@ -133,12 +133,12 @@ export function createAskUserTool(): Tool<AskUserInput, string> {
       const questions = parseQuestions(input.questions);
 
       if (ctx.askUser === undefined) {
-        throw new Error("当前环境没有可交互的界面，无法提问。请基于已有信息自行判断并继续");
+        throw new Error("no interactive UI is available, so asking is impossible. Decide from the information you have and continue");
       }
 
       const answers: AskUserAnswer[] | undefined = await ctx.askUser(questions);
       if (answers === undefined) {
-        return "用户中止了回答（abort）。不要再追问，基于现有信息继续，并在回答里说明你做了哪些假设。";
+        return "the user aborted the question. Do not ask again; continue with what you have and state your assumptions in the answer.";
       }
 
       return formatAnswers(answers);

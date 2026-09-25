@@ -103,7 +103,7 @@ export async function createOutputSpool(
 
   return {
     write(stream, chunk): void {
-      if (closed) throw new Error("output spool 已关闭");
+      if (closed) throw new Error("output spool is closed");
       let sink = sinks[stream];
       if (sink === undefined) {
         sink = Bun.file(tempPaths[stream]).writer({ highWaterMark: 64 * 1024 });
@@ -113,7 +113,7 @@ export async function createOutputSpool(
     },
 
     async promote(): Promise<SpilledOutput> {
-      if (closed) throw new Error("output spool 已关闭");
+      if (closed) throw new Error("output spool is closed");
       closed = true;
       await closeSinks();
 

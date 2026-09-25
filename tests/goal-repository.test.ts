@@ -166,7 +166,7 @@ describe("Goal P0 · repository", () => {
     );
     expect(checkpoints.map((checkpoint) => checkpoint.status)).toEqual(["pending", "pending"]);
     expect(repository.activateCheckpoint("cp1", 21).status).toBe("active");
-    expect(() => repository.activateCheckpoint("cp2", 22)).toThrow("前置 Checkpoint");
+    expect(() => repository.activateCheckpoint("cp2", 22)).toThrow("preceding checkpoint");
 
     repository.setCheckpointStatus("cp1", "verifying");
     repository.setCheckpointStatus("cp1", "reviewing");
@@ -207,7 +207,7 @@ describe("Goal P0 · repository", () => {
           dependsOn: ["a"],
         },
       ]),
-    ).toThrow("存在环");
+    ).toThrow("cycle");
     expect(repository.listCheckpoints("goal1")).toHaveLength(0);
   });
 
@@ -250,7 +250,7 @@ describe("Goal P0 · repository", () => {
           },
         ],
       }),
-    ).toThrow("存在环");
+    ).toThrow("cycle");
     expect(repository.listPlanRevisions("goal1")).toHaveLength(0);
     expect(repository.listCheckpoints("goal1")).toHaveLength(0);
   });

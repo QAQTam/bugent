@@ -35,7 +35,7 @@ describe("P3 · bash 工具", () => {
 
   test("无输出时给出明确提示", async () => {
     const out = await tool.run({ command: "true" }, ctx());
-    expect(out).toContain("(无输出)");
+    expect(out).toContain("(no output)");
     expect(out).toContain("[exit code: 0]");
   });
 
@@ -48,7 +48,7 @@ describe("P3 · bash 工具", () => {
     const started = Date.now();
     const out = await tool.run({ command: "sleep 10", timeoutMs: 300 }, ctx());
     expect(Date.now() - started).toBeLessThan(5000);
-    expect(out).toContain("[超时]");
+    expect(out).toContain("[timeout]");
   });
 
   test("abort 信号能中断正在跑的命令", async () => {
@@ -58,28 +58,28 @@ describe("P3 · bash 工具", () => {
     const started = Date.now();
     const out = await tool.run({ command: "sleep 10" }, ctx({ signal: controller.signal }));
     expect(Date.now() - started).toBeLessThan(5000);
-    expect(out).toContain("[中断]");
+    expect(out).toContain("[aborted]");
   });
 
   test("输出过大时截断，且不会把子进程卡死", async () => {
     const small = createBashTool(createShellRunner(), { maxOutputBytes: 100 });
     const out = await small.run({ command: "yes a | head -c 5000" }, ctx());
-    expect(out).toContain("已截断");
+    expect(out).toContain("was truncated");
     expect(out.length).toBeLessThan(1000);
     expect(out).toContain("[exit code: 0]");
   });
 
   test("非法输入被拒绝", async () => {
-    await expect(tool.run({ command: "" }, ctx())).rejects.toThrow(/非空字符串/);
-    await expect(tool.run({ command: 123 }, ctx())).rejects.toThrow(/非空字符串/);
-    await expect(tool.run({ command: "echo x", timeoutMs: -1 }, ctx())).rejects.toThrow(/正数/);
+    await expect(tool.run({ command: "" }, ctx())).rejects.toThrow(/non-empty string/);
+    await expect(tool.run({ command: 123 }, ctx())).rejects.toThrow(/non-empty string/);
+    await expect(tool.run({ command: "echo x", timeoutMs: -1 }, ctx())).rejects.toThrow(/positive number/);
   });
 
   test("通过 ToolRegistry 执行时，非法输入转成 ok:false 而不是抛穿", async () => {
     const registry = new ToolRegistry().register(tool);
     const result = await registry.execute({ id: "c1", name: "bash", args: {} }, ctx());
     expect(result.ok).toBe(false);
-    expect(result.output).toContain("非空字符串");
+    expect(result.output).toContain("non-empty string");
   });
 
   test("工具 schema 与 name 正确", () => {
