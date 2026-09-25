@@ -1,9 +1,196 @@
 # bugent Handoff
 
-> 更新时间：2026-09-24  
-> 分支：`master`  
-> 基线提交：`f04a60d feat: 强化会话运行时并接入 Bun sandbox SDK`
-> 当前状态：Linux 原生 sandbox provider、MCP、skills、Bun fork runtime 与 buTUI 独立实验入口已完成；当前工作树待拆分提交
+> 更新时间：2026-09-26
+> 分支：`master`
+> 功能检查点：`41ec617 perf(tui): 解耦流式到达与 120fps 显示`
+> 状态：TUI 流式平滑、Lezer Markdown AST、表格行级增量已完成并单独提交；工作区仍有其他同事的 Goal/tools/prompt/agent 改动，禁止一起提交
+
+## 当前检查点
+
+目标是把 TUI 从“按网络 delta 一跳一跳”推进到“到达与显示解耦、目标 120fps、流式 Markdown 只重绘变化部分”。
+
+已完成三个独立提交：
+
+```text
+41ec617 perf(tui): 解耦流式到达与 120fps 显示
+dc45b95 perf(tui): 增量重排流式 Markdown 表格
+478ab46 feat(tui): 引入 Lezer Markdown AST 与表格模型
+```
+
+### 1. Lezer Markdown AST
+
+相关文件：
+
+```text
+src/tui/markdown-ast.ts
+src/tui/lezer-markdown-boundary.ts
+src/tui/streaming-markdown.ts
+src/tui/markdown.ts
+```
+
+能力：
+
+- 使用 `@lezer/markdown` + GFM 解析 Markdown。
+- AST 识别顶层 block、fenced code、GFM table。
+- 未闭合 fenced code 不误判为完整代码块。
+- `LinkReference` 出现后禁用 stable prefix 冻结。
+- `splitMarkdown()` 不再手写扫描围栏和表格 delimiter。
+- 表格直接消费 Lezer 的 `TableHeader/TableRow/TableCell` 模型。
+- 行内 Markdown 仍交给 Bun，代码块仍走原有高亮器。
+- 可用 `BUGENT_LEZER_MARKDOWN=0` 回退到旧边界扫描。
+
+### 2. 表格行级增量
+
+`src/tui/markdown.ts` 现在维护有界表格状态：
+
+- 以 `TableRow` 前缀复用已经完成的渲染行。
+- 固定列宽追加时只重排新行。
+- 新行改变列宽时整表失效，避免边框错位。
+- 缓存 key 包含宽度、超链接开关、delimiter 和行内容。
+- 表格状态上限 64；行内单元格 LRU 上限 2048。
+- `getMarkdownCacheStats()` / `resetMarkdownCacheStats()` 用于性能回归。
+
+1000 行表格追加一行：
+
+```text
+tableStateHits:   1
+tableRowRenders:  1
+tableRowReuses: 1001
+```
+
+本机微基准（1000 行表格追加 100 行）：
+
+```text
+旧实现   p50 18.76ms  p95 21.23ms
+新实现   p50  4.67ms  p95  6.33ms
+```
+
+注意：这是 Markdown 表格渲染基准，不是完整 TUI 帧耗时。表格仍会扫描/复制全部输出行，尚未做到端到端 O(1)。
+
+### 3. TUI 到达与显示解耦
+
+相关文件：
+
+```text
+src/tui/stream-pacer.ts
+src/tui/frame-scheduler.ts
+src/tui/term.ts
+src/tui/transcript-layout.ts
+src/tui/transcript.ts
+src/tui/app.ts
+```
+
+行为：
+
+- `StreamPacer` 把 provider delta 先入队，再按约 120 token/s 分帧揭示。
+- 大突发不会一帧跳完整段。
+- 队列延迟超过阈值后有限追帧，避免无限落后。
+- `StreamPacer` 已改为头指针 + 摊销压缩，消除 `Array.shift()` 的 O(n²)。
+- `FrameScheduler` 默认 120fps（8.333ms），从上一实际帧计算下一帧，避免 10ms token 节奏锁成 20ms。
+- `Terminal.writeFrame()` 用单次 stdout 写入提交差分帧，并尝试 DEC 2026 同步输出。
+- `TranscriptLayout.applyChanges()` 只更新新增/标脏 block；旧 block 改行数时修正后续偏移。
+- highlight.js 异步完成后同时失效布局缓存和 Markdown stable/tail 缓存。
+- `BUGENT_SYNC_UPDATE=0` 可关闭同步输出；`BUGENT_LAYOUT_STATS=1` 在退出时打印布局统计。
+
+## 验证状态
+
+```text
+bun run typecheck
+# pass
+
+TUI / Stream / Layout 定向测试
+# 59 pass
+
+TUI PTY 冒烟
+# 24 pass
+
+Markdown / Lezer 定向测试
+# 50 pass
+```
+
+全量测试最近一次：
+
+```text
+971 pass / 1 fail
+```
+
+唯一失败是并发全量运行时的 Goal 工具用例；单跑 `tests/goal-controller.test.ts` 为 `21 pass`，与 TUI/Markdown 提交无关。
+
+## 上机检查点
+
+建议先跑：
+
+```bash
+bun run src/index.ts --mock --no-persist
+```
+
+模拟突发流：
+
+```bash
+BUGENT_MOCK_CHUNK_CHARS=4 \
+BUGENT_MOCK_CHUNK_DELAY_MS=0 \
+bun run src/index.ts --mock --no-persist
+```
+
+退出时打印布局统计：
+
+```bash
+BUGENT_LAYOUT_STATS=1 bun run src/index.ts --mock --no-persist
+```
+
+终端闪烁或同步输出异常时：
+
+```bash
+BUGENT_SYNC_UPDATE=0 bun run src/index.ts --mock --no-persist
+```
+
+验收重点：
+
+1. 约 100 tok/s 是否逐字流动，而不是整段跳。
+2. 约 200 tok/s 突发时是否仍平滑，但不过度滞后。
+3. 长代码块首次出现后，异步高亮是否能及时刷新。
+4. 1000 行左右表格追加时是否卡顿。
+5. 滚动、工具卡片和输入框是否撕裂或闪烁。
+6. 需要时记录完整帧 p50/p95/p99；目前还没有端到端帧统计。
+
+## 已知限制与下一步
+
+1. **完整帧基准尚未做**
+   - 当前只有 Markdown 表格微基准。
+   - 需要测 compose + layout + diff + terminal write 的完整 p95/p99。
+
+2. **表格仍不是严格 O(1)**
+   - 昂贵行渲染已增量化，但每帧仍遍历/复制全部输出行。
+   - 若真机大表仍卡，下一步做列宽 multiset、rolling prefix hash、rope/chunk 输出。
+
+3. **长上下文/分页未做**
+   - 当前主要是窗口化布局与 block 缓存。
+   - 需要先看 `oldUpdates` 统计，再决定 Fenwick O(log n) 或优先做分页/持久化窗口。
+
+4. **Markdown 边角**
+   - 列表/引用内部 fenced code 仍走 Bun prose，不一定进入自定义高亮。
+   - 行内 AST 尚未完全替换 Bun 行内渲染。
+
+5. **工作区仍有同事改动**
+   - `src/goal/*`、`src/tools/*`、`src/agent/*`、`src/prompts/system.md`、对应测试和 `src/store/goal-repository.ts` 当前均未提交。
+   - 不要把同事改动混入 TUI/Markdown 提交。
+   - 当前暂存区应为空。
+
+## 交接给下一位
+
+优先顺序：
+
+```text
+1. 真机验收当前 TUI 平滑检查点
+2. 若大表仍卡：做真正增量的表格宽度/输出结构
+3. 若长会话滚动仍卡：做布局统计驱动的 O(log n) 或分页
+4. 最后再补 Markdown 嵌套块与行内 AST
+```
+
+---
+
+## Historical handoff (2026-09-24)
+
 
 ## 1. 当前状态
 
