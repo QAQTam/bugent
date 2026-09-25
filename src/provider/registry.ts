@@ -85,6 +85,13 @@ export interface ProviderConfig {
   tls?: ProviderTlsConfig | undefined;
   /** assistant reasoning 回放的 wire 字段策略。 */
   reasoningReplay?: ReasoningReplay | undefined;
+  /**
+   * 该 provider 模型的上下文窗口（token）。
+   *
+   * 协议里没有这个字段，所以要么用户显式配，要么走 `model-window.ts` 的内置
+   * 兜底；两者都没有时 UI 只显示绝对占用，不显示百分比。
+   */
+  contextWindow?: number | undefined;
 }
 
 /** 可以安全写入 session 记录的 provider 配置；API key 永远不在其中。 */
@@ -113,10 +120,13 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
   mock: (config, model) => {
     // 只有测试会设这个：让分块之间真的隔开时间，才能观察到逐帧增长。
     const chunkDelayMs = positiveIntEnv("BUGENT_MOCK_CHUNK_DELAY_MS");
+    // 同理：默认不回传 usage，打开后才造一份假的，用来测状态栏的三项指标。
+    const syntheticUsage = positiveIntEnv("BUGENT_MOCK_USAGE") > 0;
     return createMockClient({
       id: `${config.id}/mock/${model}`,
       script: mockScript(),
       ...(chunkDelayMs > 0 ? { chunkDelayMs } : {}),
+      ...(syntheticUsage ? { syntheticUsage } : {}),
     });
   },
 

@@ -32,6 +32,18 @@ import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
 import { PatchStreamProgress } from "../patch/streaming-progress.ts";
 import { parseModelRef } from "../provider/registry.ts";
 import type { PersistedProviderConfig } from "../provider/registry.ts";
+import { defaultContextWindow, probeContextWindow } from "../provider/model-window.ts";
+import { loadTokenizer, resolveTokenizerPath } from "../util/tokenizer.ts";
+import {
+  cacheHitRate,
+  contextOccupancy,
+  formatMetrics,
+  formatPercent,
+  formatSpeed,
+  formatTokenCount,
+  StreamMeter,
+  type MetricsStyle,
+} from "./metrics.ts";
 import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
@@ -459,6 +471,16 @@ export class TuiApp implements TuiInteraction {
   #todoPanelExpanded = false;
   #busy = false;
   #usage: Usage = { input: 0, output: 0 };
+  /** 最近一次请求的 usage；上下文占用要用"当前压在窗口里的量"，不能用累计值。 */
+  #lastUsage: Usage | undefined;
+  /** 从 `GET /models` 探到的上下文窗口；配置里的显式值优先于它。 */
+  #probedContextWindow: number | undefined;
+  /** 探测用的键（provider/model），避免切模型后拿旧值。 */
+  #probedContextWindowKey: string | undefined;
+  /** 瞬时输出速度计（思考 / 工具参数 / 正文三段都喂给它）。 */
+  #meter = new StreamMeter();
+  /** 速度读数衰减到 0 之前需要持续出帧；安静下来就停掉。 */
+  #speedTimer: ReturnType<typeof setInterval> | undefined;
   #abort: AbortController | undefined;
   /** 串行化所有工具触发的交互弹窗，避免并发工具互相覆盖对话框状态。 */
   #interactionTail: Promise<void> = Promise.resolve();
@@ -591,6 +613,30 @@ export class TuiApp implements TuiInteraction {
     if (options.banner !== undefined) {
       this.#transcript.pushNotice(options.banner);
     }
+    this.#loadTokenizerInBackground();
+    this.#probeContextWindowInBackground();
+  }
+
+  /**
+   * 后台加载 DeepSeek tokenizer（可选）。
+   *
+   * 7.8MB 的 JSON 解析要一百多毫秒，不能挡住首帧；没装文件就走启发式估算，
+   * 由服务端 usage 校准。加载完成后再重绘一次，让后续读数换成真 token 数。
+   */
+  #loadTokenizerInBackground(): void {
+    const path = resolveTokenizerPath();
+    if (path === undefined) return;
+    void (async () => {
+      try {
+        // 让出一轮事件循环，先保证首帧画出来。
+        await Bun.sleep(0);
+        this.#meter.setCounter(loadTokenizer(path));
+        this.#requestFrame();
+      } catch {
+        // tokenizer 只是"更准"，加载失败不该影响任何功能，也不该往
+        // 备用屏里打日志（那会糊掉画面）—— 静默退回启发式估算。
+      }
+    })();
   }
 
   /**
@@ -739,6 +785,7 @@ export class TuiApp implements TuiInteraction {
     } finally {
       clearInterval(escapeTimer);
       this.#stopTodoShimmer();
+      this.#stopSpeedTicker();
       // 取消挂起的合流帧，否则定时器会把进程多吊住一个窗口期。
       this.#frames.dispose();
       offData();
@@ -1866,6 +1913,7 @@ export class TuiApp implements TuiInteraction {
         `endpoint  ${this.#providerConfig?.endpoint ?? "(registry)"}`,
         `baseUrl   ${this.#providerConfig?.baseUrl ?? "(registry)"}`,
         `sandbox   ${this.#mode}`,
+        ...this.#usageLines(),
         ...mcpLines,
         ...skillLines,
         `API key   ${this.#apiKeyOverride !== undefined ? "已设置（keychain / 内存）" : "使用 provider 配置"}`,
@@ -1878,6 +1926,39 @@ export class TuiApp implements TuiInteraction {
       ],
     });
     if (openMenu) await this.#openContextActions();
+  }
+
+  /** `/context` 里的用量明细：累计 in/out、缓存命中、上下文占用、速度与计数来源。 */
+  #usageLines(): string[] {
+    const usage = this.#usage;
+    const reasoning =
+      usage.reasoning !== undefined ? `（思考 ${formatTokenCount(usage.reasoning)}）` : "";
+    const lines = [
+      `usage     ↑${formatTokenCount(usage.input)} ↓${formatTokenCount(usage.output)}${reasoning}`,
+    ];
+
+    const rate = cacheHitRate(usage);
+    lines.push(
+      usage.cached === undefined
+        ? "cache     服务端未回传（无前缀缓存统计）"
+        : `cache     命中 ${formatPercent(rate!)}（累计 ${formatTokenCount(usage.cached)}/${formatTokenCount(usage.input)}）`,
+    );
+
+    const context = contextOccupancy(this.#lastUsage, this.#contextWindow());
+    lines.push(
+      context === undefined
+        ? "context   尚未收到 usage"
+        : `context   ${formatTokenCount(context.used)}${
+            context.window !== undefined ? `/${formatTokenCount(context.window)}` : ""
+          }${context.ratio !== undefined ? `（${formatPercent(context.ratio)}）` : ""}`,
+    );
+
+    lines.push(
+      `speed     ${formatSpeed(this.#meter.rate())} tok/s（${
+        this.#meter.counterKind === "deepseek-bpe" ? "DeepSeek tokenizer" : "启发式估算"
+      }${this.#meter.calibrated ? "，已用服务端 usage 校准" : ""}）`,
+    );
+    return lines;
   }
 
   /** `/context` 的二级菜单。 */
@@ -2438,16 +2519,18 @@ export class TuiApp implements TuiInteraction {
         ...(apiKey !== undefined ? { apiKey } : {}),
         mcpServerIds,
       });
-      this.#adoptRuntime(runtime);
-      if (overrides.clearApiKey === true) this.#apiKeyOverride = undefined;
-      else if (overrides.apiKey !== undefined) this.#apiKeyOverride = overrides.apiKey;
-      else if (providerChanged) this.#apiKeyOverride = undefined;
+      // providerConfig 与 apiKey 必须在 adoptRuntime 之前落定：adoptRuntime 里会
+      // 探测上下文窗口（用 baseUrl 与鉴权），用的就是这两个。
       if (providerConfig !== undefined) {
         this.#providerConfig = providerConfig;
         this.#providerConfigs.set(providerId, providerConfig);
       } else if (providerChanged) {
         this.#providerConfig = undefined;
       }
+      if (overrides.clearApiKey === true) this.#apiKeyOverride = undefined;
+      else if (overrides.apiKey !== undefined) this.#apiKeyOverride = overrides.apiKey;
+      else if (providerChanged) this.#apiKeyOverride = undefined;
+      this.#adoptRuntime(runtime);
       this.#audit?.sessionConfig({
         action: "provider_model_mode",
         providerId,
@@ -2486,6 +2569,9 @@ export class TuiApp implements TuiInteraction {
     this.#viewState = initialHistoryView();
     this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
+    this.#lastUsage = undefined;
+    this.#meter.reset();
+    this.#stopSpeedTicker();
     this.#stopTodoShimmer();
     this.#thinking.reset();
     this.#stopThinkingAnimation();
@@ -2785,6 +2871,7 @@ export class TuiApp implements TuiInteraction {
     this.#skillStatus = runtime.skillStatus;
     this.#activity = { state: "idle" };
     this.#lastAssistantMsgid = undefined;
+    this.#probeContextWindowInBackground();
   }
 
   #switchRuntime(branchId: string, notice?: string): boolean {
@@ -2810,6 +2897,9 @@ export class TuiApp implements TuiInteraction {
     this.#viewState = initialHistoryView();
     this.#lastLayoutTotal = 0;
     this.#usage = { input: 0, output: 0 };
+    this.#lastUsage = undefined;
+    this.#meter.reset();
+    this.#stopSpeedTicker();
     this.#todoCache = undefined;
     this.#messageHits = [];
     this.#toolHits = [];
@@ -2853,10 +2943,12 @@ export class TuiApp implements TuiInteraction {
       },
       onText: (delta) => {
         this.#transcript.appendAssistantText(delta);
+        this.#noteOutput(delta);
       },
       // 思考链路：只进滚动缓冲，不进消息区、不落库
       onReasoning: (delta) => {
         this.#thinking.push(delta);
+        this.#noteOutput(delta);
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
@@ -2876,6 +2968,8 @@ export class TuiApp implements TuiInteraction {
         }
 
         this.#transcript.updateToolCallDelta(delta);
+        // 工具参数也是模型"吐"出来的 token，算进瞬时速度。
+        this.#noteOutput(delta.argsDelta);
         if (delta.name === APPLY_PATCH_TOOL_NAME) {
           let stream = this.#patchStreams.get(delta.id);
           if (stream === undefined) {
@@ -2940,6 +3034,8 @@ export class TuiApp implements TuiInteraction {
       },
       onUsage: (usage) => {
         this.#usage = Transcript.mergeUsage(this.#usage, usage);
+        this.#lastUsage = usage;
+        this.#meter.noteUsage(usage);
         this.#requestFrame();
       },
       onExtensionRoleFallback: async (error) => {
@@ -3175,6 +3271,42 @@ export class TuiApp implements TuiInteraction {
       this.#thinkingTimer = undefined;
     }
     this.#thinkingFrame = 0;
+  }
+
+  /**
+   * 记录一段模型输出（思考 / 工具参数 / 正文都走这里）。
+   *
+   * 速度读数是**随时间衰减**的：模型停下来的那一刻窗口里还留着最近的样本，
+   * 如果不继续出帧，读数会僵在峰值上。所以只要有输出就拉起一个低频 ticker，
+   * 等窗口排空再停 —— 安静时读数归零，且不烧 CPU。
+   */
+  #noteOutput(delta: string): void {
+    if (delta.length === 0) return;
+    this.#meter.noteDelta(delta);
+    this.#syncSpeedTicker();
+  }
+
+  #syncSpeedTicker(): void {
+    if (!this.#meter.active()) {
+      this.#stopSpeedTicker();
+      return;
+    }
+    if (this.#speedTimer !== undefined) return;
+    this.#speedTimer = setInterval(() => {
+      if (!this.#meter.active()) {
+        this.#stopSpeedTicker();
+        this.#requestFrame();
+        return;
+      }
+      this.#requestFrame();
+    }, 200);
+  }
+
+  #stopSpeedTicker(): void {
+    if (this.#speedTimer !== undefined) {
+      clearInterval(this.#speedTimer);
+      this.#speedTimer = undefined;
+    }
   }
 
   /**
@@ -3680,6 +3812,76 @@ export class TuiApp implements TuiInteraction {
     return { lines, buttons };
   }
 
+  /** 当前模型可用的上下文窗口：配置 > 服务端自报 > 内置兜底表。 */
+  #contextWindow(): number | undefined {
+    return (
+      this.#providerConfig?.contextWindow ??
+      this.#probedContextWindow ??
+      defaultContextWindow(this.#session.model)
+    );
+  }
+
+  /**
+   * 问一次 `GET {baseUrl}/models` 拿上下文窗口。
+   *
+   * 只影响状态栏那个百分比，所以全程 best-effort：2s 超时、任何失败都静默
+   * 忽略、切了 provider/model 就作废旧结果。
+   */
+  #probeContextWindowInBackground(): void {
+    const config = this.#providerConfig;
+    const baseUrl = config?.baseUrl;
+    if (baseUrl === undefined || config?.contextWindow !== undefined) return;
+
+    const model = this.#session.model;
+    const providerId = this.#providerId;
+    const key = `${providerId}/${model}`;
+    if (this.#probedContextWindowKey === key) return;
+    this.#probedContextWindowKey = key;
+    this.#probedContextWindow = undefined;
+
+    void (async () => {
+      const apiKey =
+        this.#apiKeyOverride ?? (await this.#loadApiKey?.(this.#session.id, providerId));
+      const window = await probeContextWindow({
+        baseUrl,
+        model,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(config?.headers !== undefined ? { headers: config.headers } : {}),
+      });
+      // 探测期间可能已经切了 provider/model，那就丢掉这个结果。
+      if (window === undefined || this.#probedContextWindowKey !== key) return;
+      this.#probedContextWindow = window;
+      this.#requestFrame();
+    })();
+  }
+
+  /**
+   * 右上角三项指标 —— 上下文占用 / 会话缓存命中率 / 瞬时输出速度。
+   *
+   * 宽度不够时按 full → compact → minimal 逐档降级（去掉标签、再砍掉绝对值），
+   * 而不是直接截断出一串半截数字。
+   */
+  #composeMetrics(budget: number): string {
+    if (budget <= 0) return "";
+    const view = {
+      context: contextOccupancy(this.#lastUsage, this.#contextWindow()),
+      cacheRate: cacheHitRate(this.#usage),
+      tokensPerSecond: this.#meter.rate(),
+      estimated: this.#meter.counterKind === "heuristic",
+    };
+    const styles: MetricsStyle[] = ["full", "compact", "minimal"];
+    let last = "";
+    for (const style of styles) {
+      last = formatMetrics(view, style);
+      if (visibleWidth(last) <= budget) return last;
+    }
+    // 连最窄的一档都放不下：只留速度，交给外层截断。
+    return formatMetrics(
+      { tokensPerSecond: view.tokensPerSecond, estimated: view.estimated },
+      "minimal",
+    );
+  }
+
   #composeStatus(width: number): string {
     const modeColor = this.#mode === "no-sandbox" ? COLOR.warn : COLOR.ok;
     const badge = `${fg(modeColor)}${this.#mode}${RESET}`;
@@ -3687,14 +3889,13 @@ export class TuiApp implements TuiInteraction {
       this.#goalStatusLine === undefined
         ? ""
         : ` ${DIM}·${RESET} ${fg(COLOR.tool)}${this.#goalStatusLine}${RESET}`;
-    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}${goalTag}`;
+    // turn 计数留在左边：它不是"在不在干活"的状态描述（那个由菊花和速度读数
+    // 表达），而是"这个 session 跑到第几轮"的进度信息，任何时刻都该看得见。
+    const turnTag = ` ${DIM}· turn ${this.#session.turn}${RESET}`;
+    const left = `${BOLD}bugent${RESET} ${DIM}${this.#session.client.id}${RESET} ${badge}${turnTag}${goalTag}`;
     const queued = this.#session.queuedUserCount;
     const queueTag = queued > 0 ? ` ${fg(COLOR.warn)}[已排队 ${queued}]${RESET}` : "";
-    const right = this.#busy
-      ? `${fg(COLOR.busy)}● 运行中${RESET}${queueTag}`
-      : `${fg(COLOR.ok)}○ idle${RESET} ${DIM}turn ${this.#session.turn} · ↑${this.#usage.input} ↓${this.#usage.output}${
-          this.#usage.cached !== undefined ? ` ⚡${this.#usage.cached}` : ""
-        }${RESET}${queueTag}`;
+    const right = this.#composeMetrics(width - visibleWidth(left) - visibleWidth(queueTag) - 1) + queueTag;
     const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
     return truncateAnsi(left + " ".repeat(gap) + right, width);
   }

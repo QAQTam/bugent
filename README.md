@@ -327,6 +327,33 @@ decision = "ask"
 刻意**不做先行拦截**：那样用户看到的是一句没有上下文的"是否允许联网"，
 根本不知道自己在批准什么。
 
+### 状态栏
+
+右上角是三项实时指标，取代了原来的「● 运行中 / ○ idle turn N」：
+
+```
+bugent openai-chat/deepseek-v4.1-flash workspace-write · turn 12   ctx 42.1k/1.0M 4.2% · cache 93% · 38.4 tok/s
+```
+
+- **上下文占用**：最近一次请求的 `prompt_tokens + completion_tokens` ÷ 上下文窗口
+  （每轮都会把完整历史重新发一遍，所以 `prompt_tokens` 本身就是"此刻压在窗口里的量"）。
+  窗口大小按 `config.toml` 的 `context_window` → `GET {baseUrl}/models` 自报的
+  `context_length` → 内置兜底表 依次取；三者都没有时只显示绝对量，不编百分比。
+- **缓存命中率（会话累计）**：`Σ 命中 / Σ prompt_tokens`。命中量由服务端回传
+  （`prompt_tokens_details.cached_tokens`、DeepSeek 的 `prompt_cache_hit_tokens`、
+  Anthropic 风格的 `cache_read_input_tokens` 都认），拿不到就整项不显示。
+- **瞬时输出速度**：3s 滑动窗口内流过的 token ÷ 窗口跨度。**思考、工具调用参数、
+  最终作答三段都算**；安静下来读数自己衰减到 0，不占常驻定时器。
+
+token 计数优先用 DeepSeek 的真 tokenizer（只做计数，不引 tokenizer 库）：
+
+```bash
+bun run tokenizer:fetch          # 从 ModelScope 下到 ~/.bugent/tokenizers/deepseek-v3/
+```
+
+没装也能用：退回启发式估算（CJK 与其它字符分别加权），再用服务端 usage 的
+`completion_tokens` 自校准；估算值前面会带 `~`。
+
 ### 消息区
 
 三屏之内是主视窗（钉底跟随最新消息），更早的内容从顶部「查看更多消息」进
@@ -363,14 +390,14 @@ decision = "ask"
 启动时先问终端自己的底色（OSC 11 查询，60ms 上限），拿不到就看 `COLORFGBG`，
 都没有按深色处理。
 
-需要自己判定的原因：`Bun.markdown.ansi` 会给行内代码挑底色（深色终端 256 色
-`236`、浅色终端 `254`），而它判断深浅靠读 `COLORFGBG` —— 那个变量很多终端
+需要自己判定的原因：`Bun.markdown.ansi` 会给行内代码挑配色（深色终端 256 色
+`215`、浅色终端 `124`），而它判断深浅靠读 `COLORFGBG` —— 那个变量很多终端
 不导出，且 Bun 只在进程启动时读一次。bugent 显式把结果传给 Bun，行为与读取
 时机无关。
 
-判定结果目前只影响 markdown 行内代码的底色，**浅色配色方案本身还没做**：
-`COLOR` 是当前生效的主题，`applyTheme()` 是切换入口，浅色变体落地时按
-`background` 换成 `lightTheme` 即可。
+判定结果目前只影响 markdown 行内代码的**字色**（底色已由 bugent 主动剥掉），
+**浅色配色方案本身还没做**：`COLOR` 是当前生效的主题，`applyTheme()` 是切换
+入口，浅色变体落地时按 `background` 换成 `lightTheme` 即可。
 
 ### 命中区间自检
 

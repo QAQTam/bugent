@@ -47,6 +47,47 @@ describe("TUI PTY 冒烟", () => {
   };
 
   /**
+   * 按差分帧还原屏幕（后写的行覆盖先写的，和真实终端一致）。
+   *
+   * 差分渲染只重画变化的行，所以"整段累积输出"不等于"当前画面"：正文早就不
+   * 再重画了，状态栏还在每 200ms 变一次。
+   */
+  const screenOf = (text: string, rows: number): string[] => {
+    const screen = Array.from({ length: rows }, () => "");
+    for (const m of text.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?25|$)/g)) {
+      const row = Number(m[1]) - 1;
+      if (row >= 0 && row < rows) screen[row] = strip(m[2]!);
+    }
+    return screen;
+  };
+
+  /**
+   * 等某一轮真正收尾。
+   *
+   * 状态栏右上角换成三项指标后就没有 idle 字样了；速度读数在滑动窗口排空后
+   * 回到 0.0 tok/s —— 那是"这一轮吐完了"的可观测信号。turn 号不能用来看收尾，
+   * 它在轮次**开始**时就变了。
+   */
+  const waitForTurnIdle = async (
+    getText: () => string,
+    turn: number,
+    rows: number,
+    timeoutMs = 15_000,
+  ): Promise<void> => {
+    await waitFor(
+      getText,
+      (text) => {
+        const screen = screenOf(text, rows);
+        return (
+          screen.some((line) => line.includes(`turn ${turn}`)) &&
+          screen.some((line) => line.includes("0.0 tok/s"))
+        );
+      },
+      timeoutMs,
+    );
+  };
+
+  /**
    * 找出画着某个按钮的那一行，以及按钮左边框的 1-based **显示列**。
    *
    * 不写死列号：按钮是居中的矩形，宽度一变（文案或边框改动）写死的坐标就
@@ -549,7 +590,7 @@ describe("TUI PTY 冒烟", () => {
         terminal.write(
           Array.from({ length: 30 }, (_, index) => `drag-${index + 1}`).join("\r") + "\r",
         );
-        await waitFor(() => output, (text) => strip(text).includes("turn 30"));
+        await waitForTurnIdle(() => output, 30, 14);
 
         // thumb 现在只有 1 格高、贴轨道底部：14 行终端正文 7 行 → 轨道 2..8，
         // 所以 thumb 在第 8 行（不是以前那对 6-7）。拖到轨道顶格。
@@ -605,7 +646,7 @@ describe("TUI PTY 冒烟", () => {
           Array.from({ length: 30 }, (_, index) => `m${String(index + 1).padStart(2, "0")}`).join("\r") +
             "\r",
         );
-        await waitFor(() => output, (text) => strip(text).includes("turn 30"));
+        await waitForTurnIdle(() => output, 30, 12);
 
         output = "";
         // 一次 PageUp 滚「正文高度」行，而上限有 90+ 行 —— 按三下远远到不了，
@@ -1236,7 +1277,7 @@ describe("TUI PTY 冒烟", () => {
         terminal.write(Array.from({ length: 10 }, (_, index) => `m${index + 1}`).join("\r") + "\r");
         // 一次性灌入 10 条消息，加上开头的 "hello" 共 11 轮，跑完停在 turn 11。
         // 只等最终态：中间轮次会被帧调度器合流成一帧，逐轮的 turn 号不再单独出现。
-        await waitFor(() => output, (text) => strip(text).includes("turn 11"), 20_000);
+        await waitForTurnIdle(() => output, 11, 30, 20_000);
         terminal.write("\x1b[5~\x1b[5~");
         await Bun.sleep(300);
 
@@ -1433,17 +1474,13 @@ describe("TUI PTY 冒烟", () => {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
 
         terminal.write(`${prompt}\r`);
-        // 等本轮收尾：不能只等 "○ idle" —— 启动屏本身就是 idle turn 0
-        await waitFor(() => output, (text) => strip(text).includes("○ idle turn 1"), 15_000);
+        // 等本轮收尾：状态栏不再有 idle 字样，用"速度回到 0"当信号
+        await waitForTurnIdle(() => output, 1, 20);
 
         // 按行号把差分流还原成屏幕。
         // 不能按 `\x1b[?25l` 切"最后一帧"：那个序列既是帧前缀、也是 setCursor
         // 隐藏光标用的，会把帧切碎。
-        const screen = Array.from({ length: 20 }, () => "");
-        for (const m of output.matchAll(/\x1b\[(\d+);1H\x1b\[2K([\s\S]*?)(?=\x1b\[\d+;1H|\x1b\[\?25|$)/g)) {
-          const row = Number(m[1]) - 1;
-          if (row >= 0 && row < screen.length) screen[row] = strip(m[2]!);
-        }
+        const screen = screenOf(output, 20);
 
         const headRow = screen.findIndex((line) => line.includes("[mock] AAA-start"));
         expect(headRow).toBeGreaterThan(1);
@@ -1456,6 +1493,64 @@ describe("TUI PTY 冒烟", () => {
           (line, index) => index > headRow && line.includes("ZZZ-end"),
         );
         expect(tailBelowHead).toBe(-1);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "状态栏右上角显示上下文占用 / 缓存命中率 / 瞬时速度",
+    async () => {
+      // 右上角以前是"● 运行中 / ○ idle turn N"，现在是三项指标。
+      // mock 默认不回传 usage，这里用 BUGENT_MOCK_USAGE=1 让它造一份：
+      // 输入按请求文本估算、命中固定 60%，于是"命中率 = cached / input"这条
+      // 链路（adapter → loop → TUI 累加 → 状态栏）可以整条端到端验证。
+      const home = await mkdtemp(join(tmpdir(), "bugent-metrics-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 100,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: home, TERM: "xterm-256color", BUGENT_MOCK_USAGE: "1" },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        // 启动时还没收到过 usage：只该有速度读数，不该编造 ctx / cache。
+        const boot = screenOf(output, 24)[0]!;
+        expect(boot).toContain("tok/s");
+        expect(boot).not.toContain("ctx ");
+        expect(boot).not.toContain("cache ");
+
+        terminal.write("hello\r");
+        await waitForTurnIdle(() => output, 1, 24);
+
+        const status = screenOf(output, 24)[0]!;
+        // 三项都在同一行；上下文占用带绝对量，缓存命中率是 mock 造的 60%
+        expect(status).toMatch(/ctx [\d.]+k?/);
+        expect(status).toContain("cache 60%");
+        expect(status).toMatch(/[\d.]+ tok\/s/);
+        // 老指示标志不该再出现
+        expect(status).not.toContain("运行中");
+        expect(status).not.toContain("idle");
 
         terminal.write("\x03");
         expect(await proc.exited).toBe(0);

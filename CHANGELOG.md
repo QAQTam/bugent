@@ -20,6 +20,12 @@
   展开后仍受 40% 高度上限约束。
 - 思考区只保留菊花与思考尾部，去掉状态文字；「回到最新消息」出现时向正文借 1 行，
   菊花不被挤掉。
+- 状态栏右上角的「● 运行中 / ○ idle」换成三项实时指标：**上下文占用**（最近一次请求
+  的 prompt+completion ÷ 窗口，窗口按配置 → `GET /models` 自报 → 内置表取）、
+  **会话累计缓存命中率**（`Σ cached / Σ prompt_tokens`，兼容 OpenAI / DeepSeek /
+  Anthropic 三种字段名）、**瞬时输出速度**（3s 滑动窗口，思考 + 工具参数 + 正文三段
+  都算）。速度用 DeepSeek 真 tokenizer 计数（`bun run tokenizer:fetch` 可选下载），
+  没装则退回启发式估算并用服务端 usage 自校准。
 - `buTUI` 实验入口跟进 v0.2 帧运行时（ledger transcript、patch 卡片、跟随与分页修复）。
 
 ## 0.1.0 发布摘要

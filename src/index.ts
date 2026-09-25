@@ -568,7 +568,13 @@ async function main(): Promise<void> {
         cwd: options.cwd,
         providerId: effectiveProviderId,
         providers: registry.list().map((provider) => provider.id),
-        providerConfigs: store?.listProviderConfigs(sessionId) ?? [],
+        // registry 里的 provider 配置也要给 TUI：session 里没存过配置的 provider
+        // （首次启动就是这种）在 TUI 眼里同样是"知道 endpoint / baseUrl"的，
+        // 上下文窗口探测要用 baseUrl。顺序上 session 级配置覆盖 registry。
+        providerConfigs: [
+          ...registry.list().map(({ apiKey: _apiKey, ...config }) => config),
+          ...(store?.listProviderConfigs(sessionId) ?? []),
+        ],
         ...(effectiveProviderConfig !== undefined ? { providerConfig: effectiveProviderConfig } : {}),
         ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
         loadApiKey: (sessionId: string, providerId: string) => credentials.get(sessionId, providerId),
