@@ -13,3 +13,4 @@ runtime/bun/runtime.json
 !.env.example
 .DS_Store
 *.local
+.prompt-lab/

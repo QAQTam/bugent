@@ -19,6 +19,9 @@
     "butui:typecheck": "cd ../buTUI && bun --conditions=browser x tsc --noEmit -p ../bugent/src/butui/tsconfig.typecheck.json",
     "build:sandbox": "bun run scripts/build-sandbox.ts",
     "tokenizer:fetch": "bun run scripts/fetch-tokenizer.ts",
+    "prompt:dump": "bun run scripts/dump-tools.ts",
+    "prompt:lab": "bun run scripts/prompt-lab.ts",
+    "prompt:analyze": "bun run scripts/prompt-lab-analyze.ts",
     "package:bugent": "bun run scripts/package-bugent.ts",
     "runtime:install": "bun run scripts/install-bun-runtime.ts",
     "package:bun-runtime": "bun run runtime/bun/scripts/package.ts"

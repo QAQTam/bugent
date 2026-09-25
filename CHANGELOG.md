@@ -26,6 +26,11 @@
   Anthropic 三种字段名）、**瞬时输出速度**（3s 滑动窗口，思考 + 工具参数 + 正文三段
   都算）。速度用 DeepSeek 真 tokenizer 计数（`bun run tokenizer:fetch` 可选下载），
   没装则退回启发式估算并用服务端 usage 自校准。
+- 提示词分层：工具 schema 只留「这个工具做什么」（短句 + 纯英文，24 个工具从
+  ~3951 tok 降到 ~2998 tok），使用纪律（编辑、todo、提问、子代理、验证、沙箱现实）
+  全部搬进 `src/prompts/system.md` —— 工具描述只在模型决定调用它时才被细读，纪律
+  需要每一轮都在。配套 `scripts/prompt-lab.ts` 实验台：快照冻结 + 多变体对照 +
+  Wilson 区间 / Fisher 精确检验，结论见 `docs/prompt-lab.md`。
 - `buTUI` 实验入口跟进 v0.2 帧运行时（ledger transcript、patch 卡片、跟随与分页修复）。
 
 ## 0.1.0 发布摘要
