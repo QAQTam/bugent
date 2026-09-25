@@ -10,6 +10,18 @@
 export const AGENT_KINDS = ["main", "reviewer", "explorer", "worker", "integrator"] as const;
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
+/**
+ * 子代理单轮的工具往返上限。
+ *
+ * reviewer / explorer / worker / Goal 评审共用同一个数：它们都是"派出去干活、
+ * 拿结果回来"的独立会话，步数需求本质相同。
+ *
+ * 这个值以前是分开写死的（只读 40 / worker 80 / Goal 评审 40），结果是只读调研
+ * 先撞墙 —— 40 步对"读若干文件、再给出带证据的结论"根本不够，一次正常的代码
+ * 审查就会中途拉闸。统一成一个常量，避免以后又各改各的。
+ */
+export const SUBAGENT_MAX_STEPS = 300;
+
 export const AGENT_AUTHORITIES = [
   "none",
   "read-only",

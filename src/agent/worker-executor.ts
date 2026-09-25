@@ -23,6 +23,7 @@ import {
   probeGit,
   type GitCapability,
 } from "./git.ts";
+import { SUBAGENT_MAX_STEPS } from "./model.ts";
 import type { AgentExecutor, AgentExecutionContext } from "./supervisor.ts";
 
 export interface WorkerAgentExecutorOptions {
@@ -162,7 +163,7 @@ export function createWorkerAgentExecutor(
           tools: registry,
           cwd: lease.path,
           signal: context.signal,
-          maxSteps: options.maxSteps ?? 80,
+          maxSteps: options.maxSteps ?? SUBAGENT_MAX_STEPS,
           hooks: {
             onToolCall: (call) => {
               context.report(`tool call: ${call.name}`, { toolCallId: call.id });

@@ -158,4 +158,50 @@ describe("P7-D · read-only reviewer/explorer executor", () => {
     expect(result.summary).toMatch(/只支持 reviewer\/explorer/);
     await transport.dispose();
   });
+  /**
+   * 回归防线：子代理默认步数上限曾经是 40，一次正常的代码审查就会在
+   * "读若干文件、再给结论"的中途被 `单轮超过 40 步` 拉闸。
+   *
+   * 这里让 mock 连续要 45 轮工具调用再收尾 —— 上限要是退回 40，这条会直接抛。
+   */
+  test("子代理默认步数上限足够跑完 40 轮以上，不会中途拉闸", async () => {
+    const cwd = await tempWorkspace();
+    const rounds = 45;
+
+    // mock 的脚本按 turn 下标取，所以每一轮都要有一个条目。
+    const script: MockTurn[] = Array.from({ length: rounds + 1 }, (_, index) =>
+      index < rounds
+        ? {
+            chunks: toolCallChunks({
+              id: `read-${index}`,
+              name: "read_file",
+              args: { path: "README.md" },
+            }),
+          }
+        : {
+            chunks: [
+              { type: "text", delta: "finished after many rounds" },
+              { type: "usage", usage: { input: 1, output: 1 } },
+              { type: "done", reason: "stop" },
+            ],
+          },
+    );
+
+    const transport = createInProcessTransport({
+      executor: createReadOnlyAgentExecutor({
+        client: createMockClient({ script }),
+        model: "mock-model",
+      }),
+    });
+
+    const result = await transport.wait(
+      await transport.start(spec("reviewer-long", "reviewer", cwd)),
+    );
+
+    expect(result.summary).not.toMatch(/单轮超过 \d+ 步/);
+    expect(result.status).toBe("completed");
+    expect((result.data as { steps?: number } | undefined)?.steps).toBeGreaterThan(40);
+    await transport.dispose();
+  });
+
 });

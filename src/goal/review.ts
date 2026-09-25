@@ -8,6 +8,7 @@
 
 import type { ModelClient } from "../provider/types.ts";
 import { createReadOnlyAgentExecutor, type ReadOnlyAgentOutput } from "../agent/read-only-executor.ts";
+import { SUBAGENT_MAX_STEPS } from "../agent/model.ts";
 import { compileAgentSandboxSpec } from "../agent/sandbox.ts";
 import type { AgentSpec } from "../agent/supervisor.ts";
 import { createInProcessTransport } from "../agent/transport.ts";
@@ -211,8 +212,10 @@ export function createReadOnlyReviewRunner(
           ].join("\n"),
         },
         budget: {
-          maxTurns: 40,
-          maxToolCalls: 80,
+          // 与子代理的 maxSteps 保持一致（详见 src/agent/model.ts）。
+          // AgentBudget 目前尚未被强制执行，实际生效的是 maxSteps。
+          maxTurns: SUBAGENT_MAX_STEPS,
+          maxToolCalls: SUBAGENT_MAX_STEPS,
           maxInputTokens: 100_000,
           maxOutputTokens: 20_000,
           maxWallClockMs: 10 * 60_000,
@@ -232,7 +235,7 @@ export function createReadOnlyReviewRunner(
         executor: createReadOnlyAgentExecutor({
           client: options.client,
           model: options.model,
-          maxSteps: 40,
+          maxSteps: SUBAGENT_MAX_STEPS,
         }),
       });
       try {

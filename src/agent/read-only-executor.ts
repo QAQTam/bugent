@@ -14,6 +14,7 @@ import { createBashTool } from "../tools/bash.ts";
 import { createReadFileTool } from "../tools/files.ts";
 import { ToolRegistry } from "../tools/types.ts";
 import { createSandboxedShellRunner, isSandboxAvailable } from "../sandbox/bwrap.ts";
+import { SUBAGENT_MAX_STEPS } from "./model.ts";
 import type { AgentExecutor, AgentExecutionContext } from "./supervisor.ts";
 
 export interface ReadOnlyAgentExecutorOptions {
@@ -132,7 +133,7 @@ export function createReadOnlyAgentExecutor(
         tools: registry,
         cwd,
         signal: context.signal,
-        maxSteps: options.maxSteps ?? 40,
+        maxSteps: options.maxSteps ?? SUBAGENT_MAX_STEPS,
         hooks: {
           onToolCall: (call) => {
             context.report(`tool call: ${call.name}`, { toolCallId: call.id });

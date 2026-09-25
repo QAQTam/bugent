@@ -15,6 +15,7 @@ import {
   attenuateCapabilities,
   defaultCapabilitiesForKind,
   hasCapability,
+  SUBAGENT_MAX_STEPS,
   type AgentAuthority,
   type AgentCapability,
   type AgentKind,
@@ -322,8 +323,11 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         },
         task: { id: taskId, title, instructions: task },
         budget: {
-          maxTurns: 40,
-          maxToolCalls: 80,
+          // 与子代理的 maxSteps 保持一致。注意：AgentBudget 目前只有
+          // validateBudget 在读，这几项**尚未真正生效** —— 实际生效的是
+          // SUBAGENT_MAX_STEPS（见 src/agent/model.ts）。
+          maxTurns: SUBAGENT_MAX_STEPS,
+          maxToolCalls: SUBAGENT_MAX_STEPS,
           maxInputTokens: 100_000,
           maxOutputTokens: 20_000,
           maxWallClockMs: 10 * 60_000,
