@@ -48,6 +48,7 @@ import { Screen } from "./screen.ts";
 import { Terminal } from "./term.ts";
 import { KeyDecoder, type Key } from "./keys.ts";
 import { FrameScheduler } from "./frame-scheduler.ts";
+import { StreamPacer } from "./stream-pacer.ts";
 import { StreamingMarkdownCache } from "./streaming-markdown.ts";
 import { LezerMarkdownBoundaryTracker } from "./lezer-markdown-boundary.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
@@ -415,6 +416,22 @@ export class TuiApp implements TuiInteraction {
   #lastAssistantMsgid: MsgId | undefined;
 
   #transcript = new Transcript();
+  /**
+   * 到达与显示解耦的文本队列。
+   *
+   * provider 一次网络 read 可能带回多条 SSE；直接 append 会让下一帧整块跳出。
+   * pacer 把大 delta 摊到多帧，同时保留小 delta 的逐字节奏。
+   */
+  #textPacer = new StreamPacer({ targetTokensPerSecond: 120 });
+  #reasoningPacer = new StreamPacer({ targetTokensPerSecond: 120 });
+  /**
+   * 已收到 onAssistant、但显示队列还没排空的消息 id。
+   *
+   * 不能在这里立刻 flush：整条回答若在一个事件循环 turn 内到达，flush 会把
+   * 突发重新变回一次整块跳字。等 pacer 排空后再结束流式块，才能既平滑又
+   * 保持 msgid 归属正确。
+   */
+  #pendingAssistantEnd: MsgId | undefined;
   /** apply_patch 参数流式解析器；工具真正开始时移除。 */
   #patchStreams = new Map<string, PatchStreamProgress>();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
@@ -578,7 +595,14 @@ export class TuiApp implements TuiInteraction {
 
     // 语言高亮模块是懒加载的：加载完成后要重绘一次，否则第一次看到的
     // 永远是纯文本。渲染路径保持同步，靠这个回调补上第二遍。
-    setHighlightReadyHandler(() => this.#requestFrame(true));
+    setHighlightReadyHandler(() => {
+      // 高亮模块加载完成会改变 renderItem 的结果，但 DisplayItem 的内容版本
+      // 没变。必须同时清掉布局行缓存和 streaming Markdown 缓存，否则全量
+      // 重绘仍然复用第一次得到的纯文本行。
+      this.#layout.invalidate();
+      this.#markdownCaches = new WeakMap();
+      this.#requestFrame(true);
+    });
 
     this.#session = options.session;
     this.#tools = options.tools;
@@ -762,7 +786,9 @@ export class TuiApp implements TuiInteraction {
   async run(): Promise<void> {
     this.#terminal.enter();
     const offData = this.#terminal.onData((chunk) => this.#handleKeys(this.#decoder.push(chunk)));
-    const offResize = this.#terminal.onResize(() => this.#requestFrame(true));
+    // 真正尺寸变化由 #render 里的 Screen.resize 检测并强制全量重绘；
+    // 同尺寸 SIGWINCH 不该把一个普通帧升级成全屏重绘。
+    const offResize = this.#terminal.onResize(() => this.#requestFrame());
     // 裸 ESC 需要超时才能确认（区别于转义序列前缀）
     const escapeTimer = setInterval(() => {
       const keys = this.#decoder.flush();
@@ -803,6 +829,9 @@ export class TuiApp implements TuiInteraction {
       this.#abort?.abort();
       this.#scrollbarDrag = undefined;
       this.#terminal.exit();
+      if (process.env.BUGENT_LAYOUT_STATS === "1") {
+        process.stderr.write(`[layout-stats] ${JSON.stringify(this.#layout.stats)}\n`);
+      }
     }
   }
 
@@ -2936,7 +2965,12 @@ export class TuiApp implements TuiInteraction {
     const appendUser = options.appendUser ?? true;
     this.#busy = true;
     this.#abort = controller;
+    // 上一轮若仍在显示排空，新轮开始前先一次性落完，保证消息边界和顺序。
+    if (this.#pendingAssistantEnd !== undefined) this.#flushStreamPacers();
     this.#thinking.reset();
+    this.#textPacer.reset();
+    this.#reasoningPacer.reset();
+    this.#pendingAssistantEnd = undefined;
     this.#patchStreams.clear();
     this.#transcript.clearStreamingTools();
     this.#activity = { state: "working" };
@@ -2951,21 +2985,38 @@ export class TuiApp implements TuiInteraction {
         this.#requestFrame();
       },
       onText: (delta) => {
-        this.#transcript.appendAssistantText(delta);
+        // 理论上 onText 只属于当前消息；若上一条的 onAssistant 已到但仍在排空，
+        // 新正文必须先切断旧块，绝不能因为 streamingIndex 还在而串到上一段。
+        if (this.#pendingAssistantEnd !== undefined) this.#flushStreamPacers();
+        this.#textPacer.push(delta);
         this.#noteOutput(delta);
+        this.#requestFrame();
       },
       // 思考链路：只进滚动缓冲，不进消息区、不落库
       onReasoning: (delta) => {
-        this.#thinking.push(delta);
+        this.#reasoningPacer.push(delta);
         this.#noteOutput(delta);
+        this.#requestFrame();
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
       onAssistant: (message) => {
-        // reasoning 不落 msgid；assistant 消息边界就是思考链路的生命周期边界。
+        // reasoning 只保留当前行，直接 flush 并 reset；正文继续按显示队列走。
+        const reasoning = this.#reasoningPacer.flush();
+        if (reasoning.length > 0) this.#thinking.push(reasoning);
         this.#thinking.reset();
+
+        // 上一条消息若还没排空，说明模型在一个 turn 里连续产出了多段文本。
+        // 先结束上一条，保证 msgid 边界不串；正常情况下这里不会命中。
+        if (this.#pendingAssistantEnd !== undefined) {
+          this.#flushStreamPacers();
+        }
+
         this.#lastAssistantMsgid = message.msgid;
-        this.#transcript.endAssistant(message.msgid);
+        this.#pendingAssistantEnd = message.msgid;
+        // 可能已经排空（小回复）：下一帧会立刻 endAssistant；不在这里直接结束，
+        // 统一由 #pumpStreamPacers 处理，避免边界逻辑出现两套。
+        this.#requestFrame();
         this.#setActivity({ state: "working" });
       },
       onToolCallDelta: (delta) => {
@@ -2994,6 +3045,8 @@ export class TuiApp implements TuiInteraction {
         this.#requestFrame();
       },
       onToolCall: (call) => {
+        // 不在这里 flush：assistant 块已经排在工具卡片之前，pacer 可以继续在
+        // 后台更新那个旧 block；等排空后再由 #pumpStreamPacers 结束它。
         const patchStream = this.#patchStreams.get(call.id);
         if (patchStream !== undefined) {
           try {
@@ -3077,9 +3130,17 @@ export class TuiApp implements TuiInteraction {
     } finally {
       const aborted = controller.signal.aborted;
       const endedAt = Date.now();
+      // 正常完成且显示队列还有正文时，不要把剩余文本一次性 flush；让 pacer
+      // 在 turn 结束后继续按帧排空。取消/报错则立即落完，避免状态残留。
+      const draining =
+        !aborted &&
+        failure === undefined &&
+        this.#pendingAssistantEnd !== undefined &&
+        this.#textPacer.pending;
+      if (!draining) this.#flushStreamPacers();
       this.#patchStreams.clear();
       this.#transcript.clearStreamingTools();
-      this.#transcript.endAssistant();
+      if (!draining) this.#transcript.endAssistant();
       this.#thinking.reset();
       this.#busy = false;
       this.#stopTodoShimmer();
@@ -3146,8 +3207,13 @@ export class TuiApp implements TuiInteraction {
       //
       // 全量重绘是为了让这一帧自成权威：滚动位置这一帧变了，而差分渲染只重写
       // 变化的行，一旦有哪一行没被判定为变化就会留下旧内容。一轮一次，代价可忽略。
-      this.#anchorPending = true;
-      this.#requestFrame(true);
+      if (draining) {
+        // pacer 排空后会补一次 force 帧并设置 anchor。
+        this.#requestFrame();
+      } else {
+        this.#anchorPending = true;
+        this.#requestFrame(true);
+      }
 
       // 用户输入始终优先于 Goal continuation / context refresh。
       if (completed && !aborted) {
@@ -3283,6 +3349,46 @@ export class TuiApp implements TuiInteraction {
   }
 
   /**
+   * 从显示队列取一小段并写入真实 UI 状态。
+   *
+   * 必须在每帧 compose 之前调用。队列还有内容时主动再请求一帧，
+   * 这样一次大突发会被后续帧继续摊开，而不是等下一次模型输出才显示。
+   */
+  #pumpStreamPacers(): void {
+    const now = performance.now();
+    const text = this.#textPacer.drain(now);
+    if (text.length > 0) this.#transcript.appendAssistantText(text);
+    const reasoning = this.#reasoningPacer.drain(now);
+    if (reasoning.length > 0) this.#thinking.push(reasoning);
+
+    if (!this.#textPacer.pending && this.#pendingAssistantEnd !== undefined) {
+      this.#transcript.endAssistant(this.#pendingAssistantEnd);
+      this.#pendingAssistantEnd = undefined;
+      // turn 已经结束、只有显示队列还在排空时，收尾锚定要等最后一段真正显示完。
+      if (!this.#busy) {
+        this.#anchorPending = true;
+        this.#requestFrame(true);
+      }
+    }
+
+    if (this.#textPacer.pending || this.#reasoningPacer.pending) {
+      this.#requestFrame();
+    }
+  }
+
+  /** 消息边界/取消/退出前，把尚未揭示的文本按原顺序一次性落到 UI。 */
+  #flushStreamPacers(): void {
+    const text = this.#textPacer.flush();
+    if (text.length > 0) this.#transcript.appendAssistantText(text);
+    const reasoning = this.#reasoningPacer.flush();
+    if (reasoning.length > 0) this.#thinking.push(reasoning);
+    if (this.#pendingAssistantEnd !== undefined) {
+      this.#transcript.endAssistant(this.#pendingAssistantEnd);
+      this.#pendingAssistantEnd = undefined;
+    }
+  }
+
+  /**
    * 记录一段模型输出（思考 / 工具参数 / 正文都走这里）。
    *
    * 速度读数是**随时间衰减**的：模型停下来的那一刻窗口里还留着最近的样本，
@@ -3390,6 +3496,9 @@ export class TuiApp implements TuiInteraction {
   /* --------------------------- 渲染 --------------------------- */
 
   #render(force = false): void {
+    // 先把这一帧允许显示的流式文本从队列取出，再 compose；否则永远画上一帧。
+    this.#pumpStreamPacers();
+
     // 让渲染成为 shimmer 的最终校准点：即使 onToolResult 回调发生在
     // 工具结果落库之前，下一次实际渲染也会按最新历史停止或启动动画。
     this.#syncThinkingAnimation();
@@ -3402,8 +3511,11 @@ export class TuiApp implements TuiInteraction {
     const lines = this.#compose(width, height);
     if (hitProbeMode !== "off") this.#verifyHitProbes(lines, width, height);
     const output = this.#screen.draw(lines);
-    if (output.length > 0) this.#terminal.write(`\x1b[?25l${output}`);
-    this.#terminal.setCursor(this.#inputCursorRow, this.#inputCursorColumn);
+    if (output.length > 0) {
+      this.#terminal.writeFrame(output, this.#inputCursorRow, this.#inputCursorColumn);
+    } else {
+      this.#terminal.setCursor(this.#inputCursorRow, this.#inputCursorColumn);
+    }
   }
 
   #compose(width: number, height: number): string[] {
@@ -3930,12 +4042,15 @@ export class TuiApp implements TuiInteraction {
     const innerWidth = Math.max(1, width - BODY_INDENT - SCROLLBAR_GUTTER);
 
     // 只有内容版本变化的 block 会重新渲染；滚动本身只重新取窗口。
-    this.#layout.update(
+    // Transcript 精确报告新增/脏 block，流式尾段不再每帧重扫全部历史。
+    const layoutChanges = this.#transcript.consumeLayoutChanges();
+    this.#layout.applyChanges(
       this.#transcript.items,
       innerWidth,
       (_item, index) => this.#transcript.itemVersion(index),
       (item, itemWidth) =>
         this.#renderItem(item, itemWidth).map((line) => (line.length > 0 ? indent + line : line)),
+      layoutChanges,
       {
         callIdOf: (item) => (item.kind === "tool" ? item.callId : undefined),
         globalVersion: this.#transcript.revision,

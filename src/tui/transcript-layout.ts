@@ -10,6 +10,8 @@
  * 不会每帧重新跑整段 Markdown。
  */
 
+import type { TranscriptLayoutChanges } from "./transcript.ts";
+
 export const HISTORY_WINDOW_MULTIPLIER = 3;
 
 /**
@@ -47,6 +49,25 @@ export interface TranscriptLayoutWindow<T> {
   blocks: readonly TranscriptLayoutBlock<T>[];
 }
 
+export interface TranscriptLayoutUpdateOptions<T> {
+  globalVersion?: string | number;
+  callIdOf?: (item: T) => string | undefined;
+}
+
+/**
+ * 布局热路径计数。
+ *
+ * 用途不是展示，而是判断 Fenwick tree 是否值得上：
+ *   - oldUpdates 高：旧 block 频繁改行数，当前 O(B) 很痛；
+ *   - oldUpdates 低：Fenwick 只会增加复杂度和常数。
+ */
+export interface TranscriptLayoutStats {
+  appended: number;
+  tailUpdates: number;
+  oldUpdates: number;
+  rebuilds: number;
+}
+
 interface CacheEntry {
   version: string | number;
   width: number;
@@ -61,6 +82,12 @@ export class TranscriptLayout<T extends object> {
   #width = -1;
   #globalVersion: string | number | undefined;
   #itemsRef: readonly T[] | undefined;
+  #stats: TranscriptLayoutStats = {
+    appended: 0,
+    tailUpdates: 0,
+    oldUpdates: 0,
+    rebuilds: 0,
+  };
 
   get totalLines(): number {
     return this.#totalLines;
@@ -68,6 +95,30 @@ export class TranscriptLayout<T extends object> {
 
   get blocks(): readonly TranscriptLayoutBlock<T>[] {
     return this.#blocks;
+  }
+
+  /** 热路径计数快照。 */
+  get stats(): TranscriptLayoutStats {
+    return { ...this.#stats };
+  }
+
+  resetStats(): void {
+    this.#stats = { appended: 0, tailUpdates: 0, oldUpdates: 0, rebuilds: 0 };
+  }
+
+  /**
+   * 让下一次 applyChanges 全量重建。
+   *
+   * 用于“item 内容版本没变，但渲染函数本身变了”的情况：最典型的是
+   * highlight.js 某个语言模块异步加载完成，之前缓存的纯文本行必须重算。
+   */
+  invalidate(): void {
+    this.#cache = new WeakMap();
+    this.#blocks = [];
+    this.#totalLines = 0;
+    this.#width = -1;
+    this.#globalVersion = undefined;
+    this.#itemsRef = undefined;
   }
 
   /**
@@ -81,10 +132,7 @@ export class TranscriptLayout<T extends object> {
     width: number,
     versionOf: (item: T, index: number) => string | number,
     renderItem: (item: T, width: number) => string[],
-    options: {
-      globalVersion?: string | number;
-      callIdOf?: (item: T) => string | undefined;
-    } = {},
+    options: TranscriptLayoutUpdateOptions<T> = {},
   ): void {
     const globalVersion = options.globalVersion;
 
@@ -98,6 +146,7 @@ export class TranscriptLayout<T extends object> {
       return;
     }
 
+    this.#stats.rebuilds += 1;
     if (width !== this.#width) {
       this.#cache = new WeakMap();
       this.#width = width;
@@ -140,6 +189,151 @@ export class TranscriptLayout<T extends object> {
 
     this.#blocks = blocks;
     this.#totalLines = cursor;
+  }
+
+  /**
+   * 增量应用 Transcript 的变更。
+   *
+   * 热路径（流式回复）通常只有：
+   *   - 追加一个 assistant block；
+   *   - 或修改最后一个 block。
+   *
+   * 这两种情况不再遍历/重建全部历史。旧 block 的展开、工具进度等少见变更仍会
+   * 更新，但只对后续 block 的偏移做 O(B) 修正；结构性删除/替换走全量 rebuild。
+   */
+  applyChanges(
+    items: readonly T[],
+    width: number,
+    versionOf: (item: T, index: number) => string | number,
+    renderItem: (item: T, width: number) => string[],
+    changes: TranscriptLayoutChanges,
+    options: TranscriptLayoutUpdateOptions<T> = {},
+  ): void {
+    const oldLength = this.#blocks.length;
+    const appendedFrom = changes.appendedFrom;
+    const needsRebuild =
+      changes.rebuild ||
+      width !== this.#width ||
+      items !== this.#itemsRef ||
+      (oldLength === 0 && items.length > 0) ||
+      items.length < oldLength ||
+      (appendedFrom !== undefined && appendedFrom !== oldLength);
+
+    if (needsRebuild) {
+      this.update(items, width, versionOf, renderItem, options);
+      return;
+    }
+
+    this.#globalVersion = options.globalVersion;
+
+    // 追加新 block：起点就是当前总行数，后续 block 的偏移完全不受影响。
+    for (let index = oldLength; index < items.length; index += 1) {
+      this.#appendBlock(items, index, width, versionOf, renderItem, options);
+    }
+
+    // 只更新调用方明确标脏的已有 block。
+    const dirty = [...new Set(changes.dirty)]
+      .filter((index) => index < oldLength && index < items.length)
+      .sort((a, b) => a - b);
+    for (const index of dirty) {
+      this.#updateBlock(items, index, width, versionOf, renderItem, options);
+      if (index === oldLength - 1) this.#stats.tailUpdates += 1;
+      else this.#stats.oldUpdates += 1;
+    }
+
+    this.#itemsRef = items;
+  }
+
+  #cachedLines(
+    item: T,
+    index: number,
+    width: number,
+    versionOf: (item: T, index: number) => string | number,
+    renderItem: (item: T, width: number) => string[],
+  ): CacheEntry {
+    const version = versionOf(item, index);
+    let cached = this.#cache.get(item);
+    if (cached === undefined || cached.version !== version || cached.width !== width) {
+      const rendered = renderItem(item, width);
+      cached = {
+        version,
+        width,
+        lines: [...rendered, ""],
+        contentLineCount: rendered.length,
+      };
+      this.#cache.set(item, cached);
+    }
+    return cached;
+  }
+
+  #appendBlock(
+    items: readonly T[],
+    index: number,
+    width: number,
+    versionOf: (item: T, index: number) => string | number,
+    renderItem: (item: T, width: number) => string[],
+    options: TranscriptLayoutUpdateOptions<T>,
+  ): void {
+    const item = items[index]!;
+    const cached = this.#cachedLines(item, index, width, versionOf, renderItem);
+    const start = this.#totalLines;
+    const contentEnd =
+      cached.contentLineCount > 0 ? start + cached.contentLineCount - 1 : start - 1;
+    const callId = options.callIdOf?.(item);
+    this.#blocks.push({
+      item,
+      start,
+      end: start + cached.lines.length,
+      contentEnd,
+      lines: cached.lines,
+      header: cached.lines[0] ?? "",
+      ...(callId !== undefined ? { callId } : {}),
+    });
+    this.#totalLines += cached.lines.length;
+    this.#stats.appended += 1;
+  }
+
+  #updateBlock(
+    items: readonly T[],
+    index: number,
+    width: number,
+    versionOf: (item: T, index: number) => string | number,
+    renderItem: (item: T, width: number) => string[],
+    options: TranscriptLayoutUpdateOptions<T>,
+  ): void {
+    const item = items[index]!;
+    const cached = this.#cachedLines(item, index, width, versionOf, renderItem);
+    const previous = this.#blocks[index];
+    if (previous === undefined) return;
+
+    const contentEnd =
+      cached.contentLineCount > 0
+        ? previous.start + cached.contentLineCount - 1
+        : previous.start - 1;
+    const callId = options.callIdOf?.(item);
+    const next: TranscriptLayoutBlock<T> = {
+      item,
+      start: previous.start,
+      end: previous.start + cached.lines.length,
+      contentEnd,
+      lines: cached.lines,
+      header: cached.lines[0] ?? "",
+      ...(callId !== undefined ? { callId } : {}),
+    };
+    this.#blocks[index] = next;
+    const delta = next.end - previous.end;
+    if (delta === 0) return;
+
+    this.#totalLines += delta;
+    for (let cursor = index + 1; cursor < this.#blocks.length; cursor += 1) {
+      const block = this.#blocks[cursor]!;
+      this.#blocks[cursor] = {
+        ...block,
+        start: block.start + delta,
+        end: block.end + delta,
+        contentEnd: block.contentEnd + delta,
+      };
+    }
   }
 
   /** 按“距底部多少行”取出窗口，并把短内容补齐到 height。 */

@@ -7,18 +7,39 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { FrameScheduler } from "../src/tui/frame-scheduler.ts";
+import {
+  DEFAULT_FRAME_INTERVAL_MS,
+  FrameScheduler,
+} from "../src/tui/frame-scheduler.ts";
 
-/** 可手动推进的假定时器：不依赖真实时间，用例是确定的。 */
+/** 可手动推进的假定时器 + 单调时钟：不依赖真实时间，用例是确定的。 */
 function makeClock() {
   let nextId = 1;
-  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let current = 0;
+  const timers = new Map<number, { fn: () => void; due: number; ms: number }>();
+
+  const runDue = (through: number): void => {
+    for (;;) {
+      const next = [...timers.entries()]
+        .filter(([, timer]) => timer.due <= through)
+        .sort((a, b) => a[1].due - b[1].due || a[0] - b[0])[0];
+      if (next === undefined) break;
+      const [id, timer] = next;
+      timers.delete(id);
+      current = timer.due;
+      timer.fn();
+    }
+    current = through;
+  };
 
   return {
+    now(): number {
+      return current;
+    },
     schedule(fn: () => void, ms: number): unknown {
       const id = nextId;
       nextId += 1;
-      timers.set(id, { fn, ms });
+      timers.set(id, { fn, due: current + ms, ms });
       return id;
     },
     cancel(handle: unknown): void {
@@ -27,11 +48,14 @@ function makeClock() {
     get pending(): number {
       return timers.size;
     },
-    /** 窗口到期：把所有挂起的回调跑掉。 */
+    /** 推进时间；只执行到期的回调。 */
+    advance(ms: number): void {
+      runDue(current + ms);
+    },
+    /** 无视截止时间，把当前挂起的回调全部跑掉。 */
     expire(): void {
-      const due = [...timers.values()];
-      timers.clear();
-      for (const timer of due) timer.fn();
+      const through = Math.max(current, ...[...timers.values()].map((timer) => timer.due));
+      runDue(through);
     },
     /** 最近一次注册的窗口长度，用来确认默认值没被改坏。 */
     lastMs(): number | undefined {
@@ -46,6 +70,7 @@ function setup(intervalMs?: number) {
   const scheduler = new FrameScheduler({
     render: (force) => calls.push(force),
     ...(intervalMs !== undefined ? { intervalMs } : {}),
+    now: clock.now,
     schedule: clock.schedule,
     cancel: clock.cancel,
   });
@@ -109,10 +134,45 @@ describe("FrameScheduler", () => {
     expect(calls).toEqual([true, false]);
   });
 
-  test("默认合流窗口是 16ms", () => {
+  test("默认帧上限是 120fps", () => {
     const { clock, scheduler } = setup();
     scheduler.request();
-    expect(clock.lastMs()).toBe(16);
+    clock.expire();
+    clock.advance(2);
+    scheduler.request();
+    expect(clock.lastMs()).toBeCloseTo(DEFAULT_FRAME_INTERVAL_MS - 2, 6);
+  });
+
+  test("10ms token 节奏不会再锁成 20ms 一帧", () => {
+    const { clock, calls, scheduler } = setup();
+    const gaps: number[] = [];
+    let last = 0;
+
+    for (let i = 0; i < 20; i += 1) {
+      clock.advance(10);
+      scheduler.request();
+      clock.expire();
+      if (calls.length > 1) {
+        gaps.push(clock.now() - last);
+      }
+      last = clock.now();
+    }
+
+    expect(calls.length).toBe(20);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(10.001);
+  });
+
+  test("越过截止时间时立即出帧，不再补等完整窗口", () => {
+    const { clock, calls, scheduler } = setup(8.333);
+    scheduler.request();
+    clock.expire();
+    clock.advance(10);
+    scheduler.request();
+
+    expect(calls).toHaveLength(1);
+    expect(clock.lastMs()).toBe(0);
+    clock.expire();
+    expect(calls).toHaveLength(2);
   });
 
   test("flush 立刻渲染并丢弃挂起的那一帧", () => {

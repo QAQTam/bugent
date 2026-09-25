@@ -282,6 +282,24 @@ describe("Transcript 变更通知", () => {
     expect(counter.n).toBeGreaterThan(before);
   });
 
+  test("删除前面的 provisional 工具卡后，流式 assistant 索引不会错位", () => {
+    const t = new Transcript();
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "bash",
+      argsDelta: "{}",
+      rawArgs: "{}",
+      args: {},
+    });
+    t.appendAssistantText("a");
+    t.clearStreamingTools();
+    t.appendAssistantText("b");
+
+    expect(t.items).toHaveLength(1);
+    expect(t.items[0]?.kind).toBe("assistant");
+    expect(t.items[0]?.kind === "assistant" ? t.items[0].text : "").toBe("ab");
+  });
+
   test("restore 重建时通知", () => {
     const { t, counter } = tracked();
     t.restore([
@@ -323,5 +341,45 @@ describe("Transcript 变更通知", () => {
     t.onChange = undefined;
     t.pushUser("hi");
     expect(counter.n).toBe(0);
+  });
+});
+
+describe("Transcript layout changes", () => {
+  test("追加和内容更新分别报告 appendedFrom / dirty", () => {
+    const t = new Transcript();
+    t.pushUser("u");
+    t.appendAssistantText("a");
+
+    const first = t.consumeLayoutChanges();
+    expect(first.rebuild).toBe(false);
+    expect(first.appendedFrom).toBe(0);
+    expect(first.dirty).toEqual([0, 1]);
+
+    const second = t.consumeLayoutChanges();
+    expect(second).toEqual({ rebuild: false, dirty: [] });
+
+    t.appendAssistantText("b");
+    const third = t.consumeLayoutChanges();
+    expect(third.appendedFrom).toBeUndefined();
+    expect(third.dirty).toEqual([1]);
+  });
+
+  test("结构性删除和 restore 会要求 rebuild", () => {
+    const t = new Transcript();
+    t.updateToolCallDelta({
+      id: "c1",
+      name: "bash",
+      argsDelta: "{}",
+      rawArgs: "{}",
+      args: {},
+    });
+    t.consumeLayoutChanges();
+    t.clearStreamingTools();
+    expect(t.consumeLayoutChanges().rebuild).toBe(true);
+
+    t.restore([
+      makeMessage({ msgid: 1, role: "user", origin: "user", parts: [textPart("hi")], createdAt: 1 }),
+    ]);
+    expect(t.consumeLayoutChanges().rebuild).toBe(true);
   });
 });

@@ -69,6 +69,169 @@ describe("TranscriptLayout", () => {
     expect(layout.blocks[0]?.callId).toBe("tool");
   });
 
+  test("applyChanges 追加时只渲染新增 block", () => {
+    const layout = new TranscriptLayout<Item>();
+    const items: Item[] = [{ id: "a", text: "a", version: 0 }];
+    const calls = new Map<string, number>();
+    const render = (item: Item): string[] => {
+      calls.set(item.id, (calls.get(item.id) ?? 0) + 1);
+      return renderItem(item);
+    };
+
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: [0],
+    });
+    items.push({ id: "b", text: "b", version: 0 });
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      appendedFrom: 1,
+      dirty: [1],
+    });
+
+    expect(calls).toEqual(new Map([["a", 1], ["b", 1]]));
+    expect(layout.totalLines).toBe(4);
+  });
+
+  test("applyChanges 尾部更新不触碰历史 block", () => {
+    const layout = new TranscriptLayout<Item>();
+    const items: Item[] = Array.from({ length: 200 }, (_, index) => ({
+      id: String(index),
+      text: `line ${index}`,
+      version: 0,
+    }));
+    const calls = new Map<string, number>();
+    const render = (item: Item): string[] => {
+      calls.set(item.id, (calls.get(item.id) ?? 0) + 1);
+      return renderItem(item);
+    };
+
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: items.map((_, index) => index),
+    });
+    calls.clear();
+
+    items[199]!.text = "line 199\nline 200";
+    items[199]!.version += 1;
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      dirty: [199],
+    });
+
+    expect(calls).toEqual(new Map([["199", 1]]));
+    expect(layout.totalLines).toBe(401);
+  });
+
+  test("applyChanges 修改旧 block 时会修正后续偏移", () => {
+    const layout = new TranscriptLayout<Item>();
+    const items: Item[] = [
+      { id: "a", text: "a", version: 0 },
+      { id: "b", text: "b", version: 0 },
+      { id: "c", text: "c", version: 0 },
+    ];
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: [0, 1, 2],
+    });
+
+    items[1]!.text = "b1\nb2";
+    items[1]!.version += 1;
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      dirty: [1],
+    });
+
+    expect(layout.blocks[0]?.start).toBe(0);
+    expect(layout.blocks[1]?.start).toBe(2);
+    expect(layout.blocks[2]?.start).toBe(5);
+    expect(layout.totalLines).toBe(7);
+  });
+
+  test("stats 区分追加、尾部更新、旧 block 更新和 rebuild", () => {
+    const layout = new TranscriptLayout<Item>();
+    const items: Item[] = [
+      { id: "a", text: "a", version: 0 },
+      { id: "b", text: "b", version: 0 },
+    ];
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: [0, 1],
+    });
+    items[1]!.text = "b1\nb2";
+    items[1]!.version += 1;
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      dirty: [1],
+    });
+    items[0]!.text = "a1\na2";
+    items[0]!.version += 1;
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      dirty: [0],
+    });
+    layout.applyChanges(items, 20, (item) => item.version, renderItem, {
+      rebuild: true,
+      dirty: [],
+    });
+
+    expect(layout.stats).toEqual({
+      appended: 0,
+      tailUpdates: 1,
+      oldUpdates: 1,
+      rebuilds: 2,
+    });
+  });
+
+  test("invalidate 会强制下一次重建，即使 item 版本没变", () => {
+    const layout = new TranscriptLayout<Item>();
+    const items: Item[] = [{ id: "a", text: "echo hi", version: 0 }];
+    let highlighted = false;
+    const render = (item: Item): string[] => [
+      highlighted ? `\x1b[32m${item.text}\x1b[0m` : item.text,
+    ];
+
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: [0],
+    });
+    expect(layout.blocks[0]?.lines[0]).toBe("echo hi");
+
+    highlighted = true;
+    layout.invalidate();
+    layout.applyChanges(items, 20, (item) => item.version, render, {
+      rebuild: false,
+      dirty: [],
+    });
+
+    expect(layout.blocks[0]?.lines[0]).toContain("\x1b[32m");
+  });
+
+  test("applyChanges 遇到 rebuild 会全量重建", () => {
+    const layout = new TranscriptLayout<Item>();
+    const first: Item[] = [{ id: "a", text: "a", version: 0 }];
+    layout.applyChanges(first, 20, (item) => item.version, renderItem, {
+      rebuild: false,
+      appendedFrom: 0,
+      dirty: [0],
+    });
+
+    const second: Item[] = [{ id: "b", text: "b", version: 0 }];
+    layout.applyChanges(second, 20, (item) => item.version, renderItem, {
+      rebuild: true,
+      appendedFrom: 0,
+      dirty: [0],
+    });
+
+    expect(layout.blocks).toHaveLength(1);
+    expect(layout.blocks[0]?.item.id).toBe("b");
+  });
+
   test("globalVersion 与 items 引用未变时直接复用 block 索引", () => {
     const layout = new TranscriptLayout<Item>();
     const items: Item[] = [{ id: "a", text: "a", version: 0 }];

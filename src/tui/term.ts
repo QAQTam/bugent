@@ -27,6 +27,9 @@ export class Terminal {
   #boundResize: (() => void) | undefined;
   #resizePoll: ReturnType<typeof setInterval> | undefined;
   #polledSize: TerminalSize | undefined;
+  #synchronizedOutput = process.env.BUGENT_SYNC_UPDATE !== "0";
+  /** 光标是否已经由本对象显式显示；避免无输出帧反复写 ?25l。 */
+  #cursorVisible = false;
 
   get size(): TerminalSize {
     // 注意用 `||` 而不是 `??`：部分 PTY/终端会返回 0 而不是 undefined，
@@ -58,6 +61,7 @@ export class Terminal {
 
     this.write("\x1b[?1049h"); // 切到备用屏
     this.write("\x1b[?25l"); // 隐藏光标
+    this.#cursorVisible = false;
     this.write("\x1b[2J\x1b[H"); // 清屏并归位
     this.write("\x1b[?1000h"); // 开启鼠标事件
     this.write("\x1b[?1006h"); // SGR 扩展坐标（支持 >223 列，且不混淆按键与坐标）
@@ -115,11 +119,34 @@ export class Terminal {
     this.write("\x1b[?1006l");
     this.write("\x1b[?1000l");
     this.write("\x1b[?25h"); // 显示光标
+    this.#cursorVisible = true;
     this.write("\x1b[?1049l"); // 回主屏
   }
 
   write(text: string): void {
     process.stdout.write(text);
+  }
+
+  /**
+   * 原子提交一帧：隐藏光标、写差分行、复位逻辑光标，一次 stdout.write。
+   *
+   * DEC 2026 让支持它的终端把整帧一次性呈现，避免多行 diff 被拆成多次重绘；
+   * 不支持该私有模式的终端会忽略这两个序列，因此保留纯文本 fallback。
+   */
+  writeFrame(body: string, row?: number, column?: number): void {
+    // 帧头已经隐藏光标；无逻辑光标时不必在帧尾再写一次 ?25l，
+    // 否则测试/调试器按 ?25l 切帧会多出一个空帧。
+    const cursor =
+      row === undefined || column === undefined
+        ? ""
+        : `\x1b[${Math.max(1, row)};${Math.max(1, column)}H\x1b[?25h`;
+    const frame = `\x1b[?25l${body}${cursor}`;
+    this.#cursorVisible = row !== undefined && column !== undefined;
+    if (this.#synchronizedOutput) {
+      this.write(`\x1b[?2026h${frame}\x1b[?2026l`);
+    } else {
+      this.write(frame);
+    }
   }
 
   /**
@@ -131,11 +158,15 @@ export class Terminal {
    */
   setCursor(row?: number, column?: number): void {
     if (row === undefined || column === undefined) {
-      this.write("\x1b[?25l");
+      if (this.#cursorVisible) {
+        this.#cursorVisible = false;
+        this.write("\x1b[?25l");
+      }
       return;
     }
     const safeRow = Math.max(1, row);
     const safeColumn = Math.max(1, column);
+    this.#cursorVisible = true;
     this.write(`\x1b[${safeRow};${safeColumn}H\x1b[?25h`);
   }
 }

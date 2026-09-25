@@ -14,6 +14,20 @@ import type { PatchProgress } from "../patch/streaming-progress.ts";
 import { storedText, type MsgId, type StoredMessage } from "../core/message.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
 
+/**
+ * 布局层消费的增量变更。
+ *
+ * 这是避免每帧重扫全部历史的唯一事实来源：
+ *   - `rebuild` 表示结构被替换/删除，必须全量重建；
+ *   - `appendedFrom` 表示从这里到 items.length 都是新增 block；
+ *   - `dirty` 表示已有 block 的内容版本发生变化。
+ */
+export interface TranscriptLayoutChanges {
+  rebuild: boolean;
+  appendedFrom?: number;
+  dirty: readonly number[];
+}
+
 export type DisplayItem =
   | { kind: "user"; text: string; msgid?: MsgId }
   | { kind: "assistant"; text: string; msgid?: MsgId }
@@ -88,6 +102,10 @@ export class Transcript {
    * 以前每个流式回调各自记得请求重绘，漏一处不会报错、只会让界面变慢。
    */
   #onChange: (() => void) | undefined;
+  /** 布局层增量变更；由 consumeLayoutChanges() 取走并清空。 */
+  #layoutRebuild = false;
+  #layoutAppendedFrom: number | undefined;
+  #layoutDirty = new Set<number>();
 
   set onChange(handler: (() => void) | undefined) {
     this.#onChange = handler;
@@ -108,6 +126,25 @@ export class Transcript {
   }
 
   /**
+   * 取走自上次调用以来的布局变更。
+   *
+   * 只有 TuiApp 的布局更新会消费它；消费后清空，避免同一批变更重复应用。
+   */
+  consumeLayoutChanges(): TranscriptLayoutChanges {
+    const changes: TranscriptLayoutChanges = {
+      rebuild: this.#layoutRebuild,
+      ...(this.#layoutAppendedFrom !== undefined
+        ? { appendedFrom: this.#layoutAppendedFrom }
+        : {}),
+      dirty: [...this.#layoutDirty],
+    };
+    this.#layoutRebuild = false;
+    this.#layoutAppendedFrom = undefined;
+    this.#layoutDirty.clear();
+    return changes;
+  }
+
+  /**
    * **唯一**的内容变更原语：版本号递增与外部通知必须成对发生。
    *
    * 所有改动条目的方法都必须经过这里（或经过 `#push` / `#bump`），
@@ -119,13 +156,19 @@ export class Transcript {
   }
 
   #push(item: DisplayItem): void {
+    const index = this.#items.length;
     this.#items.push(item);
     this.#versions.push(0);
+    if (this.#layoutAppendedFrom === undefined || index < this.#layoutAppendedFrom) {
+      this.#layoutAppendedFrom = index;
+    }
+    this.#layoutDirty.add(index);
     this.#touch();
   }
 
   #bump(index: number): void {
     this.#versions[index] = (this.#versions[index] ?? 0) + 1;
+    this.#layoutDirty.add(index);
     this.#touch();
   }
 
@@ -208,13 +251,22 @@ export class Transcript {
 
   /** provider 重试时丢弃尚未执行、也没有持久化 msgid 的 provisional 卡片。 */
   clearStreamingTools(): void {
+    let removed = false;
     for (let index = this.#items.length - 1; index >= 0; index -= 1) {
       const item = this.#items[index];
       if (item !== undefined && item.kind === "tool" && item.streaming === true && !item.done) {
         this.#items.splice(index, 1);
         this.#versions.splice(index, 1);
+        removed = true;
+        // 流式 assistant 可能排在 provisional 工具卡之后（工具执行完后的收尾
+        // 回复）；删除前面的条目必须同步移动 streamingIndex，否则后续增量
+        // 会写到错误 block，甚至越界丢失。
+        if (this.#streamingIndex !== undefined && index < this.#streamingIndex) {
+          this.#streamingIndex -= 1;
+        }
       }
     }
+    if (removed) this.#layoutRebuild = true;
     this.#touch();
   }
 
@@ -323,6 +375,9 @@ export class Transcript {
     this.#items = [];
     this.#versions = [];
     this.#streamingIndex = undefined;
+    this.#layoutRebuild = true;
+    this.#layoutAppendedFrom = undefined;
+    this.#layoutDirty.clear();
     this.#touch();
 
     for (const message of messages) {
