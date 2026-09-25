@@ -31,6 +31,11 @@
   全部搬进 `src/prompts/system.md` —— 工具描述只在模型决定调用它时才被细读，纪律
   需要每一轮都在。配套 `scripts/prompt-lab.ts` 实验台：快照冻结 + 多变体对照 +
   Wilson 区间 / Fisher 精确检验，结论见 `docs/prompt-lab.md`。
+- system prompt 补 `## Reasoning` / `## Answer` 两节，把"思考"和"回答"分开管：
+  思考可以发散、鼓励用 `We need to ...` 陈述每一步、发现原地打转就停下转入行动；
+  回答必须是短版本，不复述推理、不加前言、不提供没被要求的后续工作。实测（三道题
+  × 每组 16-52 次）`We need` 从 13% 提到 54%，而**回答字数持平或更短**
+  （hard2 任务 2734 → 1980 字）。
 - `buTUI` 实验入口跟进 v0.2 帧运行时（ledger transcript、patch 卡片、跟随与分页修复）。
 
 ## 0.1.0 发布摘要

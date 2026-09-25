@@ -27,6 +27,28 @@ const rows = readFileSync(file, "utf8")
   .filter((line) => line.trim().length > 0)
   .map((line) => JSON.parse(line) as Trial);
 
+/**
+ * 逐字重复率 —— "思考死循环"的可观测代理指标。
+ *
+ * 取 60 字符窗口、步长 30 滑过推理文本，统计有多少个窗口在之前出现过。
+ * 正常的推理几乎不重复整句；绕圈子的推理会反复回到同一段措辞。
+ */
+function repetitionRate(text: string): number {
+  const window = 60;
+  const step = 30;
+  if (text.length < window * 2) return 0;
+  const seen = new Set<string>();
+  let duplicates = 0;
+  let total = 0;
+  for (let i = 0; i + window <= text.length; i += step) {
+    const shingle = text.slice(i, i + window);
+    total += 1;
+    if (seen.has(shingle)) duplicates += 1;
+    else seen.add(shingle);
+  }
+  return total === 0 ? 0 : duplicates / total;
+}
+
 const WE_NEED = /\bwe need\b/i;
 const LET_ME = /\blet me\b/i;
 const I_NEED = /\bi need\b/i;
@@ -46,6 +68,10 @@ function statsOf(trials: Trial[]) {
     zhWe: rate(ZH_WE),
     meanMs: ok.length > 0 ? Math.round(ok.reduce((sum, t) => sum + t.ms, 0) / ok.length) : 0,
     meanChars: ok.length > 0 ? Math.round(ok.reduce((sum, t) => sum + t.reasoning.length, 0) / ok.length) : 0,
+    meanAnswer:
+      ok.length > 0 ? Math.round(ok.reduce((sum, t) => sum + t.content.length, 0) / ok.length) : 0,
+    repetition:
+      ok.length > 0 ? ok.reduce((sum, t) => sum + repetitionRate(t.reasoning), 0) / ok.length : 0,
   };
 }
 
@@ -109,7 +135,7 @@ const baseTrials = baselineId === undefined ? [] : (byVariant.get(baselineId) ??
 const baseStats = statsOf(baseTrials);
 
 console.log(
-  `${"variant".padEnd(20)} n   we-need        let-me  i-need  we-should  中文“我们要”  mean ms  reasoning chars`,
+  `${"variant".padEnd(20)} n   we-need        let-me  i-need  we-should  中文“我们要”  reasoning  answer   repeat   mean ms`,
 );
 for (const [variant, trials] of byVariant) {
   const s = statsOf(trials);
@@ -125,7 +151,7 @@ for (const [variant, trials] of byVariant) {
         .padStart(3)}% [${String(Math.round(lo * 100)).padStart(2)}-${String(Math.round(hi * 100)).padStart(2)}]  ` +
       `${String(s.letMe).padStart(2)}/${s.n}   ${String(s.iNeed).padStart(2)}/${s.n}    ` +
       `${String(s.weShould).padStart(2)}/${s.n}      ${String(s.zhWe).padStart(2)}/${s.n}       ` +
-      `${String(s.meanMs).padStart(5)}   ${String(s.meanChars).padStart(5)}` +
+      `${String(s.meanChars).padStart(6)}  ${String(s.meanAnswer).padStart(6)}  ${(s.repetition * 100).toFixed(1).padStart(5)}%  ${String(s.meanMs).padStart(6)}` +
       (p !== undefined ? `   p=${p.toFixed(4)}` : ""),
   );
 }

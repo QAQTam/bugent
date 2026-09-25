@@ -250,8 +250,8 @@ P6 已接线：
 模型可见的提示词面分三层，改任何一层都该能被量出来：
 
 - **`src/prompts/system.md`**：唯一的 system prompt（`[agent] system_prompt_file` 可覆盖，
-  standalone 构建读嵌入资产）。身份与行事风格、编辑纪律、todo 纪律、子代理纪律、验证要求、
-  沙箱现实都写在这里。
+  standalone 构建读嵌入资产）。身份与行事风格、**思考方式与回答长度**、编辑纪律、
+  todo 纪律、子代理纪律、验证要求、沙箱现实都写在这里。
 - **工具 schema**：24 个工具的描述与参数说明，**短句 + 纯英文**。纪律不写在这里 ——
   工具描述只在模型决定调用某个工具时才被细读，而纪律需要每一轮都在。
 - **注入指令**：goal 流程（`GOAL_INITIALIZATION_INSTRUCTION` 等）、MCP / skills manifest、

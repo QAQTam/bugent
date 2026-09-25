@@ -66,7 +66,28 @@ const EXPLORE_TASK = `请探索并分析这个项目。只读，不要修改文�
 6. 验证计划
 7. 下一步需要授权：<具体动作>`;
 
-const TASKS = { debug: DEBUG_TASK, explore: EXPLORE_TASK, study: "" } as const;
+/** 第二道难题（读写竞争），用来验证结论不是只对 study 那道题成立。 */
+const HARD2_TASK = `这段代码在并发下会偶发丢更新，帮我定位根因、给最小修复和回归测试。不要运行命令，不要修改文件。
+
+\`\`\`ts
+let count = 0;
+
+async function bump(): Promise<void> {
+  const current = await load();
+  await save(current + 1);
+}
+\`\`\``;
+
+/** 简答题：专门用来验证"回答要简练"这条约束有没有被破坏。 */
+const BRIEF_TASK = "`xs.find((x) => x.startsWith(\"a\"))!.toUpperCase()` 在什么情况下会抛错？直接给结论，不要展开。";
+
+const TASKS = {
+  debug: DEBUG_TASK,
+  explore: EXPLORE_TASK,
+  brief: BRIEF_TASK,
+  hard2: HARD2_TASK,
+  study: "",
+} as const;
 type TaskName = keyof typeof TASKS;
 
 /** study 里真正跑的那道严格 debug 题（原文照抄，用于对照结论是否还成立）。 */
@@ -110,7 +131,7 @@ TASKS.study = STUDY_TASK;
 /* ------------------------------------------------------------------ */
 
 type ToolSetName = "zh-baseline" | "en-short" | "core" | "placeholder" | "none";
-type SystemName = "baseline" | "new";
+type SystemName = "baseline" | "new" | "pe" | "pe-forced" | "pe-forced2";
 
 interface VariantSpec {
   readonly id: string;
@@ -275,6 +296,31 @@ const VARIANTS: readonly VariantSpec[] = [
     taskOverride: "study",
     systemSuffix: 'When stating what the work requires, use the form "We need to ...".',
   },
+  /* --- 提示词工程：先立"思考 / 回答"分工，再加强制思考风格 --- */
+  {
+    id: "pe",
+    label: "PE：补 Reasoning / Answer 两节（软措辞）",
+    tools: "en-short",
+    system: "pe",
+  },
+  {
+    id: "pe-forced",
+    label: "PE + 强制 We need 句式",
+    tools: "en-short",
+    system: "pe-forced",
+  },
+  {
+    id: "pe-forced2",
+    label: "PE + 强制句式（更硬：Start every reasoning paragraph）",
+    tools: "en-short",
+    system: "pe-forced2",
+  },
+  {
+    id: "pe-forced-debug",
+    label: "PE + 强制句式（简单题，看回答是否还短）",
+    tools: "en-short",
+    system: "pe-forced",
+  },
   {
     id: "seed-soft",
     label: "更软：先说要做什么再决定怎么做",
@@ -313,8 +359,16 @@ function loadToolSet(name: ToolSetName): ToolSchema[] {
   return tools;
 }
 
+const SYSTEM_FILES: Record<SystemName, string> = {
+  baseline: "system-baseline.md",
+  new: "system-new.md",
+  pe: "system-pe.md",
+  "pe-forced": "system-pe-forced.md",
+  "pe-forced2": "system-pe-forced2.md",
+};
+
 async function loadSystem(name: SystemName): Promise<string> {
-  const file = snapshotPath(name === "baseline" ? "system-baseline.md" : "system-new.md");
+  const file = snapshotPath(SYSTEM_FILES[name]);
   if (!existsSync(file)) throw new Error(`缺少 snapshot：${file}`);
   return (await readFile(file, "utf8")).trimEnd();
 }
@@ -349,6 +403,32 @@ interface Stats {
   englishReasoning: number;
   meanMs: number;
   meanReasoningChars: number;
+  /** 最终回答的长度 —— "思考可以长、回答必须短"这条约束要靠它验证。 */
+  meanAnswerChars: number;
+  /** 推理里的逐字重复率（死循环代理指标）。 */
+  meanRepetition: number;
+}
+
+/**
+ * 逐字重复率 —— "思考死循环"的可观测代理指标。
+ *
+ * 取 60 字符窗口、步长 30 滑过推理文本，统计有多少个窗口在之前出现过。
+ * 正常的推理几乎不重复整句；绕圈子的推理会反复回到同一段措辞。
+ */
+function repetitionRate(text: string): number {
+  const window = 60;
+  const step = 30;
+  if (text.length < window * 2) return 0;
+  const seen = new Set<string>();
+  let duplicates = 0;
+  let total = 0;
+  for (let i = 0; i + window <= text.length; i += step) {
+    const shingle = text.slice(i, i + window);
+    total += 1;
+    if (seen.has(shingle)) duplicates += 1;
+    else seen.add(shingle);
+  }
+  return total === 0 ? 0 : duplicates / total;
 }
 
 const WE_NEED = /\bwe need\b/i;
@@ -375,6 +455,8 @@ function summarize(trials: readonly Trial[]): Stats {
     englishReasoning: 0,
     meanMs: 0,
     meanReasoningChars: 0,
+    meanAnswerChars: 0,
+    meanRepetition: 0,
   };
   if (ok.length === 0) return stats;
   for (const trial of ok) {
@@ -383,9 +465,13 @@ function summarize(trials: readonly Trial[]): Stats {
     if (cjkRatio(trial.reasoning) <= 0.15) stats.englishReasoning += 1;
     stats.meanMs += trial.ms;
     stats.meanReasoningChars += trial.reasoning.length;
+    stats.meanAnswerChars += trial.content.length;
+    stats.meanRepetition += repetitionRate(trial.reasoning);
   }
   stats.meanMs /= ok.length;
   stats.meanReasoningChars /= ok.length;
+  stats.meanAnswerChars /= ok.length;
+  stats.meanRepetition /= ok.length;
   return stats;
 }
 
@@ -471,10 +557,13 @@ function clientFor(extraBody: Record<string, unknown>): ReturnType<typeof create
   return created;
 }
 
-const systems: Record<SystemName, string> = {
-  baseline: await loadSystem("baseline"),
-  new: await loadSystem("new"),
-};
+const systems = Object.fromEntries(
+  await Promise.all(
+    (["baseline", "new", "pe", "pe-forced", "pe-forced2"] as SystemName[]).map(
+      async (name) => [name, await loadSystem(name)] as const,
+    ),
+  ),
+) as Record<SystemName, string>;
 const toolSets: Partial<Record<ToolSetName, ToolSchema[]>> = {};
 for (const name of new Set(VARIANTS.map((variant) => variant.tools))) {
   toolSets[name] = loadToolSet(name);
@@ -580,6 +669,8 @@ for (const variant of variants) {
     ` we-need ${stats.weNeed}/${ok}` +
       ` · let-me ${stats.letMe}/${ok}` +
       ` · 英文推理 ${stats.englishReasoning}/${ok}` +
+      ` · 推理 ${Math.round(stats.meanReasoningChars)}字 / 回答 ${Math.round(stats.meanAnswerChars)}字` +
+      ` · 重复 ${(stats.meanRepetition * 100).toFixed(1)}%` +
       ` · ${Math.round(stats.meanMs)}ms` +
       (stats.errors > 0 ? ` · 失败 ${stats.errors}` : ""),
   );
@@ -588,7 +679,9 @@ for (const variant of variants) {
 const baseline = all.filter((trial) => trial.variant === "baseline-zh" && trial.error === undefined);
 const baselineStats = summarize(baseline);
 
-console.log(`\n${"变体".padEnd(20)} we-need            let-me   英文推理   vs baseline`);
+console.log(
+  `\n${"变体".padEnd(20)} we-need            let-me   英文推理   推理字   回答字   vs baseline`,
+);
 for (const variant of variants) {
   const stats = summarize(all.filter((trial) => trial.variant === variant.id));
   const ok = stats.trials - stats.errors;
@@ -604,7 +697,9 @@ for (const variant of variants) {
     )
       .toFixed(0)
       .padStart(3)}% [${(lo * 100).toFixed(0)}-${(hi * 100).toFixed(0)}%]   ` +
-      `${String(stats.letMe).padStart(2)}/${ok}    ${String(stats.englishReasoning).padStart(2)}/${ok}     p=${p.toFixed(4)}`,
+      `${String(stats.letMe).padStart(2)}/${ok}    ${String(stats.englishReasoning).padStart(2)}/${ok}     ` +
+      `${String(Math.round(stats.meanReasoningChars)).padStart(5)}   ${String(Math.round(stats.meanAnswerChars)).padStart(5)}   ` +
+      `${(stats.meanRepetition * 100).toFixed(1).padStart(5)}%   p=${p.toFixed(4)}`,
   );
 }
 
