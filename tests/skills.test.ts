@@ -83,6 +83,32 @@ describe("skills loader", () => {
       parseSkillMarkdown("---\nname: empty\ndescription: Empty\n---\n", "/tmp/SKILL.md", "/tmp"),
     ).toThrow(/正文/);
   });
+
+  test("BUG-025: 单个坏 SKILL.md 降级为跳过，不影响其它技能发现", async () => {
+    const root = await tempDir();
+    await mkdir(join(root, "bad"), { recursive: true });
+    await writeFile(join(root, "bad", "SKILL.md"), "# no frontmatter\n", "utf8");
+    await writeSkill(root, "good", "good", "Fine", "good body");
+
+    const skills = await discoverSkills({ cwd: root, disableDefaults: true, paths: [root] });
+    expect(skills.map((skill) => skill.name)).toEqual(["good"]);
+  });
+
+  test("BUG-025: 同名冲突保留高优先级 root 的版本", async () => {
+    const user = await tempDir();
+    const project = await tempDir();
+    await writeSkill(user, "dup", "dup", "User version", "user body");
+    await writeSkill(project, "dup", "dup", "Project version", "project body");
+    await writeSkill(project, "unique", "unique", "Unique", "unique body");
+
+    const skills = await discoverSkills({
+      cwd: project,
+      disableDefaults: true,
+      paths: [user, project],
+    });
+    expect(skills.map((skill) => skill.name)).toEqual(["dup", "unique"]);
+    expect(skills[0]?.description).toBe("Project version");
+  });
 });
 
 describe("skills runtime", () => {

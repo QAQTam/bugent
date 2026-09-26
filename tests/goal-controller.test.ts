@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentSession } from "../src/core/session.ts";
+import { storedText } from "../src/core/message.ts";
 import type { AgentIntegrationRecord } from "../src/agent/integrator.ts";
 import { GoalController } from "../src/goal/controller.ts";
 import type { ReviewRunner } from "../src/goal/review.ts";
@@ -36,6 +37,7 @@ async function setup(
     cwd?: string;
     contextRefresh?: "checkpoint" | "threshold" | "manual";
     handoffRoot?: string;
+    maxTokenBudget?: number;
   } = {},
 ): Promise<{
   store: SessionStore;
@@ -72,6 +74,7 @@ async function setup(
       ? { contextRefresh: options.contextRefresh }
       : {}),
     ...(options.reviewRunner !== undefined ? { reviewRunner: options.reviewRunner } : {}),
+    ...(options.maxTokenBudget !== undefined ? { maxTokenBudget: options.maxTokenBudget } : {}),
     now: () => 100,
   });
   return { store, session, controller };
@@ -153,6 +156,17 @@ describe("Goal P1 · controller", () => {
     expect(session.buildContext().at(-1)?.parts).toEqual([
       { type: "text", text: injected?.parts[0]?.type === "text" ? injected.parts[0].text : "" },
     ]);
+  });
+
+  test("maxTokenBudget 同时作为未显式指定时的默认预算", async () => {
+    const { controller } = await setup({ maxTokenBudget: 1000 });
+    controller.authorizeCreate();
+    const goal = controller.createFromContract({
+      rawIntent: "默认预算",
+      objective: "验证默认预算",
+      successCriteria: ["预算存在"],
+    });
+    expect(goal.tokenBudget).toBe(1000);
   });
 
   test("只有成功应用并通过验证的 worker patch 才写入 Goal Evidence", async () => {
@@ -731,6 +745,37 @@ describe("Goal P3 · verification and review", () => {
     expect(result.review.status).toBe("changes_requested");
     expect(result.checkpoint.status).toBe("active");
   });
+
+  test("reviewer usage 会计入 Goal 预算与时间", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [
+              { criterion: "测试通过", status: "proven", evidence: ["ev-test"] },
+            ],
+            findings: [],
+            unresolvedQuestions: [],
+            usage: { input: 100, output: 20, cached: 30 },
+            durationMs: 2000,
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+
+    await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "带 reviewer usage",
+      evidence,
+    });
+
+    expect(controller.currentGoal()).toMatchObject({
+      tokensUsed: 90,
+      timeUsedSeconds: 2,
+    });
+  });
 });
 
 describe("Goal P5 · continuation accounting", () => {
@@ -785,7 +830,7 @@ describe("Goal P5 · continuation accounting", () => {
   });
 
   test("达到 token budget 会停止 continuation", async () => {
-    const { controller } = await setup();
+    const { session, controller } = await setup();
     controller.authorizeCreate();
     controller.createFromContract({
       rawIntent: "预算 Goal",
@@ -832,6 +877,9 @@ describe("Goal P5 · continuation accounting", () => {
     expect(completion.budgetLimited).toBe(true);
     expect(controller.currentGoal()?.status).toBe("budget_limited");
     expect(controller.canAutoContinue().allowed).toBe(false);
+    expect(session.messages.at(-1)?.injectionSource).toBe("goal");
+    expect(storedText(session.messages.at(-1)!)).toContain("# Goal Budget Limit");
+    expect(storedText(session.messages.at(-1)!)).toContain("Do not start new substantive work");
   });
 });
 
@@ -956,6 +1004,38 @@ describe("Goal P6 · final audit", () => {
     expect(audit.approved).toBe(true);
     expect(controller.currentGoal()?.status).toBe("complete");
     expect(controller.currentGoal()?.phase).toBe("final_audit");
+  });
+
+  test("final auditor usage 计入完成后的最终预算", async () => {
+    const { controller } = await setup({
+      reviewRunner: {
+        async run(): Promise<ReviewResult> {
+          return {
+            verdict: "approve",
+            criteriaCoverage: [
+              { criterion: "测试通过", status: "proven", evidence: ["ev"] },
+            ],
+            findings: [],
+            unresolvedQuestions: [],
+            usage: { input: 50, output: 10, cached: 5 },
+            durationMs: 1000,
+          };
+        },
+      },
+    });
+    prepareExecutingCheckpoint(controller);
+    await controller.submitCheckpoint({
+      checkpointId: "cp1",
+      summary: "完成",
+      evidence,
+    });
+    await controller.finalAudit();
+
+    expect(controller.currentGoal()).toMatchObject({
+      status: "complete",
+      tokensUsed: 110,
+      timeUsedSeconds: 2,
+    });
   });
 
   test("final audit 未覆盖 success criterion 时回到 executing", async () => {

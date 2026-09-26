@@ -383,3 +383,100 @@ describe("Transcript layout changes", () => {
     expect(t.consumeLayoutChanges().rebuild).toBe(true);
   });
 });
+
+describe("Reasoning DisplayItem", () => {
+  test("同一 assistant step 的多个 delta 复用同一个 live item", () => {
+    const t = new Transcript();
+    const first = t.beginReasoning(1000);
+    const second = t.beginReasoning(1001);
+
+    expect(first).toBe(second);
+    expect(t.items).toHaveLength(1);
+    expect(t.items[0]).toMatchObject({
+      kind: "reasoning",
+      id: first,
+      text: "",
+      done: false,
+      expanded: false,
+      startedAt: 1000,
+    });
+  });
+
+  test("完成后原地变折叠 Thought，不打乱 assistant 顺序", () => {
+    const t = new Transcript();
+    t.pushUser("问题");
+    const id = t.beginReasoning(1000);
+    t.appendAssistantText("答案");
+    t.finishReasoning({ text: "完整思考", msgid: 2, durationMs: 12_400, tokens: 1842 });
+
+    expect(t.items.map((item) => item.kind)).toEqual(["user", "reasoning", "assistant"]);
+    expect(t.items[1]).toMatchObject({
+      kind: "reasoning",
+      id,
+      text: "完整思考",
+      done: true,
+      expanded: false,
+      durationMs: 12_400,
+      tokens: 1842,
+      msgid: 2,
+      sequence: 1,
+    });
+    expect(displayMsgId(t.items[1]!)).toBe(2);
+  });
+
+  test("只有完成后才能点击展开", () => {
+    const t = new Transcript();
+    const id = t.beginReasoning();
+    expect(t.toggleReasoningExpanded(id)).toBe(false);
+
+    t.finishReasoning({ text: "思考", msgid: 2, durationMs: 10 });
+    expect(t.toggleReasoningExpanded(id)).toBe(true);
+    const item = t.items[0];
+    expect(item?.kind === "reasoning" && item.expanded).toBe(true);
+  });
+
+  test("abort 时丢弃 live 占位，不留下假 Thinking", () => {
+    const t = new Transcript();
+    t.beginReasoning();
+    t.discardReasoning();
+    expect(t.items).toHaveLength(0);
+  });
+
+  test("restore 重建折叠 Thought，并按 user 边界重新编号", () => {
+    const t = new Transcript();
+    t.restore([
+      makeMessage({ msgid: 1, role: "user", origin: "user", parts: [textPart("一")], createdAt: 1 }),
+      makeMessage({
+        msgid: 2,
+        role: "assistant",
+        origin: "assistant",
+        parts: [textPart("答案一")],
+        reasoning: "思考一",
+        createdAt: 2,
+      }),
+      makeMessage({ msgid: 3, role: "user", origin: "user", parts: [textPart("二")], createdAt: 3 }),
+      makeMessage({
+        msgid: 4,
+        role: "assistant",
+        origin: "assistant",
+        parts: [textPart("答案二")],
+        reasoning: "思考二",
+        createdAt: 4,
+      }),
+    ]);
+
+    expect(t.items.map((item) => item.kind)).toEqual([
+      "user",
+      "reasoning",
+      "assistant",
+      "user",
+      "reasoning",
+      "assistant",
+    ]);
+    const reasonings = t.items.filter(
+      (item): item is Extract<DisplayItem, { kind: "reasoning" }> => item.kind === "reasoning",
+    );
+    expect(reasonings.map((item) => item.sequence)).toEqual([1, 1]);
+    expect(reasonings.map((item) => item.expanded)).toEqual([false, false]);
+  });
+});

@@ -5,19 +5,61 @@
  *   write_file  原子写（先写临时文件再 rename）
  *   edit_file   精确字符串替换，找不到或不唯一时**报错而不是猜**
  *
- * 所有路径都过 resolveWithin()，逃不出工作目录。
+ * 写路径默认只能落在工作区内（`resolveWithin`）；只有**本次调用获准越界**
+ * （`ctx.grant.writeOutside`，由闸门按次授权）才放宽到整个文件系统。
+ *
+ * read_file 不受限制 —— 三档都允许自由读工作区之外。
  */
 
 import { statSync } from "node:fs";
-import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { stat } from "node:fs/promises";
 import type { JSONSchema } from "../provider/types.ts";
 import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
-import { relativeTo, resolveWithin } from "./paths.ts";
-import { compactDiff, diffLines, formatDiff, type DiffLine } from "./diff.ts";
+import { atomicWriteWithin } from "./atomic-write.ts";
+import { MAX_PATCH_TARGET_BYTES } from "../patch/apply.ts";
+import {
+  ANYWHERE,
+  PathEscapeError,
+  relativeTo,
+  resolveForWrite,
+  resolveReadable,
+  resolveWithin,
+} from "./paths.ts";
+import { compactDiff, diffLines, diffStat, formatDiff, type DiffLine } from "./diff.ts";
 
 export const MAX_READ_LINES = 500;
+
+/* ------------------------------------------------------------------ */
+/* 路径解析：读 / 写两条不同的宽度                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 写路径解析。默认锁在工作区内；只有本次调用获准越界时才放宽。
+ *
+ * 注意这里读的是 `ctx.grant`（**本次调用**的授权），不是档位 —— 档位只决定
+ * 闸门要不要问，不决定工具自己能走多远。
+ */
+function resolveWriteTarget(ctx: ToolCtx, rawPath: string): string {
+  return resolveForWrite(ctx.cwd, rawPath, ctx.grant?.writeOutside === true);
+}
+
+/**
+ * 逐次判断这次写是不是越出工作区，供闸门在**调用前**决定要不要按次问用户。
+ *
+ * 只把 `PathEscapeError` 当作"越界"：参数不是字符串之类的错误留给 run 自己
+ * 报，否则会问一个没有意义的授权。
+ */
+function writesOutsideWorkspace(input: unknown, ctx: ToolCtx): boolean {
+  const raw = (input as { path?: unknown } | null | undefined)?.path;
+  if (typeof raw !== "string") return false;
+  try {
+    resolveWithin(ctx.cwd, raw);
+    return false;
+  } catch (error) {
+    return error instanceof PathEscapeError;
+  }
+}
 
 export interface ReadWindow {
   /** 形如 `"12\t内容"` 的行。 */
@@ -141,7 +183,15 @@ function fileResource(
 ): readonly ResourceClaim[] {
   const rawPath = (input as { path?: unknown } | null)?.path;
   if (typeof rawPath !== "string") return [];
-  const absolute = resolveWithin(ctx.cwd, rawPath);
+  let absolute: string;
+  try {
+    absolute = resolveWithin(ctx.cwd, rawPath);
+  } catch {
+    // 工作区外的目标：锁粒度退化成整个 workspace。
+    // **不能在这里抛** —— resources() 在闸门之前跑，抛了就等于让
+    // "按次授权写工作区外"永远走不到闸门那一步。
+    return [{ key: "workspace", access }];
+  }
   const relative = relativeTo(ctx.cwd, absolute).replaceAll("\\", "/");
   return [{ key: `workspace/${relative}`, access }];
 }
@@ -210,7 +260,8 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
         MAX_READ_LINES,
       );
 
-      const absolute = resolveWithin(ctx.cwd, rawPath);
+      // 读是自由的：三档都允许读工作区之外（档位不限制读）。
+      const absolute = resolveReadable(ctx.cwd, rawPath, [ANYWHERE]);
       const display = relativeTo(ctx.cwd, absolute);
 
       // 目录单独判断：否则 size 是 0，会掉进"文件不存在"分支，报错完全误导
@@ -256,9 +307,25 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
         }
       } else {
         if (window.hitScanLimit) {
-          notes.push(`file is large; stopped after scanning ${MAX_READ_SCAN_BYTES} bytes`);
+          if (window.entries.length === 0 && offset > 1) {
+            // BUG-022：扫描窗永远从文件头开始，大 offset 到不了——旧的提示
+            // 会让模型拿着一个永远不前进的 offset 死循环。
+            notes.push(
+              `offset ${offset} is beyond the ${MAX_READ_SCAN_BYTES}-byte scan window; ` +
+                "this tool always scans from the start of the file",
+            );
+            notes.push(
+              `use bash to read deep into large files, e.g. sed -n '${offset},${
+                offset + MAX_READ_LINES
+              }p' -- ${JSON.stringify(display)}`,
+            );
+          } else {
+            notes.push(`file is large; stopped after scanning ${MAX_READ_SCAN_BYTES} bytes`);
+            notes.push(`continue with offset=${lastLine + 1}`);
+          }
+        } else {
+          notes.push(`continue with offset=${lastLine + 1}`);
         }
-        notes.push(`continue with offset=${lastLine + 1}`);
       }
       if (window.clippedLine) notes.push("one line was too long and has been truncated");
 
@@ -268,6 +335,14 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
           }）`
         : `# ${display} (showing ${offset}-${lastLine}, not yet at end of file)`;
       const footer = notes.length > 0 ? `\n\n[${notes.join("；")}]` : "";
+
+      // 展示元数据：TUI 直接读它，不必从上面那个头部反解（--resume 时才回退到反解）。
+      // 口径与头部一致：整份读完就是 `1-N`，否则是实际读到的窗口。
+      ctx.onPresentation?.({
+        kind: "file",
+        path: display,
+        range: totalKnown && notes.length === 0 ? `1-${window.totalLines}` : `${offset}-${lastLine}`,
+      });
 
       return `${header}\n${numbered}${footer}`;
     },
@@ -298,8 +373,9 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
     description: "Create or overwrite a file with the given content.",
     parameters: WRITE_FILE_PARAMETERS,
     // 进程内工具没有内核兜底，必须显式声明需要写权限 ——
-    // read-only 档位下闸门会据此拦下（或弹窗请求升档）
+    // 档位默认不批准写时，闸门会据此按次问用户
     requires: { write: true },
+    writesOutside: writesOutsideWorkspace,
 
     resources(input, ctx) {
       return fileResource(input, ctx, "write");
@@ -319,7 +395,7 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
         throw new Error(`content too large: ${bytes} bytes, limit ${MAX_WRITE_BYTES}`);
       }
 
-      const absolute = resolveWithin(ctx.cwd, rawPath);
+      const absolute = resolveWriteTarget(ctx, rawPath);
       const display = relativeTo(ctx.cwd, absolute);
 
       // 先读旧内容，写完才能给出 diff（新建文件时旧内容为空）
@@ -327,22 +403,10 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       const fileStat = existed ? await stat(absolute) : undefined;
       const before = existed ? await Bun.file(absolute).text() : "";
 
-      await mkdir(dirname(absolute), { recursive: true });
-
-      // 原子写：先写同目录下的临时文件，再 rename，避免写一半崩掉留下半截文件
-      const temp = `${absolute}.bugent-tmp-${process.pid}-${Date.now()}`;
+      // 原子写 + TOCTOU 收窄（BUG-012）：临时文件、rename、四次边界复核都在
+      // atomicWriteWithin 里；越界授权时复核自动放宽。
       const mode = fileStat?.mode === undefined ? undefined : fileStat.mode & 0o777;
-      try {
-        await writeFile(temp, content, {
-          encoding: "utf8",
-          ...(mode !== undefined ? { mode } : {}),
-        });
-        if (mode !== undefined) await chmod(temp, mode);
-        await rename(temp, absolute);
-      } catch (error) {
-        await unlink(temp).catch(() => {});
-        throw error;
-      }
+      await atomicWriteWithin(ctx.cwd, ctx.grant?.writeOutside === true, absolute, content, mode);
 
       ctx.onWorkspaceChange?.({
         path: display,
@@ -360,9 +424,19 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
 
       // 新建文件不走 diff：空内容 split 出来是一个空行，会被当成"删了 1 行"，
       // 于是新文件显示成 `+3 -1`。直接全标成新增才对。
+      // 行号从 1 起 —— 新文件的每一行都是新增，编号就是它在文件里的行号。
       const diff = existed
         ? compactDiff(diffLines(before, content))
-        : content.split("\n").map((text): DiffLine => ({ kind: "+", text }));
+        : content.split("\n").map((text, index): DiffLine => ({ kind: "+", text, after: index + 1 }));
+
+      // 展示元数据：TUI 不必从 diff 文本里反解统计
+      const delta = diffStat(diff);
+      ctx.onPresentation?.({
+        kind: "file",
+        path: display,
+        added: delta.added,
+        removed: delta.removed,
+      });
 
       return formatDiff(diff, summary);
     },
@@ -411,6 +485,7 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
     description: "Replace one exact string in a file.",
     parameters: EDIT_FILE_PARAMETERS,
     requires: { write: true },
+    writesOutside: writesOutsideWorkspace,
 
     resources(input, ctx) {
       return fileResource(input, ctx, "write");
@@ -435,12 +510,18 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       }
 
       const replaceAll = input.replace_all === true;
-      const absolute = resolveWithin(ctx.cwd, rawPath);
+      const absolute = resolveWriteTarget(ctx, rawPath);
       const display = relativeTo(ctx.cwd, absolute);
 
       const fileStat = await stat(absolute).catch(() => undefined);
       if (fileStat === undefined) throw new Error(`file not found: ${display}`);
       if (!fileStat.isFile()) throw new Error(`not a regular file: ${display}`);
+      // BUG-018：edit 是全文读 + 全文写 —— 读之前先看尺寸。
+      if (fileStat.size > MAX_PATCH_TARGET_BYTES) {
+        throw new Error(
+          `refusing to edit a ${fileStat.size}-byte file (limit ${MAX_PATCH_TARGET_BYTES}): ${display}`,
+        );
+      }
 
       const original = await Bun.file(absolute).text();
       if (original.includes("\0")) {
@@ -471,16 +552,9 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
         throw new Error(`edited content too large: ${updatedBytes} bytes, limit ${MAX_WRITE_BYTES}`);
       }
 
-      const temp = `${absolute}.bugent-tmp-${process.pid}-${Date.now()}`;
+      // 同 write_file：原子写 + TOCTOU 收窄（BUG-012）
       const mode = fileStat.mode & 0o777;
-      try {
-        await writeFile(temp, updated, { encoding: "utf8", mode });
-        await chmod(temp, mode);
-        await rename(temp, absolute);
-      } catch (error) {
-        await unlink(temp).catch(() => {});
-        throw error;
-      }
+      await atomicWriteWithin(ctx.cwd, ctx.grant?.writeOutside === true, absolute, updated, mode);
 
       ctx.onWorkspaceChange?.({
         path: display,
@@ -492,10 +566,18 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       });
 
       const replaced = replaceAll ? occurrences : 1;
-      return formatDiff(
-        compactDiff(diffLines(original, updated)),
-        `edited ${display} (${replaced} replacements)`,
-      );
+      const diff = compactDiff(diffLines(original, updated));
+
+      // 展示元数据：TUI 不必从 diff 文本里反解统计
+      const delta = diffStat(diff);
+      ctx.onPresentation?.({
+        kind: "file",
+        path: display,
+        added: delta.added,
+        removed: delta.removed,
+      });
+
+      return formatDiff(diff, `edited ${display} (${replaced} replacements)`);
     },
   };
 }

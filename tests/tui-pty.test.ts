@@ -257,6 +257,46 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
+    "绝对路径作为普通消息发送，不会被误判为未知命令",
+    async () => {
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 100,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: { ...process.env, TERM: "xterm-256color" },
+        terminal,
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        const path = "/home/qaqtamsy/项目/bugent";
+        output = "";
+        terminal.write(`${path}\r`);
+        await waitFor(() => output, (text) => strip(text).includes(`[mock] ${path}`));
+        expect(strip(output)).not.toContain("未知命令");
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+      }
+    },
+    20_000,
+  );
+
+  test(
     "消息操作按钮支持 hover、按下和抬起确认",
     async () => {
       const home = await mkdtemp(join(tmpdir(), "bugent-hover-"));
@@ -283,7 +323,14 @@ describe("TUI PTY 冒烟", () => {
         terminal.write("hello\r");
         await waitFor(() => output, (text) => strip(text).includes("[mock] hello"));
 
-        terminal.write("\x1b[<2;20;12M\x1b[<2;20;12m");
+        // 行号**不能写死**：启动横幅/状态栏文案一变（比如档位 label 变长），
+        // transcript 就整体下移，写死的坐标会点到空白处。按内容定位 ——
+        // 这里要的是**用户消息**（复制出来 5 个字符 = "hello"）。
+        const messageRow = rowOfIn(output, "› hello");
+        expect(messageRow).toBeGreaterThan(0);
+
+        output = "";
+        terminal.write(`\x1b[<2;20;${messageRow}M\x1b[<2;20;${messageRow}m`);
         await waitFor(() => output, (text) => strip(text).includes("消息操作"));
         expect(output).toContain(bg(COLOR.dialogBg));
 
@@ -1440,13 +1487,12 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
-    "滚动条出现时，工具卡片行尾的 +N -M 徽标不被吞掉",
+    "滚动条出现时，工具卡片的 +N -M 徽标仍然完整可见",
     async () => {
-      // 回归防线。`composeScrollbar` 会把正文每一行截断到 `width - 1` 再在最右列
-      // 画轨道 —— 正文此前没有右侧留白，于是行尾**右对齐**的徽标正好被这一列吃掉，
-      // 截断补上的省略号盖在徽标上，看上去就像"徽标超出了终端宽度"。
-      //
-      // 这里用矮终端（rows=20）逼出滚动条，再断言 apply_patch 那一行仍带着 +N。
+      // 回归防线（成因已变，断言不变）。当年徽标右对齐到行尾，`composeScrollbar`
+      // 把正文每行截断到 `width - 1` 再在最右列画轨道，于是徽标正好被那一列吃掉。
+      // 现在徽标紧跟内容，不可能被行尾的滚动条吃掉 —— 这条断言继续守着
+      // "矮终端 + 滚动条下徽标仍然可见"。
       const home = await mkdtemp(join(tmpdir(), "bugent-gutter-"));
       const work = await mkdtemp(join(tmpdir(), "bugent-gutter-ws-"));
       const patch = [
@@ -1489,14 +1535,14 @@ describe("TUI PTY 冒烟", () => {
 
         output = "";
         terminal.write("go\r");
-        // 等到工具真正执行完 —— 此时卡片头部应当是 "⏺ apply_patch … +3"
+        // 等到工具真正执行完 —— 此时卡片头部应当是 "⏺ Patch … +3"
         await waitFor(() => output, (text) => strip(text).includes("Success. Updated"), 15_000);
 
         const frames = output.split("\x1b[?25l").filter((frame) => frame.length > 0);
         const lastFrame = strip(frames.at(-1) ?? "");
-        const cardLine = lastFrame.split("\n").find((line) => line.includes("apply_patch")) ?? "";
+        const cardLine = lastFrame.split("\n").find((line) => line.includes("Patch")) ?? "";
 
-        expect(cardLine).toContain("apply_patch");
+        expect(cardLine).toContain("Patch");
         expect(cardLine).toMatch(/\+3/);
 
         terminal.write("\x03");
@@ -1580,6 +1626,159 @@ describe("TUI PTY 冒烟", () => {
   );
 
   test(
+    "write_file 卡片带行号：能看出改动落在第几行",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-lineno-"));
+      const work = await mkdtemp(join(tmpdir(), "bugent-lineno-ws-"));
+
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 20,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          "run",
+          join(process.cwd(), "src/index.ts"),
+          "--mock",
+          "--mode",
+          "workspace-write",
+        ],
+        {
+          cwd: work,
+          env: {
+            ...process.env,
+            HOME: home,
+            TERM: "xterm-256color",
+            BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+              name: "write_file",
+              args: { path: "probe.txt", content: "hello\nworld\n" },
+            }),
+          },
+          terminal,
+          timeout: 20_000,
+          killSignal: "SIGKILL",
+        },
+      );
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("写一个文件\r");
+        await waitFor(() => output, (text) => strip(text).includes("created probe.txt"), 15_000);
+
+        const frames = output.split("\x1b[?25l").filter((frame) => frame.length > 0);
+        const lastFrame = strip(frames.at(-1) ?? "");
+
+        // 行号列真的画到了屏幕上：`  1   +hello`
+        expect(lastFrame).toMatch(/\s1\s+\+hello/);
+        expect(lastFrame).toMatch(/\s2\s+\+world/);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+        await rm(work, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+  test(
+    "write_file 参数流式到达时，卡片实时显示路径与 +N（不必等执行完）",
+    async () => {
+      // 参数分片 + 延迟吐，中间态才可观测。一次吐完的话 TUI 只渲染最终状态。
+      const home = await mkdtemp(join(tmpdir(), "bugent-stream-file-"));
+      const work = await mkdtemp(join(tmpdir(), "bugent-stream-file-ws-"));
+
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 20,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn(
+        [
+          process.execPath,
+          "run",
+          join(process.cwd(), "src/index.ts"),
+          "--mock",
+          "--mode",
+          "workspace-write",
+        ],
+        {
+          cwd: work,
+          env: {
+            ...process.env,
+            HOME: home,
+            TERM: "xterm-256color",
+            BUGENT_MOCK_CHUNK_CHARS: "8",
+            BUGENT_MOCK_CHUNK_DELAY_MS: "25",
+            BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+              name: "write_file",
+              args: { path: "probe.txt", content: "one\ntwo\nthree\n" },
+            }),
+          },
+          terminal,
+          timeout: 30_000,
+          killSignal: "SIGKILL",
+        },
+      );
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("写一个文件\r");
+        await waitFor(() => output, (text) => strip(text).includes("created probe.txt"), 20_000);
+
+        const plain = strip(output);
+        const badgeAt = plain.search(/⏺ Write probe\.txt\s+\+\d/);
+        const resultAt = plain.indexOf("created probe.txt");
+
+        // 卡片在**工具跑完之前**就已经带着路径和徽标了 —— 这正是"先显示 JSON、
+        // 结束时才变 diff"被修掉的那件事。
+        expect(badgeAt).toBeGreaterThan(-1);
+        expect(resultAt).toBeGreaterThan(-1);
+        expect(badgeAt).toBeLessThan(resultAt);
+
+        // 数字是长上去的，不是一个数跳到底
+        const growth = new Set(
+          [...plain.matchAll(/⏺ Write probe\.txt\s+\+(\d+)/g)].map((match) => match[1]),
+        );
+        expect(growth.size).toBeGreaterThanOrEqual(2);
+
+        // 而且整段输出里不该再出现参数 JSON 的痕迹
+        expect(plain).not.toContain("_raw");
+
+        // 等这一轮真的收尾再退出：中途 Ctrl+C 会让进程以非 0 退出
+        await waitForTurnIdle(() => output, 1, 20);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+        await rm(work, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test(
     "read_file 的行号 TAB 不会顶破右边界（滚动条不留缺口）",
     async () => {
       // read_file 的输出是 `${lineNumber}\t${line}`，文件内容本身也可能含 TAB。
@@ -1615,7 +1814,7 @@ describe("TUI PTY 冒烟", () => {
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
         terminal.write("读一下 ansi.ts\r");
-        await waitFor(() => output, (text) => strip(text).includes("read_file"));
+        await waitFor(() => output, (text) => strip(text).includes("Read src/tui/ansi.ts"));
         await waitForTurnIdle(() => output, 1, 30);
 
         // 根因的直接编码：写进终端的字节流里不允许出现 TAB。
@@ -1694,6 +1893,208 @@ describe("TUI PTY 冒烟", () => {
       }
     },
     30_000,
+  );
+
+  test(
+    "Thinking 完成后默认折叠，点击 Thought 才展开",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-reasoning-"));
+      const reasoning = "REASONING-FULL-TEXT-ONLY";
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 100,
+        rows: 24,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          TERM: "xterm-256color",
+          BUGENT_MOCK_REASONING: reasoning,
+        },
+        terminal,
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        terminal.write("hello\r");
+        await waitFor(() => output, (text) => strip(text).includes("✦ Thought 1"));
+
+        const thoughtRow = rowOfIn(output, "✦ Thought 1");
+        expect(thoughtRow).toBeGreaterThan(0);
+        const collapsed = screenOf(output, 24).join("\n");
+        expect(collapsed).toContain("（点击展开）");
+        expect(collapsed).not.toContain(reasoning);
+
+        output = "";
+        terminal.write(`\x1b[<0;6;${thoughtRow}M\x1b[<0;6;${thoughtRow}m`);
+        await waitFor(() => output, (text) => strip(text).includes(reasoning));
+        expect(strip(output)).toContain("（点击折叠）");
+
+        const expandedRow = rowOfIn(output, "− Thought 1");
+        expect(expandedRow).toBeGreaterThan(0);
+        output = "";
+        terminal.write(`\x1b[<0;6;${expandedRow}M\x1b[<0;6;${expandedRow}m`);
+        await waitFor(() => output, (text) => strip(text).includes("（点击展开）"));
+        expect(screenOf(output, 24).join("\n")).not.toContain(reasoning);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test(
+    "授权弹窗带倒计时，到点自动按超时拒绝并把结论回传模型",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-pty-auth-"));
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 80,
+        rows: 20,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn([process.execPath, "run", "src/index.ts", "--mock", "--no-persist"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: home,
+          TERM: "xterm-256color",
+          // 让模型第一轮就去写工作区外 —— workspace-write 档下这一步必须逐次批准
+          BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+            name: "write_file",
+            args: { path: "/tmp/bugent-pty-outside.txt", content: "x" },
+          }),
+          // 生产恒为 60 秒；用例压到 2 秒，否则要等满一分钟
+          BUGENT_AUTHORIZATION_TIMEOUT_MS: "2000",
+        },
+        terminal,
+        timeout: 30_000,
+        killSignal: "SIGKILL",
+      });
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("写一个文件\r");
+
+        // 1) 弹窗出现，并且标题里带着倒计时
+        await waitFor(() => output, (text) => strip(text).includes("需要按次授权"));
+        expect(strip(output)).toMatch(/还剩 \d+s/);
+        // 2 秒窗口，第一帧应当是满额
+        expect(strip(output)).toContain("还剩 2s");
+
+        // 2) 到点自动关掉弹窗，并把「授权已超时」回传给模型
+        await waitFor(() => output, (text) => strip(text).includes("授权已超时"), 15_000);
+        expect(strip(output)).toContain("授权已超时（授权窗口内未收到确认）");
+        // 理由里要说清"越界的是哪一项"，不能只丢一句"被拒"
+        expect(strip(output)).toContain("写入工作区之外");
+        // 超时不是"用户拒绝" —— 两者必须能区分
+        expect(strip(output)).not.toContain("用户拒绝操作");
+        // 弹窗必须自己消失，不能留在屏幕上等一个已经过期的批准
+        expect(lastFrame(output)).not.toContain("需要按次授权");
+        // 被拒的调用不该真的落盘
+        expect(await Bun.file("/tmp/bugent-pty-outside.txt").exists()).toBe(false);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    40_000,
+  );
+
+  test(
+    "bash 写工作区外：执行前弹窗，拒绝后命令不跑",
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "bugent-pty-bashauth-"));
+      const work = await mkdtemp(join(tmpdir(), "bugent-pty-work-"));
+      // 目标要在工作区之外、又不在 /tmp 里 —— 沙箱视 /tmp 为私有 tmpfs，
+      // 写它不算越界（见 src/sandbox/command-scan.ts）。
+      const outside = join(process.cwd(), ".tmp-home", "pty-bash-outside.txt");
+      await rm(outside, { force: true });
+      let output = "";
+      const decoder = new TextDecoder();
+      const terminal = new Bun.Terminal({
+        cols: 90,
+        rows: 22,
+        data(_terminal, data) {
+          output += decoder.decode(data, { stream: true });
+        },
+      });
+
+      const proc = Bun.spawn(
+        [process.execPath, "run", join(process.cwd(), "src/index.ts"), "--mock", "--no-persist"],
+        {
+          cwd: work,
+          env: {
+            ...process.env,
+            HOME: home,
+            TERM: "xterm-256color",
+            BUGENT_AUTHORIZATION_TIMEOUT_MS: "20000",
+            // 模型第一轮就用 bash 往工作区外写 —— 静态判得出来，所以命令不该跑
+            BUGENT_MOCK_TOOL_CALL: JSON.stringify({
+              name: "bash",
+              args: { command: `echo hi > ${outside}` },
+            }),
+          },
+          terminal,
+          timeout: 30_000,
+          killSignal: "SIGKILL",
+        },
+      );
+
+      try {
+        await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+
+        output = "";
+        terminal.write("写出去\r");
+
+        // 执行前弹窗：标题写明是"写工作区之外"，正文给出命令与目标
+        await waitFor(() => output, (text) => strip(text).includes("需要授权 · 写入工作区之外"));
+        expect(strip(output)).toMatch(/还剩 \d+s/);
+        expect(strip(output)).toContain(outside);
+        expect(strip(output)).toContain(`echo hi > ${outside}`);
+
+        // 拒绝 -> 命令不跑，模型拿到明确结论
+        output = "";
+        terminal.write("n");
+        await waitFor(() => output, (text) => strip(text).includes("用户拒绝操作"));
+        expect(strip(output)).toContain("未执行");
+        expect(await Bun.file(outside).exists()).toBe(false);
+
+        terminal.write("\x03");
+        expect(await proc.exited).toBe(0);
+      } finally {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+        terminal.close();
+        await rm(home, { recursive: true, force: true });
+        await rm(work, { recursive: true, force: true });
+        await rm(outside, { force: true });
+      }
+    },
+    40_000,
   );
 
 });

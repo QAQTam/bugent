@@ -70,14 +70,29 @@ export function assertBunRuntimeInstalled(): string {
   return binary;
 }
 
+/**
+ * 可执行文件哈希缓存（PERF-006）：Bun 二进制上百 MB，每次 MCP spawn 都同步
+ * 读两遍 + SHA-256 会阻塞事件循环。同一路径只要 (realpath, size, mtimeMs)
+ * 没变，内容就不变 —— 进程内缓存一次即可。
+ */
+const executableHashCache = new Map<string, string>();
+
+function fileHash(path: string): string {
+  const stat = statSync(path);
+  const key = `${path}|${stat.size}|${stat.mtimeMs}`;
+  const cached = executableHashCache.get(key);
+  if (cached !== undefined) return cached;
+  const hash = new Bun.CryptoHasher("sha256").update(readFileSync(path)).digest("hex");
+  executableHashCache.set(key, hash);
+  return hash;
+}
+
 function sameExecutable(left: string, right: string): boolean {
   if (realpathSync(left) === realpathSync(right)) return true;
   const leftStat = statSync(left);
   const rightStat = statSync(right);
   if (leftStat.size !== rightStat.size) return false;
-  const hash = (path: string): string =>
-    new Bun.CryptoHasher("sha256").update(readFileSync(path)).digest("hex");
-  return hash(left) === hash(right);
+  return fileHash(left) === fileHash(right);
 }
 
 function isStandaloneBugentBinary(): boolean {
@@ -125,6 +140,10 @@ function encodeSandboxConfig(config: SandboxProviderOptions["config"]): string |
 }
 
 export function spawnSandboxed(options: SandboxSpawnOptions): ReturnType<typeof Bun.spawn> {
+  // BUG-029：fail-closed 校验内联在这里，而不是依赖每个调用点记得先调
+  // assertBugentBunRuntime —— 普通 Bun 会**静默忽略** sandbox 选项，
+  // 漏一次调用就是一次无隔离的 MCP spawn。
+  assertBugentBunRuntime();
   const spawn = Bun.spawn as unknown as (options: {
     cmd: readonly string[];
     cwd?: string;

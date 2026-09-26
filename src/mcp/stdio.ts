@@ -10,8 +10,9 @@
  * startup fails closed.
  */
 
-import { assertBugentBunRuntime, spawnMcpServer } from "../../runtime/bun/src/index.ts";
+import { spawnMcpServer } from "../../runtime/bun/src/index.ts";
 import { assertNativeSandboxLibrary, compileMcpSandbox } from "../sandbox/policy.ts";
+import { stripAnsi } from "../util/sanitize.ts";
 import { BUGENT_VERSION } from "../version.ts";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -110,6 +111,12 @@ interface PendingRequest {
   reject(error: Error): void;
 }
 
+/** 单条 JSON-RPC 消息的缓冲上限：无换行的恶意输出会把父进程 OOM。 */
+const MAX_LINE_BUFFER_CHARS = 32 * 1024 * 1024;
+
+/** 控制面请求（initialize / tools/list）的超时：server 不应答就别拖住启动。 */
+export const MCP_CONTROL_TIMEOUT_MS = 30_000;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -119,26 +126,47 @@ function errorFromRpc(message: JsonRpcFailure): Error {
     message.error.data === undefined
       ? ""
       : ` (${typeof message.error.data === "string" ? message.error.data : JSON.stringify(message.error.data)})`;
-  return new Error(`MCP JSON-RPC ${message.error.code}: ${message.error.message}${detail}`);
+  // server 返回的 message/data 是外部可控文本，进终端前剥掉转义序列（BUG-027）
+  return new Error(
+    `MCP JSON-RPC ${message.error.code}: ${stripAnsi(message.error.message)}${stripAnsi(detail)}`,
+  );
 }
 
 export class McpStdioClient {
   readonly id: string;
   readonly #config: McpStdioServerConfig;
+  readonly #controlTimeoutMs: number;
+  readonly #maxLineBufferChars: number;
+  readonly #spawn:
+    | ((options: Parameters<typeof spawnMcpServer>[0]) => Bun.PipedSubprocess)
+    | undefined;
   #process: Bun.PipedSubprocess | undefined;
   #stdin: Bun.FileSink | undefined;
   #reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   #stderrReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  #pending = new Map<number, PendingRequest>();
+  #pending = new Map<string, PendingRequest>();
   #nextId = 1;
   #buffer = "";
   #stderr = "";
   #closed = false;
   #initialized = false;
 
-  constructor(config: McpStdioServerConfig) {
+  constructor(
+    config: McpStdioServerConfig,
+    options: {
+      /** 测试缝隙：替换真实的沙箱 spawn。 */
+      spawn?: (options: Parameters<typeof spawnMcpServer>[0]) => Bun.PipedSubprocess;
+      /** 控制面请求超时。默认 30s。 */
+      controlTimeoutMs?: number;
+      /** 单条消息缓冲上限（字符）。默认 32MB。 */
+      maxLineBufferChars?: number;
+    } = {},
+  ) {
     this.id = config.id;
     this.#config = config;
+    this.#controlTimeoutMs = options.controlTimeoutMs ?? MCP_CONTROL_TIMEOUT_MS;
+    this.#maxLineBufferChars = options.maxLineBufferChars ?? MAX_LINE_BUFFER_CHARS;
+    this.#spawn = options.spawn;
   }
 
   get running(): boolean {
@@ -175,8 +203,10 @@ export class McpStdioClient {
       ...(this.#config.limits !== undefined ? { limits: this.#config.limits } : {}),
     });
 
-    assertBugentBunRuntime();
-    const proc = spawnMcpServer({
+    // fail-closed 校验已内联进 spawnSandboxed（BUG-029）；测试缝隙（注入
+    // spawn）不走沙箱，无需运行时断言。
+    const spawn = this.#spawn ?? spawnMcpServer;
+    const proc = spawn({
       cmd: this.#config.cmd,
       cwd,
       env: compiled.env,
@@ -213,7 +243,7 @@ export class McpStdioClient {
         // Give the stderr reader one turn to drain the diagnostic that usually
         // explains a startup failure.
         await Bun.sleep(0);
-        const detail = this.#stderr.trim();
+        const detail = stripAnsi(this.#stderr.trim());
         this.#failPending(
           new Error(
             `MCP server ${this.id} 退出，exit=${code}${detail.length > 0 ? `\n${detail}` : ""}`,
@@ -226,11 +256,16 @@ export class McpStdioClient {
 
   async initialize(): Promise<unknown> {
     if (this.#initialized) return undefined;
-    const result = await this.request("initialize", {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
-    });
+    const result = await this.request(
+      "initialize",
+      {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
+      },
+      // 启动路径不能被一个不应答的 server 挂死。
+      { timeoutMs: this.#controlTimeoutMs },
+    );
     this.notify("notifications/initialized", {});
     this.#initialized = true;
     return result;
@@ -241,7 +276,12 @@ export class McpStdioClient {
     const tools: McpToolInfo[] = [];
     let cursor: string | undefined;
     do {
-      const result = await this.request("tools/list", cursor === undefined ? {} : { cursor });
+      const result = await this.request(
+        "tools/list",
+        cursor === undefined ? {} : { cursor },
+        // 同 initialize：发现路径必须有界，否则一个卡死的 server 挂住整个启动。
+        { timeoutMs: this.#controlTimeoutMs },
+      );
       if (!isRecord(result) || !Array.isArray(result.tools)) {
         throw new Error(`MCP server ${this.id} 的 tools/list 返回格式无效`);
       }
@@ -282,28 +322,65 @@ export class McpStdioClient {
     return tools;
   }
 
-  async callTool(name: string, args: unknown): Promise<McpCallToolResult> {
+  async callTool(
+    name: string,
+    args: unknown,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<McpCallToolResult> {
     await this.initialize();
-    const result = await this.request("tools/call", {
-      name,
-      arguments: args ?? {},
-    });
+    const result = await this.request(
+      "tools/call",
+      { name, arguments: args ?? {} },
+      // 工具调用可以长跑，不设固定超时；但取消信号必须能打断在途请求。
+      { ...(options.signal !== undefined ? { signal: options.signal } : {}) },
+    );
     if (!isRecord(result)) throw new Error(`MCP server ${this.id} 的 tools/call 返回格式无效`);
     return result as McpCallToolResult;
   }
 
-  async request(method: string, params: unknown): Promise<unknown> {
+  async request(
+    method: string,
+    params: unknown,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<unknown> {
     if (!this.running || this.#stdin === undefined) {
       throw new Error(`MCP server ${this.id} 未运行`);
     }
+    if (options.signal?.aborted) throw new Error(`MCP 请求已取消：${method}`);
     const id = this.#nextId++;
+    const key = String(id);
     const payload = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    let rejectPending!: (error: Error) => void;
     const promise = new Promise<unknown>((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      rejectPending = reject;
+      this.#pending.set(key, { resolve, reject });
     });
     this.#stdin.write(`${payload}\n`);
     await this.#stdin.flush();
-    return promise;
+
+    // 超时 / 取消都要把 pending 条目清掉，否则条目泄漏且应答到达时会 resolve
+    // 一个已经无人等待的 promise。
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      if (this.#pending.delete(key)) {
+        rejectPending(new Error(`MCP 请求已取消：${method}`));
+      }
+    };
+    if (options.signal !== undefined) {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (options.timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        if (this.#pending.delete(key)) {
+          rejectPending(new Error(`MCP server ${this.id} 请求超时（${options.timeoutMs}ms）：${method}`));
+        }
+      }, options.timeoutMs);
+    }
+
+    return promise.finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    });
   }
 
   notify(method: string, params: unknown): void {
@@ -346,6 +423,16 @@ export class McpStdioClient {
         if (done) break;
         if (value === undefined) continue;
         this.#buffer += decoder.decode(value, { stream: true });
+        if (this.#buffer.length > this.#maxLineBufferChars) {
+          // server 一直输出却给不出完整消息（无换行）——再攒下去 OOM 的是
+          // 未沙箱化的父进程。判定 server 失常，杀掉并放走所有等待者。
+          const error = new Error(
+            `MCP server ${this.id} 输出超过 ${this.#maxLineBufferChars} 字符仍无完整消息，已终止`,
+          );
+          this.#process?.kill("SIGKILL");
+          this.#failPending(error);
+          return;
+        }
         this.#consumeLines();
       }
       this.#buffer += decoder.decode();
@@ -378,10 +465,11 @@ export class McpStdioClient {
     if (!isRecord(message)) return;
 
     if ("id" in message && (typeof message.id === "number" || typeof message.id === "string")) {
-      if (typeof message.id !== "number") return;
-      const pending = this.#pending.get(message.id);
+      // JSON-RPC 允许 string id；有的 server 就是回字符串。统一用 String(id)
+      // 匹配 —— 之前直接丢弃非 number id，应答永远等不到，请求挂死。
+      const pending = this.#pending.get(String(message.id));
       if (pending === undefined) return;
-      this.#pending.delete(message.id);
+      this.#pending.delete(String(message.id));
       if (isRecord(message.error)) {
         pending.reject(errorFromRpc(message as unknown as JsonRpcFailure));
       } else {

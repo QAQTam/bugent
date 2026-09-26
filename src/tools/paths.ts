@@ -15,7 +15,7 @@
  */
 
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 
 export class PathEscapeError extends Error {
   readonly input: string;
@@ -27,11 +27,41 @@ export class PathEscapeError extends Error {
   }
 }
 
-function assertInside(root: string, target: string, input: string): void {
-  if (target === root) return;
-  if (!target.startsWith(root.endsWith(sep) ? root : root + sep)) {
-    throw new PathEscapeError(input, root);
+/**
+ * 表示"整个文件系统"。
+ *
+ * 作为 `resolveReadable` 的 extraRoots 元素时代表"允许任意路径"。用它在调用点
+ * 显式写出意图，比传一个裸 `sep` 更容易看出来这里放宽了边界。
+ */
+export const ANYWHERE = sep;
+
+/** target 是否落在 root 内（含 root 本身）。 */
+function isInside(root: string, target: string): boolean {
+  return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+function assertInsideAny(roots: readonly string[], target: string, input: string): void {
+  for (const root of roots) {
+    if (isInside(root, target)) return;
   }
+  throw new PathEscapeError(input, roots.join(" | "));
+}
+
+/**
+ * 把一个"根"规范成真实路径。
+ *
+ * 产物目录（`~/.bugent/output/<session>/`）在第一次落盘前并不存在，直接
+ * `realpathSync` 会抛错、白名单整个失效。所以对**最近存在的祖先**取真实路径，
+ * 再把剩余部分拼回去 —— 与 resolveWithin 对目标做的是同一件事。
+ */
+function canonicalRoot(path: string): string {
+  const absolute = resolve(path);
+  if (existsSync(absolute)) return realpathSync(absolute);
+  const existing = nearestExisting(absolute);
+  if (!existsSync(existing)) return absolute;
+  const real = realpathSync(existing);
+  const rest = relative(existing, absolute);
+  return rest === "" ? real : resolve(real, rest);
 }
 
 /** 找到路径上最近的一个已存在的祖先（用于对新文件也做 realpath 校验）。 */
@@ -46,33 +76,62 @@ function nearestExisting(target: string): string {
 }
 
 /**
- * 把用户传入的路径解析成工作目录内的绝对路径；越界直接抛错。
+ * 把用户传入的路径解析成"允许访问的绝对路径"；越界直接抛错。
+ *
+ * 相对路径一律相对 `cwd` 解析。`extraRoots` 是**额外的只读白名单**：目前只有
+ * `read_file` 用到它，用来读回工具自己落在 `~/.bugent/output/<session>/` 的
+ * 完整输出 —— bash 会把那个路径告诉模型，模型必须真的读得到。
+ *
+ * 写路径**不要**传 extraRoots：写只能落在工作区内。
  */
-export function resolveWithin(cwd: string, input: string): string {
-  const root = realpathSync(resolve(cwd));
-  const target = resolve(root, input);
+export function resolveReadable(
+  cwd: string,
+  input: string,
+  extraRoots: readonly string[] = [],
+): string {
+  const roots = [realpathSync(resolve(cwd)), ...extraRoots.map(canonicalRoot)];
+  const target = resolve(roots[0]!, input);
 
-  assertInside(root, target, input);
+  assertInsideAny(roots, target, input);
 
   // 符号链接防护（一）：对最近存在的祖先取真实路径再校验
   const existing = nearestExisting(target);
   if (existsSync(existing)) {
-    assertInside(root, realpathSync(existing), input);
+    assertInsideAny(roots, realpathSync(existing), input);
   }
 
-  // 符号链接防护（二）：最后一段本身是符号链接时，必须能证明它指向工作区内。
+  // 符号链接防护（二）：最后一段本身是符号链接时，必须能证明它指向允许范围内。
   // 悬空链接 realpath 会抛错 —— 解不出来就无法证明，一律拒绝。
   if (lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink() === true) {
     let resolved: string;
     try {
       resolved = realpathSync(target);
     } catch {
-      throw new PathEscapeError(input, root);
+      throw new PathEscapeError(input, roots.join(" | "));
     }
-    assertInside(root, resolved, input);
+    assertInsideAny(roots, resolved, input);
   }
 
   return target;
+}
+
+/**
+ * 把用户传入的路径解析成工作目录内的绝对路径；越界直接抛错。
+ *
+ * 写路径与所有路径型工具走这里 —— 等价于 `resolveReadable(cwd, input, [])`。
+ */
+export function resolveWithin(cwd: string, input: string): string {
+  return resolveReadable(cwd, input);
+}
+
+/**
+ * 按"本次调用是否获准越界"选择解析宽度。
+ *
+ * 所有**写**路径都该走这里：`grantedOutside` 来自 `ctx.grant.writeOutside`，
+ * 由闸门按次授权得出，不是档位。
+ */
+export function resolveForWrite(cwd: string, input: string, grantedOutside: boolean): string {
+  return grantedOutside ? resolveReadable(cwd, input, [ANYWHERE]) : resolveWithin(cwd, input);
 }
 
 /** 转成相对工作目录的展示路径。 */

@@ -40,7 +40,11 @@ export class LezerMarkdownBoundaryTracker implements MarkdownBoundaryTracker {
       this.#tree = this.#parser.parse(text);
       this.#hasLinkReference = this.#containsLinkReference(this.#tree);
     } else {
-      const fragments = TreeFragment.addTree(this.#tree);
+      // partial=true 会把 fragment 末端标成 openEnd，禁止复用上一次解析的
+      // 尾部 block。否则表头刚输出、delimiter 尚未到达时，表头会先被解析成
+      // Paragraph；下一帧 delimiter 到达后，旧 Paragraph 仍被复用，Table
+      // 永远无法在增量树里成形，边界跟踪器就会把它永久冻进 stable 前缀。
+      const fragments = TreeFragment.addTree(this.#tree, [], true);
       this.#tree = this.#parser.parse(text, fragments);
       if (this.#tree.topNode.lastChild?.name === "LinkReference") {
         this.#hasLinkReference = true;

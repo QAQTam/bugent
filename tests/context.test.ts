@@ -135,6 +135,34 @@ describe("P2 · 缓存前缀稳定性", () => {
     expect(prefixHash(a)).not.toBe(prefixHash(b));
   });
 
+  test("PERF-001: 增量链与 restore 重建对同一前缀给出同一指纹", () => {
+    const live = newSession("SYS");
+    live.appendUser("hello");
+    live.appendAssistant("hi", [{ id: "c1", name: "echo", args: {} }]);
+    live.appendToolResult("c1", "echo:x");
+
+    const restored = new AgentSession({
+      id: "test-restore",
+      system: "SYS",
+      client: createMockClient({ script: [] }),
+      model: "test-model",
+      now: () => 0,
+      restore: [...live.messages],
+      nextMsgId: live.messages.length,
+    });
+
+    expect(restored.prefixHash()).toBe(live.prefixHash());
+
+    // 同一个 upto（含历史位置）也一致：链查表 vs 逐条延伸
+    const earlier = live.messages[3]!.msgid;
+    expect(restored.prefixHash(earlier)).toBe(live.prefixHash(earlier));
+
+    // 追加后两者仍同步
+    live.appendUser("next");
+    restored.appendUser("next");
+    expect(restored.prefixHash()).toBe(live.prefixHash());
+  });
+
   test("session.noteContextSent 记录的前缀在只追加后仍匹配", () => {
     const session = newSession();
     session.appendUser("hi");

@@ -196,8 +196,12 @@ function dedupePaths(paths: readonly string[]): string[] {
  * Discover and validate skills from all configured roots.
  *
  * Roots are ordered from lowest to highest precedence. A later skill with the
- * same name overrides an earlier one. Invalid skill files fail discovery
- * instead of silently disappearing, because a missing tool is harder to debug.
+ * same name overrides an earlier one.
+ *
+ * 容错（BUG-025）：单个坏 `SKILL.md` / 同名冲突**降级为 stderr 告警并跳过**，
+ * 不再让整个会话起不来 —— 之前一个无关仓库里的残缺文件就能把启动打挂。
+ * 同名冲突时高优先级 root（后遍历的）获胜，被遮蔽的文件告警指出路径，
+ * 方便用户排查"为什么我的技能没生效"。
  */
 export async function discoverSkills(
   options: DiscoverSkillsOptions,
@@ -209,16 +213,28 @@ export async function discoverSkills(
   const maxDepth = options.maxDepth ?? 8;
   const byName = new Map<string, SkillDefinition>();
 
+  const warn = (message: string): void => {
+    process.stderr.write(`\x1b[33m[skills]\x1b[0m ${message}\n`);
+  };
+
   for (const root of roots) {
     const canonicalRoot = await realpath(root).catch(() => root);
     const files = await findSkillFiles(canonicalRoot, maxDepth);
     for (const file of files) {
       const canonicalFile = await realpath(file).catch(() => file);
-      const skill = await loadSkillFile(canonicalFile, canonicalRoot);
+      let skill: SkillDefinition;
+      try {
+        skill = await loadSkillFile(canonicalFile, canonicalRoot);
+      } catch (error) {
+        warn(
+          `跳过无效技能 ${canonicalFile}：${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
       const previous = byName.get(skill.name);
       if (previous !== undefined && previous.root === canonicalRoot) {
-        throw new Error(
-          `skill name "${skill.name}" 在 ${canonicalRoot} 内重复：${previous.file} 与 ${skill.file}`,
+        warn(
+          `skill name "${skill.name}" 在 ${canonicalRoot} 内重复：${previous.file} 与 ${skill.file}，保留后者`,
         );
       }
       byName.set(skill.name, skill);

@@ -65,6 +65,14 @@ export class StreamingPatchParser {
     return this.#state.hunks.map(cloneHunk);
   }
 
+  /**
+   * 只读视图（PERF-004）：进度统计只读字段，不需要 deep clone。
+   * 调用方不得改写返回的 hunk —— 那是解析器内部状态。
+   */
+  liveHunks(): readonly Hunk[] {
+    return this.#state.hunks;
+  }
+
   #error(message: string, lineNumber = this.#lineNumber): never {
     throw new PatchParseError(message, lineNumber);
   }
@@ -168,7 +176,9 @@ export class StreamingPatchParser {
     }
 
     if (mode === "add-file") {
-      if (this.#handleHunkHeadersAndEndPatch(trimmed)) return;
+      // BUG-021：同 update-file —— 头标记只认顶格（trimEnd 去尾随空白），
+      // `+*** ...` 是正文内容而不是新 hunk 头。
+      if (this.#handleHunkHeadersAndEndPatch(line.trimEnd())) return;
       if (line.startsWith("+")) {
         const hunk = this.#state.hunks.at(-1);
         if (hunk?.type !== "add") this.#error("internal add-file state mismatch");
@@ -189,7 +199,12 @@ export class StreamingPatchParser {
 
     if (typeof mode === "object" && mode.type === "update-file") {
       const updateLine = line.trimEnd();
-      if (this.#handleHunkHeadersAndEndPatch(updateLine.trim())) return;
+      // BUG-021：hunk 头 / End Patch 的识别**不能 trimStart** —— patch 正文
+      // 里以 `*** ` 开头的上下文行（比如给本仓库自己的文档打补丁）加上前缀
+      // 空格后与头标记在 trim 后无法区分，整段 hunk 会被静默截断/串位。
+      // 改为只认"顶格"的头：`*** Update File:` 顶格是头，` *** Update File:`
+      // 是上下文内容 —— 这正是 apply_patch 格式的本意。
+      if (this.#handleHunkHeadersAndEndPatch(updateLine)) return;
       const hunk = this.#lastUpdateHunk();
       if (hunk === undefined) this.#error("internal update-file state mismatch");
 

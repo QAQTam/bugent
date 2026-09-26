@@ -8,6 +8,7 @@
 
 import type { JSONSchema, ToolCall, ToolInputFormat, ToolSchema } from "../provider/types.ts";
 import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
+import type { AuthorizationOutcome } from "../permission/authorization.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
@@ -42,6 +43,13 @@ export interface ToolCtx {
   /** 当前会话 id，用于把工具产物按会话分目录。 */
   sessionId: string;
   /**
+   * 本次调用获准的越界能力（由闸门在调用前按次授权）。
+   *
+   * 缺省表示没有越界授权 —— 写工具必须据此决定路径解析的宽度：
+   * `grant.writeOutside` 为 true 才能写工作区之外。
+   */
+  grant?: CapabilityGrant;
+  /**
    * 流式进度回调：长时间运行的工具（如 bash）可以边跑边把输出推给 UI。
    * 这只是展示用，**不参与**最终回传给模型的结果。
    *
@@ -49,10 +57,11 @@ export interface ToolCtx {
    */
   onProgress?: (chunk: string, stream: "stdout" | "stderr") => void;
   /**
-   * 请求一次性能力授权（目前只有联网）。返回 true 表示用户批准。
-   * 未提供时视为不可申请。
+   * 请求一次性能力授权（联网 / 写工作区外）。返回**三态**：
+   * `approved` / `denied` / `timeout` —— 拒绝与超时必须能区分开，否则模型
+   * 分不清该换个做法还是该停下来问人。未提供时视为不可申请。
    */
-  onRequestCapability?: (escalation: CapabilityEscalation) => Promise<boolean>;
+  onRequestCapability?: (escalation: CapabilityEscalation) => Promise<AuthorizationOutcome>;
   /**
    * 向用户提问（ask_user 工具用）。
    * 返回 undefined 表示用户中止了回答。
@@ -76,7 +85,9 @@ export interface ToolCtx {
 
 /** 权限闸门接口（实现在 src/permission/gate.ts）。 */
 export interface ToolGate {
-  check(request: PermissionRequest): Promise<{ allowed: boolean; reason?: string }>;
+  check(
+    request: PermissionRequest,
+  ): Promise<{ allowed: boolean; reason?: string; grant?: CapabilityGrant }>;
 }
 
 export interface Tool<I = unknown, O = unknown> {
@@ -106,13 +117,24 @@ export interface Tool<I = unknown, O = unknown> {
    */
   defaultPermission?: PermissionDecision;
   /**
-   * 这个工具需要档位提供什么能力（写工作区 / 联网）。
+   * 这个工具需要档位提供什么能力（写工作区）。
    *
    * **只有进程内工具需要声明**：它们没有内核兜底，档位必须由闸门来执行。
    * 走沙箱的工具（bash）不用声明 —— read-only 档下它想写也写不动，
    * 内核会把 `sed -i`、`python -c "open(...,'w')"`、`>` 重定向一起挡住。
+   *
+   * 注意这里**只能静态声明**。像"这次是不是写到工作区之外"这种由路径参数
+   * 决定的事，用 `writesOutside` 逐次判断。
    */
   requires?: ModeRequirement;
+  /**
+   * 这次调用是否会写到**工作区之外**。逐次判定，缺省视为 false。
+   *
+   * 为什么要单独一个钩子：`requires` 是工具的静态属性，而"越不越界"取决于
+   * 参数。写工具实现它之后，闸门才能在**调用前**发现越界、并按次问用户，
+   * 而不是等路径解析抛错、用户只看到一句拒绝。
+   */
+  writesOutside?(input: unknown, ctx: ToolCtx): boolean;
   /**
    * 并发执行时需要占用的资源。
    *
@@ -166,17 +188,29 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/** 把一次调用翻译成权限系统能理解的形式。 */
-export function describeCall(tool: Tool, call: ToolCall): PermissionRequest {
+/**
+ * 把一次调用翻译成权限请求。
+ *
+ * `ctx` 用于**逐次**判断越界（`writesOutside`）—— 静态的 `tool.requires`
+ * 只能表达"这个工具要写工作区"，表达不了"这一次写到了工作区之外"。
+ * 传 ctx 时才会做这个判定；不传则只带静态声明（老调用点的兼容路径）。
+ */
+export function describeCall(tool: Tool, call: ToolCall, ctx?: ToolCtx): PermissionRequest {
   const described = tool.describe(call.args);
+
+  const requires: ModeRequirement = { ...(tool.requires ?? {}) };
+  if (ctx !== undefined && tool.writesOutside?.(call.args, ctx) === true) {
+    requires.writeOutside = true;
+  }
+
   return {
     tool: tool.name,
     resource: described.resource,
     summary: described.summary,
     // requires 必须带上。进程内工具没有内核兜底，档位能力全靠闸门来执行 ——
-    // 漏掉它，gate 里那段 modeSatisfies 检查就永远不会触发，read-only 档位
+    // 漏掉它，gate 里那段 defaultApproves 检查就永远不会触发，read-only 档位
     // 对 write_file / edit_file / apply_patch 形同虚设（实测能直接写盘）。
-    ...(tool.requires !== undefined ? { requires: tool.requires } : {}),
+    ...(Object.keys(requires).length > 0 ? { requires } : {}),
   };
 }
 
@@ -278,12 +312,15 @@ export class ToolRegistry {
     }
 
     try {
+      // 闸门在调用前判定；批准越界时把授权带进本次调用的 ctx。
+      let grant: CapabilityGrant | undefined;
       if (this.#gate !== undefined) {
-        const request = describeCall(tool, call);
+        const request = describeCall(tool, call, ctx);
         const verdict = await this.#gate.check(request);
         if (!verdict.allowed) {
           return { ok: false, output: denialMessage(request, verdict.reason) };
         }
+        grant = verdict.grant;
       }
 
       if (ctx.signal.aborted) {
@@ -295,6 +332,7 @@ export class ToolRegistry {
       const previousPresentation = ctx.onPresentation;
       const executionCtx: ToolCtx = {
         ...ctx,
+        ...(grant !== undefined ? { grant } : {}),
         onWorkspaceChange: (edit) => {
           workspace.push(edit);
           previousWorkspaceChange?.(edit);

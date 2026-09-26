@@ -106,7 +106,16 @@ describe("Goal P0 · schema v10", () => {
     );
 
     expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(10);
+    expect(SCHEMA_VERSION).toBe(11);
+    // v11：同构冗余索引应被清理（PERF-006）
+    const indexes = new Set(
+      (
+        upgraded
+          .query("SELECT name FROM sqlite_master WHERE type = 'index'")
+          .all() as { name: string }[]
+      ).map((row) => row.name),
+    );
+    expect(indexes.has("idx_messages_session")).toBe(false);
     for (const table of [
       "session_goals",
       "goal_checkpoints",
@@ -399,7 +408,7 @@ describe("Goal P0 · repository", () => {
       endedAt: 55,
     });
     expect(repository.requireGoal("goal1")).toMatchObject({
-      tokensUsed: 150,
+      tokensUsed: 70,
       timeUsedSeconds: 5,
     });
     expect(() =>

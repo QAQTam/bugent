@@ -168,7 +168,8 @@ export function createWorkerAgentExecutor(
             onToolCall: (call) => {
               context.report(`tool call: ${call.name}`, { toolCallId: call.id });
             },
-            onRequestCapability: async () => false,
+            // A worker never owns the user interaction channel.
+            onRequestCapability: async () => "denied",
             onAskUser: async () => undefined,
             onExtensionRoleFallback: async () => false,
           },

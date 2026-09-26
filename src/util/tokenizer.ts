@@ -115,12 +115,38 @@ function preTokenize(text: string): string[] {
     }
     pieces = next;
   }
-  return pieces.map(toByteLevel).filter((piece) => piece.length > 0);
+  return pieces
+    .map(toByteLevel)
+    .filter((piece) => piece.length > 0)
+    .flatMap(capPiece);
+}
+
+/**
+ * 单片符号数上限（PERF-003）。
+ *
+ * BPE 是 O(n²)：CJK 连续段 / 长空白 / 长 base64 在预切分后是**一整片**，
+ * 1MB 中文 = 1 片 ≈ 3×10⁶ 个符号 ≈ 10¹² 次两两扫描 —— UI 直接冻结数分钟。
+ * 超过上限的片切成等长小块分别 BPE：正常文本（片段远小于上限）的计数
+ * **逐字节不变**；超长片段的估算会与真 tokenizer 有微小偏差 —— 对
+ * "上下文窗口占用估算"这个用途，可接受。宁可估算略偏，不要冻结。
+ */
+const MAX_PIECE_SYMBOLS = 128;
+
+function capPiece(piece: string): string[] {
+  if (piece.length <= MAX_PIECE_SYMBOLS) return [piece];
+  const out: string[] = [];
+  for (let start = 0; start < piece.length; start += MAX_PIECE_SYMBOLS) {
+    out.push(piece.slice(start, start + MAX_PIECE_SYMBOLS));
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
 /* BPE                                                                 */
 /* ------------------------------------------------------------------ */
+
+/** 缓存条目上限（LRU 淘汰）。 */
+const MAX_CACHE_ENTRIES = 8192;
 
 /** merges 的 key：字节级字符里不会出现 `\u0000`，用它当分隔符不会有歧义。 */
 function pairKey(left: string, right: string): string {
@@ -134,7 +160,6 @@ export class DeepSeekBpeCounter implements TokenCounter {
   #byteFallback: boolean;
   /** 片 → token 数缓存。流式文本里空白、标点、常见词高度重复，命中率很高。 */
   #cache = new Map<string, number>();
-
   constructor(options: { merges: Iterable<unknown>; vocab: Iterable<string>; byteFallback?: boolean }) {
     this.#ranks = new Map();
     let rank = 0;
@@ -152,9 +177,32 @@ export class DeepSeekBpeCounter implements TokenCounter {
     return this.#vocab.size;
   }
 
+  /** 缓存读取：命中即刷新新鲜度（Map 插入序 = LRU 序）。 */
+  #cacheGet(piece: string): number | undefined {
+    const cached = this.#cache.get(piece);
+    if (cached === undefined) return undefined;
+    this.#cache.delete(piece);
+    this.#cache.set(piece, cached);
+    return cached;
+  }
+
+  /**
+   * 缓存写入：满了先淘汰最旧的一条（PERF-003）。之前是"满了就永不缓存"，
+   * 长会话里词表外片段越积越多，命中率归零后每片都重跑 BPE。
+   */
+  #cacheSet(piece: string, total: number): void {
+    if (this.#cache.has(piece)) this.#cache.delete(piece);
+    while (this.#cache.size >= MAX_CACHE_ENTRIES) {
+      const oldest = this.#cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.#cache.delete(oldest);
+    }
+    this.#cache.set(piece, total);
+  }
+
   /** 一个预切分片段（已转成字节级字符）里的 token 数。 */
   #countPiece(piece: string): number {
-    const cached = this.#cache.get(piece);
+    const cached = this.#cacheGet(piece);
     if (cached !== undefined) return cached;
 
     let symbols: string[] = [...piece];
@@ -188,7 +236,7 @@ export class DeepSeekBpeCounter implements TokenCounter {
       else total += 1;
     }
 
-    if (this.#cache.size < 8192) this.#cache.set(piece, total);
+    this.#cacheSet(piece, total);
     return total;
   }
 

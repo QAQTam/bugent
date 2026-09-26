@@ -12,9 +12,11 @@ import type {
   Usage,
 } from "../provider/types.ts";
 import { mergeUsage } from "../provider/types.ts";
+import { safeToolCallId } from "../util/id.ts";
 import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
 import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
+import type { AuthorizationOutcome } from "../permission/authorization.ts";
 import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
 
 export interface ToolCallDelta {
@@ -50,12 +52,15 @@ export interface LoopHooks {
   onToolProgress?(call: ToolCall, chunk: string, stream: "stdout" | "stderr"): void;
   onToolResult?(call: ToolCall, result: ToolExecution, message?: StoredMessage): void;
   /**
-   * 工具请求一次性能力授权（目前是联网）。
+   * 工具请求一次性能力授权（联网 / 写工作区外）。
    *
-   * 调用时机是**工具已经真跑过并失败了** —— 所以 escalation 里带着真实命令
-   * 与报错，用户知道自己在批准什么。返回 true 表示批准。
+   * 调用时机有两种：**执行前**（bash 静态判定出越界，命令还没跑）与
+   * **失败后**（联网必须先拿到真实报错，用户才知道自己在批准什么）。
+   *
+   * 返回三态：只有 `approved` 才继续；`denied` 与 `timeout` 都是否定结论，
+   * 且必须能让模型区分开。
    */
-  onRequestCapability?(call: ToolCall, escalation: CapabilityEscalation): Promise<boolean>;
+  onRequestCapability?(call: ToolCall, escalation: CapabilityEscalation): Promise<AuthorizationOutcome>;
   /** 向用户提问。返回 undefined 表示用户中止。 */
   onAskUser?(
     call: ToolCall,
@@ -70,6 +75,9 @@ export interface LoopHooks {
 }
 
 export const DEFAULT_MAX_STEPS = 800;
+
+/** 工具参数流式预览的解析节流间隔（PERF-004）。 */
+const TOOL_ARGS_PREVIEW_INTERVAL_MS = 40;
 
 export interface RunTurnOptions {
   tools?: ToolRegistry;
@@ -128,6 +136,13 @@ interface PendingCall {
   id: string;
   name: string;
   args: string;
+  /**
+   * 流式预览用的节流解析（PERF-004）：每个 delta 都对**累积**的 args 全量
+   * JSON.parse 是 O(L²)，500KB 的 write_file 会把事件循环拖死。预览值
+   * 最多滞后 40ms；真正执行用的解析在流结束后做一次（精确）。
+   */
+  previewArgs?: unknown;
+  previewAt?: number;
 }
 
 /** 把多组 hooks 合成一组（TUI 渲染 + 审计落盘互不干扰）。 */
@@ -165,7 +180,8 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
           return group.onRequestCapability(call, escalation);
         }
       }
-      return false;
+      // 没有交互入口 = 没人能批准。这是"拒绝"，不是"超时"。
+      return "denied";
     },
     onAskUser: async (call, questions) => {
       for (const group of active) {
@@ -277,13 +293,26 @@ export async function runTurn(
                 if (existing === undefined) pending.set(chunk.id, acc);
                 if (chunk.name.length > 0) acc.name = chunk.name;
                 acc.args += chunk.argsDelta;
-                hooks.onToolCallDelta?.({
-                  id: acc.id,
-                  name: acc.name,
-                  argsDelta: chunk.argsDelta,
-                  rawArgs: acc.args,
-                  args: parseToolArgs(acc.args, tools, acc.name),
-                });
+                if (hooks.onToolCallDelta !== undefined) {
+                  // 节流解析：预览值最多滞后 TOOL_ARGS_PREVIEW_INTERVAL_MS。
+                  // 没有消费方时整个解析都不做 —— 旧实现把 parse 放在对象
+                  // 字面量里，即使没人监听也每个 delta 全量 JSON.parse。
+                  const now = Date.now();
+                  if (
+                    acc.previewArgs === undefined ||
+                    now - (acc.previewAt ?? 0) >= TOOL_ARGS_PREVIEW_INTERVAL_MS
+                  ) {
+                    acc.previewArgs = parseToolArgs(acc.args, tools, acc.name);
+                    acc.previewAt = now;
+                  }
+                  hooks.onToolCallDelta({
+                    id: acc.id,
+                    name: acc.name,
+                    argsDelta: chunk.argsDelta,
+                    rawArgs: acc.args,
+                    args: acc.previewArgs,
+                  });
+                }
                 break;
               }
 
@@ -325,8 +354,8 @@ export async function runTurn(
         }
       }
 
-      const calls: ToolCall[] = [...pending.values()].map((acc) => ({
-        id: acc.id,
+      const calls: ToolCall[] = [...pending.values()].map((acc, index) => ({
+        id: safeToolCallId(acc.id, index),
         name: acc.name,
         args: parseToolArgs(acc.args, tools, acc.name),
       }));

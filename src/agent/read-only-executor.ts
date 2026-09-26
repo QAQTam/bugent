@@ -139,7 +139,7 @@ export function createReadOnlyAgentExecutor(
             context.report(`tool call: ${call.name}`, { toolCallId: call.id });
           },
           // A child never owns the user interaction channel.
-          onRequestCapability: async () => false,
+          onRequestCapability: async () => "denied",
           onAskUser: async () => undefined,
           onExtensionRoleFallback: async () => false,
         },

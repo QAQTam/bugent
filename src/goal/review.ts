@@ -238,6 +238,7 @@ export function createReadOnlyReviewRunner(
           maxSteps: SUBAGENT_MAX_STEPS,
         }),
       });
+      const startedAt = performance.now();
       try {
         const result = await transport.wait(await transport.start(spec));
         if (result.status !== "completed") {
@@ -247,7 +248,12 @@ export function createReadOnlyReviewRunner(
         if (output === undefined || typeof output.text !== "string") {
           throw new Error("reviewer agent returned no text output");
         }
-        return parseReviewResult(output.text);
+        const parsed = parseReviewResult(output.text);
+        return {
+          ...parsed,
+          usage: output.usage,
+          durationMs: Math.max(0, performance.now() - startedAt),
+        };
       } finally {
         await transport.dispose();
       }
@@ -300,5 +306,7 @@ export function withForcedRejection(
       ...findings.map(({ id: _id, reviewId: _reviewId, ...finding }) => finding),
     ],
     unresolvedQuestions: result.unresolvedQuestions,
+    ...(result.usage !== undefined ? { usage: result.usage } : {}),
+    ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
   };
 }

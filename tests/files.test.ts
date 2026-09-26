@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, chmod, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   createEditFileTool,
   createReadFileTool,
@@ -233,25 +233,40 @@ describe("P7 · edit_file", () => {
 });
 
 describe("P7 · 路径约束", () => {
-  test("../ 逃逸被拒绝", async () => {
+  test("读工作区之外是允许的 —— 档位不限制读", async () => {
     const cwd = await workspace();
-    await expect(readTool.run({ path: "../secret.txt" }, ctxFor(cwd))).rejects.toThrow(/escapes the workspace/);
+    const outside = await workspace("bugent-outside-");
+    await writeFile(join(outside, "secret.txt"), "secret");
+
+    expect(await readTool.run({ path: join(outside, "secret.txt") }, ctxFor(cwd))).toContain("secret");
   });
 
-  test("绝对路径指向工作区外被拒绝", async () => {
+  test("相对路径 ../ 读也是允许的", async () => {
+    const cwd = await workspace();
+    const parent = dirname(cwd);
+    const name = `bugent-sibling-${basename(cwd)}.txt`;
+    await writeFile(join(parent, name), "sibling");
+    try {
+      expect(await readTool.run({ path: `../${name}` }, ctxFor(cwd))).toContain("sibling");
+    } finally {
+      await rm(join(parent, name), { force: true });
+    }
+  });
+
+  test("绝对路径指向工作区外被拒绝（写，未获越界授权）", async () => {
     const cwd = await workspace();
     await expect(
       writeTool.run({ path: "/tmp/bugent-should-not-be-written.txt", content: "x" }, ctxFor(cwd)),
     ).rejects.toThrow(/escapes the workspace/);
   });
 
-  test("符号链接逃逸被拒绝（读取）", async () => {
+  test("符号链接指向工作区外：读允许（读是自由的）", async () => {
     const cwd = await workspace();
     const outside = await workspace("bugent-outside-");
     await writeFile(join(outside, "target.txt"), "secret");
     await symlink(outside, join(cwd, "link"));
 
-    await expect(readTool.run({ path: "link/target.txt" }, ctxFor(cwd))).rejects.toThrow(/escapes the workspace/);
+    expect(await readTool.run({ path: "link/target.txt" }, ctxFor(cwd))).toContain("secret");
   });
 
   test("符号链接逃逸被拒绝（新建文件）", async () => {

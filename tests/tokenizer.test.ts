@@ -52,6 +52,33 @@ function syntheticTokenizer(vocab: Record<string, number>, merges: string[]): un
 }
 
 describe("DeepSeek BPE 计数", () => {
+  test("PERF-003: 超长片段在切片上限下有限时间完成，计数仍为正", () => {
+    // 旧实现：30 万字符的连续段是一片，BPE O(n²) ≈ 10¹¹ 次操作 —— 分钟级冻结。
+    // 现实现：128 符号切片上限，等价文本应在亚秒级完成。
+    const counter = new DeepSeekBpeCounter({
+      merges: ["a a"],
+      vocab: ["a", "aa"],
+    });
+    const text = "a".repeat(300_000);
+    const started = Date.now();
+    const total = counter.count(text);
+    const elapsed = Date.now() - started;
+    expect(total).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(2_000);
+  });
+
+  test("PERF-003: LRU 淘汰后重复片段的计数保持一致", () => {
+    const counter = new DeepSeekBpeCounter({
+      merges: ["h e", "e l", "l l", "l o"],
+      vocab: ["h", "e", "l", "o", "he", "el", "ll", "lo"],
+    });
+    // 灌入超过缓存容量的不同片段，再回访最早的那个：淘汰重算的结果必须一致
+    const pieces = Array.from({ length: 8_500 }, (_, index) => `piece-${index}`);
+    const firstPass = pieces.map((piece) => counter.count(piece));
+    const secondPass = pieces.map((piece) => counter.count(piece));
+    expect(secondPass).toEqual(firstPass);
+  });
+
   test("按 merges 的 rank 合并到词表里的整词", () => {
     const counter = new DeepSeekBpeCounter({
       merges: ["h e", "l l", "ll o", "he llo"],

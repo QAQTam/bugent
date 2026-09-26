@@ -22,8 +22,8 @@ function makeStore(): SessionStore {
 }
 
 const interaction: SessionInteraction = {
-  askPermission: async () => true,
-  confirmModeChange: async () => true,
+  askPermission: async () => "approved",
+  confirmModeChange: async () => "approved",
 };
 
 function makeRuntime(store: SessionStore, mode: "read-only" | "workspace-write" | "no-sandbox") {

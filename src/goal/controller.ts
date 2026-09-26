@@ -29,6 +29,7 @@ import type {
   RiskLevel,
   RiskPolicy,
   ReviewPolicy,
+  ReviewResult,
   TodoSnapshot,
 } from "./types.ts";
 import type { AgentIntegrationRecord } from "../agent/integrator.ts";
@@ -195,6 +196,24 @@ function renderGoalStatus(goal: Goal): string {
     `- Tokens used: ${goal.tokensUsed}${goal.tokenBudget === undefined ? "" : ` / ${goal.tokenBudget}`}`,
     `- Continuations: ${goal.continuationCount}`,
     `- Blocked streak: ${goal.blockedStreak}`,
+  ].join("\n");
+}
+
+function renderBudgetLimit(goal: Goal): string {
+  const remaining =
+    goal.tokenBudget === undefined ? "unbounded" : String(Math.max(0, goal.tokenBudget - goal.tokensUsed));
+  return [
+    "# Goal Budget Limit",
+    "",
+    "The active goal has reached its token budget.",
+    "",
+    `- Objective: ${goal.objective}`,
+    `- Tokens used: ${goal.tokensUsed}`,
+    `- Token budget: ${goal.tokenBudget ?? "unbounded"}`,
+    `- Tokens remaining: ${remaining}`,
+    `- Active time: ${goal.timeUsedSeconds}s`,
+    "",
+    "Do not start new substantive work for this goal. Wrap up the current turn soon: summarize useful progress, identify remaining work or blockers, and leave the user with a clear next step.",
   ].join("\n");
 }
 
@@ -385,6 +404,8 @@ export class GoalController {
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
   #waitingUser = false;
+  /** 同一个 Goal 只注入一次 budget-limit 收尾指令。 */
+  #budgetLimitReportedGoalId: string | undefined;
 
   constructor(options: GoalControllerOptions) {
     this.repository = options.repository;
@@ -686,13 +707,17 @@ export class GoalController {
     if (successCriteriaText.length === 0) {
       throw new Error("a goal needs at least one verifiable success criterion");
     }
-    if (input.tokenBudget !== undefined && input.tokenBudget <= 0) {
+    // maxTokenBudget is both a ceiling and the default for goals that omit an
+    // explicit budget. This prevents a configured cap from silently producing
+    // an unbounded goal.
+    const tokenBudget = input.tokenBudget ?? this.maxTokenBudget;
+    if (tokenBudget !== undefined && tokenBudget <= 0) {
       throw new Error("goal token budget must be greater than 0");
     }
     if (
-      input.tokenBudget !== undefined &&
+      tokenBudget !== undefined &&
       this.maxTokenBudget !== undefined &&
-      input.tokenBudget > this.maxTokenBudget
+      tokenBudget > this.maxTokenBudget
     ) {
       throw new Error(`goal token budget must not exceed the configured limit ${this.maxTokenBudget}`);
     }
@@ -711,7 +736,7 @@ export class GoalController {
       nonGoals: normalizeLines(input.nonGoals),
       riskPolicy:
         input.riskPolicy ?? defaultRiskPolicy("medium", this.defaultReviewPolicy),
-      ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       phase: "draft",
     });
 
@@ -719,6 +744,7 @@ export class GoalController {
     const planning = this.repository.setGoalPhase(goal.id, "planning");
     this.session.appendGoalContext(renderGoalContract(planning));
     this.revokeCreateAuthorization();
+    this.#budgetLimitReportedGoalId = undefined;
     return planning;
   }
 
@@ -925,6 +951,7 @@ export class GoalController {
       );
     }
 
+    this.#recordReviewUsage(goal.id, review.id, result);
     const gateErrors = reviewResultRejection(result, checkpoint.acceptanceCriteria);
     const completedReview = this.repository.completeReview(
       review.id,
@@ -1043,11 +1070,15 @@ export class GoalController {
     );
     if (completed.status === "approved") {
       this.repository.setGoalStatus(goal.id, "complete");
+      // Completion wins over budget status: still persist the final auditor's
+      // cost, but do not rewrite a completed goal back to budget_limited.
+      this.#recordReviewUsage(goal.id, review.id, result, { allowBudgetLimit: false });
       await this.syncHandoff("reviewer");
       return { approved: true, review: completed, errors: [] };
     }
 
     this.repository.setGoalPhase(goal.id, "executing");
+    this.#recordReviewUsage(goal.id, review.id, result);
     await this.syncHandoff("reviewer");
     return { approved: false, review: completed, errors };
   }
@@ -1064,6 +1095,16 @@ export class GoalController {
       goal.phase !== "clarifying"
     ) {
       throw new Error("the goal contract is already in planning and cannot be rewritten in place; clear it and initialize again");
+    }
+    if (input.tokenBudget !== undefined && input.tokenBudget !== goal.tokenBudget) {
+      this.#budgetLimitReportedGoalId = undefined;
+    }
+    if (
+      input.tokenBudget !== undefined &&
+      this.maxTokenBudget !== undefined &&
+      input.tokenBudget > this.maxTokenBudget
+    ) {
+      throw new Error(`goal token budget must not exceed the configured limit ${this.maxTokenBudget}`);
     }
     const updated = this.repository.updateGoalContract(goal.id, {
       rawIntent: input.rawIntent,
@@ -1085,6 +1126,7 @@ export class GoalController {
   clearGoal(): string {
     const goal = this.requireCurrent();
     if (!this.repository.deleteGoal(goal.id)) throw new Error(`failed to delete goal: ${goal.id}`);
+    this.#budgetLimitReportedGoalId = undefined;
     this.session.enqueueInjection(
       `# Goal Cleared\n\n- Goal ID: ${goal.id}\n- The user explicitly cleared the goal aggregate; conversation history and handoff files are kept.`,
       "system",
@@ -1151,7 +1193,7 @@ export class GoalController {
       return { allowed: false, reason: `phase=${goal.phase}` };
     }
     if (goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget) {
-      this.repository.setGoalStatus(goal.id, "budget_limited");
+      this.#markBudgetLimited(goal);
       return { allowed: false, reason: "budget limited" };
     }
     return { allowed: true };
@@ -1217,7 +1259,7 @@ export class GoalController {
     const budgetLimited =
       updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget;
     if (budgetLimited && updated.status === "active") {
-      this.repository.setGoalStatus(goal.id, "budget_limited");
+      this.#markBudgetLimited(updated);
     }
     return { outcome, blockedStreak, blocked, budgetLimited };
   }
@@ -1273,6 +1315,13 @@ export class GoalController {
     if (goal === undefined) return ["当前没有 Goal。使用 `/goal <目标>` 初始化。"];
     const progress = this.repository.checkpointProgress(goal.id);
     const review = this.repository.listReviews(goal.id).at(-1);
+    const budget =
+      goal.tokenBudget === undefined
+        ? `${goal.tokensUsed}`
+        : `${goal.tokensUsed} / ${goal.tokenBudget} (${Math.max(
+            0,
+            goal.tokenBudget - goal.tokensUsed,
+          )} remaining)`;
     return [
       `Goal      ${goal.objective}`,
       `Status    ${goal.status}`,
@@ -1283,9 +1332,70 @@ export class GoalController {
           ? "(none)"
           : `${review.status} · round ${review.round}${review.verdict === undefined ? "" : ` · ${review.verdict}`}`
       }`,
-      `Budget    ${goal.tokensUsed}${goal.tokenBudget === undefined ? "" : ` / ${goal.tokenBudget}`}`,
+      `Budget    ${budget}`,
+      `Time      ${goal.timeUsedSeconds}s`,
       `Risk      ${goal.riskPolicy.level} · review ${goal.riskPolicy.reviewPolicy}`,
     ];
+  }
+
+  /**
+   * Enter budget_limited once and inject a safe-boundary wrap-up instruction.
+   *
+   * This mirrors Codex's system state + steering split without writing into an
+   * active model turn: the message is queued as a normal goal injection and
+   * lands at the next safe boundary.
+   */
+  #markBudgetLimited(goal: Goal): Goal {
+    const updated = this.repository.setGoalStatus(goal.id, "budget_limited");
+    if (this.#budgetLimitReportedGoalId !== goal.id) {
+      this.#budgetLimitReportedGoalId = goal.id;
+      this.session.enqueueInjection(renderBudgetLimit(updated), "goal");
+    }
+    return updated;
+  }
+
+  /**
+   * Persist an independent reviewer's provider usage against the Goal budget.
+   *
+   * Reviewers run in a separate AgentSession, so their usage is not part of the
+   * main runTurn usage. The review id gives us an idempotency key.
+   */
+  #recordReviewUsage(
+    goalId: string,
+    reviewId: string,
+    result: ReviewResult,
+    options: { allowBudgetLimit: boolean } = { allowBudgetLimit: true },
+  ): void {
+    const usage = result.usage;
+    if (usage === undefined) return;
+    const turnId = `review:${reviewId}`;
+    if (this.repository.listTurnAccounting(goalId).some((entry) => entry.turnId === turnId)) return;
+
+    const durationMs = Math.max(0, result.durationMs ?? 0);
+    const endedAt = Date.now();
+    const startedAt = Math.max(0, endedAt - Math.round(durationMs));
+    this.repository.recordTurn(goalId, {
+      turnId,
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cachedTokens: usage.cached ?? 0,
+      activeSeconds: Math.max(0, Math.round(durationMs / 1000)),
+      outcome: "progress",
+      startedAt,
+      endedAt,
+    });
+
+    if (!options.allowBudgetLimit) return;
+    const updated = this.currentGoal();
+    if (
+      updated !== undefined &&
+      updated.id === goalId &&
+      updated.status === "active" &&
+      updated.tokenBudget !== undefined &&
+      updated.tokensUsed >= updated.tokenBudget
+    ) {
+      this.#markBudgetLimited(updated);
+    }
   }
 
   private requireCurrent(): Goal {

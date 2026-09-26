@@ -842,7 +842,9 @@ export class GoalRepository {
             WHERE goal_id = ?`,
         )
         .run(
-          input.inputTokens + input.outputTokens,
+          // Goal budget tracks new work, not cache hits: cached input is
+          // recorded for audit but excluded from the budget delta.
+          Math.max(0, input.inputTokens - (input.cachedTokens ?? 0)) + input.outputTokens,
           input.activeSeconds,
           input.endedAt,
           goalId,

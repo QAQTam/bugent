@@ -65,6 +65,16 @@ export function buildSandboxArgv(
     "/proc",
     "--tmpfs",
     "/tmp",
+    /*
+     * /run 必须整段遮掉：它是宿主机 IPC socket 的家（用户 D-Bus、systemd
+     * user manager、ssh-agent、gnome-keyring）。connect() 只要求 socket
+     * inode 本身的写权限，mount 只读挡不住，--unshare-net 也不管 AF_UNIX ——
+     * 不遮的话，沙箱内一条 `systemd-run --user` 就能脱离沙箱在宿主机上
+     * 执行任意代码。现代发行版 /var/run -> /run 是符号链接，遮 /run 即
+     * 同时遮掉 /var/run（符号链接本身在只读的 / 里，解析后落进新 tmpfs）。
+     */
+    "--tmpfs",
+    "/run",
     "--unshare-pid",
     "--die-with-parent",
     "--new-session",
@@ -75,14 +85,27 @@ export function buildSandboxArgv(
   if (!networkAllowed) argv.push("--unshare-net");
 
   // 顺序要紧：先 tmpfs /tmp，再叠加可写绑定，后挂载的覆盖先挂载的。
+  //
+  // 工作区必须在沙箱里**存在** —— `--chdir` 到一个不存在的目录会直接失败，
+  // 而 `/tmp` 已经被换成了私有 tmpfs，工作区落在 `/tmp` 下时就会凭空消失
+  // （实测 `bwrap: Can't chdir to /tmp/xxx: No such file or directory`）。
+  // 所以这里无条件把工作区绑回来：可写档绑成可写，只读档绑成**只读**
+  // （`/` 本来就是只读的，这一步只是把被 tmpfs 遮掉的那份重新露出来）。
+  if (sandbox.workspaceWrite !== false) {
+    argv.push("--bind", options.cwd, options.cwd);
+  } else {
+    argv.push("--ro-bind", options.cwd, options.cwd);
+  }
+
+  // 配置里的额外可写路径排在基础策略**之后**，这样它才能覆盖基础策略。
   for (const path of sandbox.writablePaths ?? []) {
     argv.push("--bind", path, path);
   }
 
-  // 关键分档点：workspaceWrite 为 false 时**不**绑可写工作区，
-  // 于是整个文件系统（含工作区）都是只读的。
-  if (sandbox.workspaceWrite !== false) {
-    argv.push("--bind", options.cwd, options.cwd);
+  // 按次授权：本次调用额外放开那些目录。同样排在基础策略之后 ——
+  // read-only 档批准一次写工作区，靠的就是它盖掉上面那条 `--ro-bind`。
+  for (const path of options.writablePaths ?? []) {
+    argv.push("--bind", path, path);
   }
 
   argv.push("--chdir", options.cwd);

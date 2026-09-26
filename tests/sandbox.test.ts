@@ -61,11 +61,24 @@ describe("P6 · bwrap argv 构造", () => {
     expect(argv).not.toContain("--unshare-net");
   });
 
-  test("writablePaths 被逐个 bind，且排在 cwd 之前", () => {
+  test("额外可写路径排在基础策略之后（后挂载的才能覆盖先挂载的）", () => {
     const argv = buildSandboxArgv(options, { writablePaths: ["/a", "/b"] }, "/bin/bash");
-    const cwdIndex = argv.lastIndexOf("--bind");
-    expect(argv.slice(0, cwdIndex)).toContain("/a");
-    expect(argv.slice(0, cwdIndex)).toContain("/b");
+    const workspaceBind = argv.findIndex(
+      (value, at) => value === "--bind" && argv[at + 1] === "/work",
+    );
+    expect(workspaceBind).toBeGreaterThan(-1);
+    // /a /b 必须挂在工作区那条基础策略**之后**，否则会被它盖掉
+    expect(argv.indexOf("/a")).toBeGreaterThan(workspaceBind);
+    expect(argv.indexOf("/b")).toBeGreaterThan(workspaceBind);
+  });
+
+  test("read-only 档：工作区被绑成只读，但仍存在（/tmp 被 tmpfs 遮掉时不至于 chdir 失败）", () => {
+    const argv = buildSandboxArgv(options, { workspaceWrite: false }, "/bin/bash");
+    const index = argv.findIndex(
+      (value, at) => value === "--ro-bind" && argv[at + 1] === "/work",
+    );
+    expect(index).toBeGreaterThan(-1);
+    expect(argv[index + 2]).toBe("/work");
   });
 
   test("命令被放在 -- 之后，作为 shell -lc 的参数", () => {

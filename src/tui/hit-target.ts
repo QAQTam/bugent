@@ -20,12 +20,16 @@ export type HitTarget =
   /** 弹窗范围内、按钮之外：事件被吞掉，不穿透到下面的消息列表。 */
   | { kind: "dialogBody" }
   | { kind: "askLine"; line: number }
+  /** 设置面板的一行（索引即 SettingsPanel 的行下标）。 */
+  | { kind: "settingsRow"; index: number }
   | { kind: "input"; index: number }
   | { kind: "returnToLatest" }
   | { kind: "moreHistory" }
   /** 待办面板的展开/收起按钮。 */
   | { kind: "todoToggle" }
   | { kind: "tool"; callId: string }
+  /** Thought 头部：左键展开 / 折叠。 */
+  | { kind: "reasoning"; id: string }
   | { kind: "message"; msgid: MsgId; undoMsgid: MsgId };
 
 export interface HitRegionEntry {
@@ -38,6 +42,7 @@ export interface HitRegionEntry {
  * 消息区的按键语义：工具卡片与普通消息的矩形本来就重合，谁管哪个键在这里一次定死。
  *
  * - 工具卡片：左键展开 / 收起，右键开消息菜单 —— 同一个矩形两种键各管一件事。
+ * - Thought 头部：左键展开 / 折叠；整个 Thought 块的右键仍开 assistant 消息菜单。
  * - 普通消息：只有右键开菜单。左键落在正文上不登记任何区域，也就是空操作，
  *   免得在聊天区随手一点就弹出撤回 / 分叉的菜单。
  *
@@ -46,11 +51,19 @@ export interface HitRegionEntry {
 export function messageRegions(
   tools: readonly { callId: string; rect: HitRect }[],
   messages: readonly { msgid: MsgId; undoMsgid: MsgId; rect: HitRect }[],
+  reasonings: readonly { id: string; rect: HitRect }[] = [],
 ): HitRegionEntry[] {
   const regions: HitRegionEntry[] = [];
   for (const hit of tools) {
     regions.push({
       target: { kind: "tool", callId: hit.callId },
+      rect: hit.rect,
+      button: "left",
+    });
+  }
+  for (const hit of reasonings) {
+    regions.push({
+      target: { kind: "reasoning", id: hit.id },
       rect: hit.rect,
       button: "left",
     });
@@ -75,6 +88,8 @@ export function hitTargetName(target: HitTarget): string {
       return "dialog:body";
     case "askLine":
       return `ask:line:${target.line}`;
+    case "settingsRow":
+      return `settings:row:${target.index}`;
     case "input":
       return `input:${target.index}`;
     case "returnToLatest":
@@ -85,6 +100,8 @@ export function hitTargetName(target: HitTarget): string {
       return "todoToggle";
     case "tool":
       return `tool:${target.callId}`;
+    case "reasoning":
+      return `reasoning:${target.id}`;
     case "message":
       return `message:${target.msgid}`;
   }

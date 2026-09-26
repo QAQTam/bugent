@@ -12,6 +12,7 @@
 
 import { createInterface } from "node:readline/promises";
 import { combineHooks, runUserTurn, type LoopHooks, type TurnResult } from "./core/loop.ts";
+import type { ProjectConfigConfirm } from "./config/load.ts";
 import { ProviderRegistry, parseModelRef, type PersistedProviderConfig } from "./provider/registry.ts";
 import { createDefaultTools } from "./tools/builtin.ts";
 import { loadConfig } from "./config/load.ts";
@@ -28,7 +29,9 @@ import type { SkillManager } from "./skills/manager.ts";
 import { BranchService } from "./core/branch-service.ts";
 import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
+import { createAuthorizationAlert } from "./permission/alert.ts";
 import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
+import type { AuthorizationOutcome } from "./permission/authorization.ts";
 import type { CapabilityEscalation } from "./tools/types.ts";
 import type { AskUserAnswer, AskUserQuestion } from "./tui/ask-user.ts";
 import {
@@ -87,8 +90,11 @@ const HELP = `bugent — 终端里的 AI agent
       --mock                 使用内置 mock provider（无需网络与密钥）
       --plain                不使用 TUI，退回纯文本 REPL
       --yes                  跳过权限确认（危险）
-      --mode <mode>          沙箱档位：read-only | workspace-write | no-sandbox
-                             默认 workspace-write
+      --mode <mode>          档位：read-only | workspace-write | no-sandbox
+                             档位 = 默认批准范围，不是隔离开关；沙箱恒开。
+                             read-only       读免问；写工作区/写外部/联网逐次批准
+                             workspace-write 读+写工作区免问；写外部/联网逐次批准（默认）
+                             no-sandbox      全部免问（沙箱仍在，只是不拦截）
       --no-sandbox           等价于 --mode no-sandbox
       --allow-network        一开始就允许联网（默认断网，失败时按次询问）
       --resume <id>          恢复指定会话
@@ -226,8 +232,19 @@ async function buildRegistry(
   return { registry, model };
 }
 
+/**
+ * 授权窗口长度的 env 覆盖，**只给测试用**。
+ *
+ * 生产路径不读它：60 秒是产品语义，不该被环境变量悄悄改掉。
+ * 但 PTY 用例必须验证"到点自动拒绝"，等满一分钟不现实。
+ */
+function authorizationTimeoutFromEnv(): number | undefined {
+  const raw = Number(Bun.env.BUGENT_AUTHORIZATION_TIMEOUT_MS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
+}
+
 function createHooks(
-  requestCapability?: (escalation: CapabilityEscalation) => Promise<boolean>,
+  requestCapability?: (escalation: CapabilityEscalation) => Promise<AuthorizationOutcome>,
 ): LoopHooks {
   let wroteAnything = false;
   return {
@@ -254,6 +271,34 @@ function createHooks(
 }
 
 /* ------------------------------ 会话持久化 ------------------------------ */
+
+/**
+ * 项目级 bugent.config.ts 的执行确认门（BUG-014）。
+ *
+ * 项目配置是任意代码 —— 首次（或内容变化后）执行前在终端展示路径与哈希，
+ * 用户 y 确认后写入 `~/.bugent/trusted-project-configs.json`，之后同哈希免
+ * 提示。`--yes` 语义为跳过所有权限确认，直接放行。非交互终端（无 TTY）无法
+ * 展示确认，fail closed 拒绝执行 —— 想无人值守跑就用 --yes。
+ */
+function makeProjectConfigGate(yes: boolean): ProjectConfigConfirm {
+  return async ({ path, hash }) => {
+    if (yes) return true;
+    if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return false;
+    process.stdout.write(
+      `\n⚠️  发现当前仓库的项目级配置 bugent.config.ts —— import 时会以你的用户身份执行任意代码：\n` +
+        `   路径: ${path}\n` +
+        `   SHA256: ${hash}\n` +
+        `   （确认结果记入 ~/.bugent/trusted-project-configs.json，同内容下次不再询问）\n`,
+    );
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = (await rl.question("   信任并执行它吗？(y/N): ")).trim().toLowerCase();
+      return answer === "y" || answer === "yes";
+    } finally {
+      rl.close();
+    }
+  };
+}
 
 function listSessions(store: SessionStore | undefined): void {
   if (store === undefined) {
@@ -289,7 +334,10 @@ async function main(): Promise<void> {
 
   // 配置只加载一次：loadConfig 在缺失时会生成 ~/.bugent/config.toml，
   // 重复调用会产生"到底建了几次"的困惑
-  const loaded = await loadConfig({ cwd: options.cwd });
+  const loaded = await loadConfig({
+    cwd: options.cwd,
+    confirmProjectConfig: makeProjectConfigGate(options.yes),
+  });
   const config = loaded.config;
 
   const { registry, model } = await buildRegistry(options, config);
@@ -425,6 +473,13 @@ async function main(): Promise<void> {
   // 档位：CLI > 配置 > 默认 workspace-write
   const mode: SandboxMode =
     options.mode ?? (options.noSandbox ? "no-sandbox" : undefined) ?? config.sandbox?.mode ?? "workspace-write";
+
+  // 联网：CLI > 配置 > 默认 false。
+  //
+  // 默认的"断网"不是禁止联网，而是**联网授权的触发机制**：命令先在断网沙箱里
+  // 真跑一次，失败后再拿真实报错问用户（见 src/tools/bash.ts 的 networkBlocked）。
+  // 这个开关只用于"我就是要全程联网"的场景。
+  const allowNetwork = options.allowNetwork || config.sandbox?.allowNetwork === true;
   const agentTransport = createInProcessTransport({
     executor: createSubagentExecutor({
       client,
@@ -473,6 +528,7 @@ async function main(): Promise<void> {
     ...(config.sandbox?.writablePaths !== undefined
       ? { writablePaths: config.sandbox.writablePaths }
       : {}),
+    ...(allowNetwork ? { allowNetwork: true } : {}),
     ...(config.sandbox?.passEnv !== undefined ? { passEnv: config.sandbox.passEnv } : {}),
     ...(goalController !== undefined ? { goalController } : {}),
     agentTools: {
@@ -499,11 +555,22 @@ async function main(): Promise<void> {
     startedMcp.manager?.attach(tools.registry, initialMcpServerIds) ?? [];
   const initialSkillTools = startedSkills.manager.attach(tools.registry);
 
-  // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底
+  // 权限：--yes 全放行；否则用户规则优先，工具自报的默认规则兜底。
+  // no-sandbox 档的契约是"默认批准一切、不再拦截"：工具自报的 ask 是保守默认，
+  // 用户既然显式选了该档，就把工具默认 ask 升级为 allow（用户**显式**写的
+  // ask 规则不动 —— 那是用户自己的要求，不是工具的保守默认）。
+  const toolDefaultRules = tools.registry.defaultPermissionRules();
   const policy = new PermissionPolicy(
     options.yes
       ? ALLOW_ALL_POLICY
-      : composePolicy(config.permissions, tools.registry.defaultPermissionRules()),
+      : composePolicy(
+          config.permissions,
+          mode === "no-sandbox"
+            ? toolDefaultRules.map((rule) =>
+                rule.decision === "ask" ? { ...rule, decision: "allow" } : rule,
+              )
+            : toolDefaultRules,
+        ),
   );
 
   // 审计流水：工具调用、权限决策、每轮起止，全部落盘可回放
@@ -519,7 +586,7 @@ async function main(): Promise<void> {
 
   // 能力授权（联网）的交互入口在两条路径下不同：TUI 用弹窗，CLI 用 stdin。
   // 用一个可变引用让 hooks 在分支确定后再拿到真正的实现。
-  let capabilityHandler: ((escalation: CapabilityEscalation) => Promise<boolean>) | undefined;
+  let capabilityHandler: ((escalation: CapabilityEscalation) => Promise<AuthorizationOutcome>) | undefined;
   // ask_user 是纯交互式功能：TUI 里用多页表单实现，
   // 非 TUI 路径不提供 —— 工具会据此明确告知模型"没有界面，请自行判断"
   let askUserHandler:
@@ -527,9 +594,27 @@ async function main(): Promise<void> {
     | undefined;
   const hooks = combineHooks(
     {
-      ...createHooks((escalation) =>
-        capabilityHandler === undefined ? Promise.resolve(false) : capabilityHandler(escalation),
-      ),
+      // BUG-023：能力授权（带网重跑 / 越界 bind）绕过 gate.check，必须单独
+      // 进审计。放在最前——combineHooks 的交互钩子只取第一个提供它的分组。
+      onRequestCapability: async (_call, escalation) => {
+        const outcome = await (capabilityHandler === undefined
+          ? // 没有交互入口 = 没人能批准。这是"拒绝"，不是"超时"。
+            Promise.resolve<AuthorizationOutcome>("denied")
+          : capabilityHandler(escalation));
+        audit?.capability({
+          capability: escalation.capability,
+          reason: escalation.reason,
+          outcome,
+        });
+        return outcome;
+      },
+    },
+    createHooks((escalation) =>
+      capabilityHandler === undefined
+        ? Promise.resolve<AuthorizationOutcome>("denied")
+        : capabilityHandler(escalation),
+    ),
+    {
       onAskUser: async (_call, questions) =>
         askUserHandler === undefined ? undefined : askUserHandler(questions),
     },
@@ -559,9 +644,18 @@ async function main(): Promise<void> {
   const onDecision =
     audit === undefined ? undefined : (decision: GateDecision) => audit.permission(decision);
 
+  /**
+   * 授权硬件提醒。默认关闭；`[alert] enabled = true` 才构造。
+   * TUI 与 CLI 两条路径共用一个实例 —— 它们互斥，不会同时响。
+   */
+  const authorizationAlert = createAuthorizationAlert(config.alert);
+
   try {
     // 交互式：优先 TUI（需要 TTY），否则退回纯文本 REPL
     if (options.prompt === undefined && !options.plain && process.stdout.isTTY) {
+      // 授权窗口长度：生产恒为 60 秒（模块默认值）。env 覆盖只为测试 ——
+      // PTY 用例要验证"到点自动拒绝"，不能真等一分钟。
+      const authorizationTimeoutMs = authorizationTimeoutFromEnv();
       const app = new TuiApp({
         session,
         tools: tools.registry,
@@ -583,6 +677,8 @@ async function main(): Promise<void> {
         deleteApiKey: (sessionId: string, providerId: string) =>
           credentials.delete(sessionId, providerId),
         mode: tools.mode,
+        ...(authorizationTimeoutMs !== undefined ? { authorizationTimeoutMs } : {}),
+        ...(authorizationAlert !== undefined ? { alert: authorizationAlert } : {}),
         ...(goalController !== undefined ? { goalController } : {}),
         goalAutoContinue:
           (config.goals?.enabled ?? true) && (config.goals?.autoContinue ?? false),
@@ -732,6 +828,7 @@ async function main(): Promise<void> {
                   ...(config.sandbox?.writablePaths !== undefined
                     ? { writablePaths: config.sandbox.writablePaths }
                     : {}),
+                  ...(allowNetwork ? { allowNetwork: true } : {}),
                   ...(config.sandbox?.passEnv !== undefined
                     ? { passEnv: config.sandbox.passEnv }
                     : {}),
@@ -754,8 +851,7 @@ async function main(): Promise<void> {
           mode: tools.mode,
           prompter: { ask: (request) => app.askPermission(request) },
           ...(onDecision !== undefined ? { onDecision } : {}),
-          onEscalate: async (request, needed) =>
-            (await app.confirmModeChange(request, needed)) ? needed : undefined,
+          onEscalate: (request, needed) => app.confirmModeChange(request, needed),
         }),
       );
       capabilityHandler = (escalation) => app.requestCapability(escalation);
@@ -765,7 +861,9 @@ async function main(): Promise<void> {
     }
 
     // 非 TUI 路径：权限确认与能力授权都走 stdin
-    const prompter = new StdinPrompter();
+    const prompter = new StdinPrompter(
+      authorizationAlert !== undefined ? { alert: authorizationAlert } : {},
+    );
     capabilityHandler = (escalation) => prompter.confirmCapability(escalation);
     tools.registry.setGate(
       new PermissionGate({

@@ -297,4 +297,52 @@ describe("workspace undo", () => {
     });
     expect(await readFile(join(cwd, "created.txt"), "utf8")).toBe("hello\n");
   });
+
+  test("BUG-019: undo 提交失败时按逆序回滚已提交的路径", async () => {
+    const editA: WorkspaceFileEdit = {
+      path: "a.txt",
+      before: "A-before\n",
+      after: "A-after\n",
+      beforeExists: true,
+      afterExists: true,
+    };
+    const editB: WorkspaceFileEdit = {
+      path: "b.txt",
+      before: "B-before\n",
+      after: "B-after\n",
+      beforeExists: true,
+      afterExists: true,
+    };
+
+    const files = new Map<string, string>([
+      ["a.txt", "A-after\n"],
+      ["b.txt", "B-after\n"],
+    ]);
+    let writeCount = 0;
+    const fs = {
+      async read(path: string) {
+        return files.get(path);
+      },
+      async write(path: string, text: string) {
+        writeCount += 1;
+        if (writeCount === 2) throw new Error("ENOSPC (simulated)");
+        files.set(path, text);
+      },
+      async remove(path: string) {
+        files.delete(path);
+      },
+    };
+
+    const plan = await planWorkspaceUndo(
+      [messageWithEdit(3, editA), messageWithEdit(4, editB)],
+      fs,
+    );
+    expect(plan.conflicts).toEqual([]);
+
+    await expect(applyWorkspaceUndo(plan, fs)).rejects.toThrow(/ENOSPC/);
+
+    // 第一笔已提交的写被回滚回提交前状态，文件系统没有半套 undo
+    expect(files.get("a.txt")).toBe("A-after\n");
+    expect(files.get("b.txt")).toBe("B-after\n");
+  });
 });

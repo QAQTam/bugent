@@ -1012,9 +1012,11 @@ no_progress
 
 累计：
 
-- 每次 provider usage 的 input + output；
-- 可按需记录 cached token；
-- 每个 Goal turn 增量记账。
+- 每次 provider usage 的新增 token：`input - cached + output`；
+- 可按需记录 cached token（仅审计，不计入预算）；
+- 每个 Goal turn 增量记账；
+- reviewer / final auditor 的独立 provider usage 也计入 Goal 预算；
+- `max_goal_token_budget` 同时作为未显式指定时的默认预算。
 
 达到预算：
 
@@ -1022,7 +1024,10 @@ no_progress
 goal.status = budget_limited
 ```
 
-允许一个收尾 turn，但不能开始新的实质工作。
+- 停止自动 continuation；
+- 在同一 Goal 上只注入一次 `Goal Budget Limit` 收尾上下文；
+- 收尾上下文要求模型不开始新的实质工作，总结进度、剩余工作和阻塞；
+- 允许当前 turn 完成，因此最终 token 仍可能略高于预算。
 
 ### 10.2 Time Budget
 

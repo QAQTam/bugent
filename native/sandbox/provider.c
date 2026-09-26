@@ -107,6 +107,14 @@ typedef struct {
   int ruleset_fd;
   int network_none;
   int close_extra_fds;
+  /*
+   * 配置请求了 "/proc" 读授权。/proc 不能整体放行：同 uid 的沙箱子进程
+   * 读 /proc/<ppid>/environ 拿得到父进程（bugent 本体）的完整环境变量，
+   * 环境变量白名单会被整体击穿。改成在 apply()（子进程侧）按具体条目授权：
+   * /proc/self 在子进程里解析成自己的 proc 目录，覆盖 JSC/Bun 启动探测
+   * （maps 等）；其余是几个静态探测文件。父进程与其它进程的条目一律不可见。
+   */
+  int grant_proc_read;
   struct sock_filter *filter;
   size_t filter_len;
   limit_config limits;
@@ -675,7 +683,16 @@ static int append_filter(struct sock_filter *filter, size_t *len, struct sock_fi
   return 0;
 }
 
-static int build_network_filter(sandbox_state *state) {
+/*
+ * 进程加固 + 网络隔离共用一个 seccomp filter。
+ *
+ * 进程加固段**无论 network 模式如何都安装**（BUG-017）：ptrace /
+ * process_vm_* / pidfd_getfd / keyctl 这些调用在同 uid 且 yama 缺失
+ * （ptrace_scope=0，常见于容器）的主机上可以直接读写父进程内存 —— 父进程
+ * （bugent 本体）不沙箱、持有全部凭据，必须从根上断掉这组系统调用。
+ * 网络段仅在 network=none 时追加。
+ */
+static int build_seccomp_filter(sandbox_state *state) {
   struct sock_filter *filter =
       (struct sock_filter *)calloc(128, sizeof(struct sock_filter));
   if (filter == NULL) {
@@ -706,6 +723,63 @@ static int build_network_filter(sandbox_state *state) {
                                                  (uint32_t)offsetof(struct seccomp_data, nr))) != 0) {
     free(filter);
     return -1;
+  }
+
+  static const int process_denied[] = {
+#ifdef __NR_ptrace
+      __NR_ptrace,
+#endif
+#ifdef __NR_process_vm_readv
+      __NR_process_vm_readv,
+#endif
+#ifdef __NR_process_vm_writev
+      __NR_process_vm_writev,
+#endif
+#ifdef __NR_pidfd_open
+      __NR_pidfd_open,
+#endif
+#ifdef __NR_pidfd_getfd
+      __NR_pidfd_getfd,
+#endif
+#ifdef __NR_pidfd_send_signal
+      __NR_pidfd_send_signal,
+#endif
+#ifdef __NR_kcmp
+      __NR_kcmp,
+#endif
+#ifdef __NR_keyctl
+      __NR_keyctl,
+#endif
+#ifdef __NR_add_key
+      __NR_add_key,
+#endif
+#ifdef __NR_request_key
+      __NR_request_key,
+#endif
+  };
+  for (size_t i = 0; i < sizeof(process_denied) / sizeof(process_denied[0]); i++) {
+    if (append_filter(filter, &len,
+                      (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                                                   (uint32_t)process_denied[i], 0, 1)) != 0 ||
+        append_filter(filter, &len,
+                      (struct sock_filter)BPF_STMT(
+                          BPF_RET | BPF_K,
+                          SECCOMP_RET_ERRNO | (uint32_t)(EPERM & SECCOMP_RET_DATA))) != 0) {
+      free(filter);
+      return -1;
+    }
+  }
+
+  if (!state->network_none) {
+    // network 放行的 server：只要进程加固段，没有网络段。
+    if (append_filter(filter, &len,
+                      (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)) != 0) {
+      free(filter);
+      return -1;
+    }
+    state->filter = filter;
+    state->filter_len = len;
+    return 0;
   }
 
   static const int denied_syscalls[] = {
@@ -836,6 +910,16 @@ void *bun_spawn_sandbox_prepare(const char *config_data, size_t config_len,
   }
 
   for (size_t i = 0; i < config.read.len; i++) {
+    /*
+     * "/proc" 是历史遗留的"runtime 探测需要 procfs"整体授权（见
+     * sandbox_state.grant_proc_read 注释）：prepare() 在父进程里跑，在这里
+     * 加规则会把**父进程**的 /proc/<ppid> 绑进规则集 —— 必须推迟到
+     * apply()（子进程侧）按具体条目授权。
+     */
+    if (strcmp(config.read.items[i], "/proc") == 0) {
+      state->grant_proc_read = 1;
+      continue;
+    }
     if (add_landlock_path_rule(state->ruleset_fd, config.read.items[i],
                                read_access()) != 0) {
       goto fail;
@@ -854,7 +938,8 @@ void *bun_spawn_sandbox_prepare(const char *config_data, size_t config_len,
     }
   }
 
-  if (state->network_none && build_network_filter(state) != 0) goto fail;
+  // 进程加固段常开；网络段按 network_none 追加（见 build_seccomp_filter）。
+  if (build_seccomp_filter(state) != 0) goto fail;
 
   free_parsed_config(&config);
   return state;
@@ -882,11 +967,41 @@ int bun_spawn_sandbox_apply(void *opaque) {
   if (state == NULL) return EINVAL;
 
   if (state->ruleset_fd >= 0) {
+    /*
+     * "/proc" 读授权的窄化版：在**子进程**里解析，/proc/self 指向自己的
+     * proc 目录（JSC/Bun 启动探测读的是 maps/auxv 等自身条目），其余是
+     * 几个全局静态探测文件。父进程的 /proc/<ppid>/environ、cmdline、maps
+     * 从此不可读 —— 环境变量白名单不再能被 procfs 绕过。规则必须在
+     * landlock_restrict_self 之前加进 ruleset，所以放在这里而不是 exec 后。
+     */
+    if (state->grant_proc_read) {
+      static const char *const proc_read_paths[] = {
+          "/proc/self",
+          "/proc/cpuinfo",
+          "/proc/filesystems",
+          "/proc/meminfo",
+          "/proc/stat",
+          "/proc/uptime",
+      };
+      for (size_t i = 0; i < sizeof(proc_read_paths) / sizeof(proc_read_paths[0]);
+           i++) {
+        if (add_landlock_path_rule(state->ruleset_fd, proc_read_paths[i],
+                                   read_access()) != 0) {
+          return errno;
+        }
+      }
+    }
+
     if (syscall(SYS_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
     if (syscall(SYS_landlock_restrict_self, state->ruleset_fd, 0) != 0) return errno;
   }
 
-  if (state->network_none) {
+  /*
+   * seccomp 常开（BUG-017）：filter 里进程加固段（ptrace/process_vm/pidfd/
+   * keyctl 家族）与网络模式无关 —— 网络放行的 server 同样不许碰父进程内存。
+   * state->filter 在 prepare() 里无条件构建。
+   */
+  if (state->filter != NULL && state->filter_len > 0) {
     if (syscall(SYS_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return errno;
     struct sock_fprog program;
     program.len = (unsigned short)state->filter_len;

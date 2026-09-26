@@ -79,13 +79,23 @@ export function readTableModel(
   }
 
   if (rows.length === 0) return undefined;
-  const columns = Math.max(...rows.map((row) => row.cells.length));
+
+  // GFM 的列数由表头决定：body 少掉的单元格补空，多出来的单元格忽略。
+  // 不能取所有行的最大值，否则一条畸形 body 行会把整张表扩成几十列。
+  const header = rows.find((row) => row.header) ?? rows[0]!;
+  const columns = header.cells.length;
   return {
     alignments: Array.from(
       { length: columns },
       (_, index) => alignments[index] ?? "left",
     ),
-    rows,
+    rows: rows.map((row) => ({
+      header: row.header,
+      cells: Array.from(
+        { length: columns },
+        (_, index) => row.cells[index] ?? "",
+      ),
+    })),
   };
 }
 

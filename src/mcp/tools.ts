@@ -90,10 +90,17 @@ export function createMcpTool(
     description: description.slice(0, MAX_DESCRIPTION_CHARS),
     parameters: (info.inputSchema ?? { type: "object", properties: {} }) as JSONSchema,
     needsSandbox: true,
-    defaultPermission: "allow",
+    // MCP 工具是外部进程的入口：server 启动时被授予的能力（写盘/联网/exec）
+    // 会随一次调用全部生效，所以默认必须逐次询问 —— 不能因为"闸门在"就默认
+    // 放行。no-sandbox 档会在组装策略时把这类工具默认 ask 升级为 allow（用户
+    // 预授权一切）；用户仍可用显式规则对特定 server 配 allow/deny。
+    // 提示注入最现实的落点就是把模型引到这里，默认 ask 是最后一道人工闸门。
+    defaultPermission: "ask",
 
     resources(): readonly ResourceClaim[] {
-      return [{ key: "workspace", access: readOnly ? "read" : "write" }];
+      // readOnlyHint 来自外部 server，是声明不是证明 —— 只用于展示文案，
+      // 不参与资源判定：锁一律按写申请，保守串行。
+      return [{ key: "workspace", access: "write" }];
     },
 
     describe(input: unknown): { resource: string; summary: string } {
@@ -105,7 +112,8 @@ export function createMcpTool(
 
     async run(input: Record<string, unknown>, ctx: ToolCtx): Promise<string> {
       if (ctx.signal.aborted) throw new Error("MCP 工具调用已取消");
-      const result = await client.callTool(info.name, input);
+      // 取消信号传进 transport：abort 时在途请求立即失败，而不是等 server 应答。
+      const result = await client.callTool(info.name, input, { signal: ctx.signal });
       const text = contentToText(result);
       return result.isError === true ? `[MCP error]\n${text}` : text;
     },

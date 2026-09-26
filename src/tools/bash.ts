@@ -12,12 +12,19 @@
  */
 
 import type { JSONSchema } from "../provider/types.ts";
+import { homedir } from "node:os";
 import { win32 } from "node:path";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { createOutputSpool, type OutputSpool, type OutputStreamName } from "./spill.ts";
 import { sanitizeEnv } from "../sandbox/env.ts";
+import { planWriteApproval, scanCommand, type WriteApprovalPlan } from "../sandbox/command-scan.ts";
+import {
+  AUTHORIZATION_DENIED,
+  describeOutcome,
+  type AuthorizationOutcome,
+} from "../permission/authorization.ts";
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
 export const MAX_TIMEOUT_MS = 600_000;
@@ -55,6 +62,15 @@ export interface ShellRunOptions {
    * 沙箱本身不拆，只是这一次不加 --unshare-net。
    */
   allowNetwork?: boolean;
+  /**
+   * 这一次运行额外可写的路径（覆盖沙箱配置）。
+   *
+   * 对应"执行前判定出越界 → 用户批准 → 本次 argv 真的放开"这条路径：
+   * 沙箱不拆，只是这一次把批准过的目录 `--bind` 成可写。
+   *
+   * 只对 `createSandboxedShellRunner` 有意义；本地 runner 忽略它。
+   */
+  writablePaths?: readonly string[];
 }
 
 /**
@@ -501,7 +517,7 @@ export function bashResourceClaims(command: string): readonly ResourceClaim[] {
     return [{ key: "workspace", access: "write" }];
   }
 
-  const segments = trimmed.split(/\|\||&&|;|\|/);
+  const segments = trimmed.split(/\|\||&&|;|\||\n|\r/);
   if (segments.every(isReadOnlySegment)) return [{ key: "workspace", access: "read" }];
   return [{ key: "workspace", access: "write" }];
 }
@@ -514,12 +530,81 @@ export interface BashToolOptions {
    * 只有为 true 时才可能在失败后触发联网授权 —— 否则不该去打扰用户。
    */
   networkBlocked?: boolean;
+  /**
+   * 当前档位下工作区是否可写。
+   *
+   * `false`（read-only 档）时，连"写工作区内"都要按次批准 —— 否则那条路径
+   * 只会撞上内核的 `Read-only file system`，用户连申请的机会都没有。
+   * 默认 true（缺省视为工作区可写），保持老调用点的行为。
+   */
+  workspaceWritable?: boolean;
+  /**
+   * 执行前是否要先问用户。
+   *
+   * `no-sandbox` 档的语义是"默认批准一切、不再拦截"，那一档不该弹窗 ——
+   * 档位就是用户的预先授权。默认 true；只有 `no-sandbox` 传 false。
+   */
+  authorizeBeforeRun?: boolean;
+  /**
+   * 没有内核级沙箱（bwrap 缺失）时置 true：**每条**命令执行前都请求确认。
+   *
+   * 背景：扫描层的"漏判不等于放行"依赖内核兜底（EROFS）；执行层退化为
+   * 裸子进程时这个前提消失，任何扫描漏判都会变成无提示的真实写/联网。
+   * 所以此时把安全边界整体退到"逐条询问"。`no-sandbox` 档（用户预授权
+   * 一切）不受影响 —— 那是用户主动选的。
+   */
+  requireApprovalEveryRun?: boolean;
 }
 
 function firstLines(text: string, count: number): string {
   const lines = text.split("\n").filter((line) => line.trim().length > 0);
   const head = lines.slice(0, count).join(" / ");
   return head.length > 300 ? `${head.slice(0, 300)}…` : head;
+}
+
+/** 本次调用获准的越界能力（执行前按次授权的结果）。 */
+interface RunGrant {
+  allowNetwork?: boolean;
+  writablePaths?: readonly string[];
+}
+
+/** 执行前授权被拒时回给模型的文本。拒绝与超时必须能区分。 */
+function refusalText(outcome: AuthorizationOutcome, command: string): string {
+  const head = describeOutcome(outcome) ?? AUTHORIZATION_DENIED;
+  return `${head}：bash 未执行这条命令 —— ${command}`;
+}
+
+function escalationReasonFor(plan: WriteApprovalPlan | undefined, needsNetwork: boolean): string {
+  if (plan !== undefined && needsNetwork) {
+    return "这条命令会写工作区之外的文件，并且需要联网。";
+  }
+  if (needsNetwork) return "这条命令需要联网。";
+  if (plan?.undecidable === true && plan.paths.length === 0) {
+    return "这条命令可能在写文件，但目标静态判不出来。";
+  }
+  return "这条命令会写工作区之外的文件。";
+}
+
+/**
+ * 弹窗里必须写清"批准后到底放开了什么"。
+ *
+ * 只说"是否允许"是不够的：授权是按次下发的，用户得知道这一次的范围
+ * 是某一个文件、还是整个目录。
+ */
+function escalationDetailsFor(
+  command: string,
+  plan: WriteApprovalPlan | undefined,
+): string[] {
+  const details = [`命令：${command}`];
+  if (plan === undefined) return details;
+  if (plan.paths.length > 0) details.push(`目标：${plan.paths.join("、")}`);
+  if (plan.binds.length > 0) {
+    details.push(`批准后将放开：${plan.binds.join("、")}（含其中任意文件）`);
+  }
+  if (plan.undecidable && plan.binds.length === 0) {
+    details.push("目标判不出来（解释器 / 动态路径）：批准只表示允许执行，写工作区外仍会被沙箱挡住");
+  }
+  return details;
 }
 
 function formatResult(result: ShellResult, timeoutMs: number, maxOutputBytes: number): string {
@@ -666,9 +751,7 @@ export function createBashTool(
         timeoutMs = Math.min(input.timeoutMs, MAX_TIMEOUT_MS);
       }
 
-      const runOnce = async (
-        allowNetwork?: boolean,
-      ): Promise<{ result: ShellResult; spool: OutputSpool }> => {
+      const runOnce = async (grant: RunGrant = {}): Promise<{ result: ShellResult; spool: OutputSpool }> => {
         const spool = await createOutputSpool(ctx.sessionId, ctx.callId);
         try {
           const result = await runner.run({
@@ -679,7 +762,8 @@ export function createBashTool(
             signal: ctx.signal,
             ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
             onOutputChunk: (stream, chunk) => spool.write(stream, chunk),
-            ...(allowNetwork === true ? { allowNetwork: true } : {}),
+            ...(grant.allowNetwork === true ? { allowNetwork: true } : {}),
+            ...(grant.writablePaths !== undefined ? { writablePaths: grant.writablePaths } : {}),
           });
           return { result, spool };
         } catch (error) {
@@ -688,14 +772,68 @@ export function createBashTool(
         }
       };
 
-      let attempt = await runOnce();
+      // ── 无内核沙箱时的兜底闸门 ─────────────────────────────────────
+      //
+      // 沙箱在，漏判有内核挡着；沙箱不在，漏判就是放行。所以执行层退化成
+      // 裸子进程时，每条命令都必须先过用户这一关（除非用户明确选了
+      // no-sandbox 档）。
+      if (
+        options.requireApprovalEveryRun === true &&
+        options.authorizeBeforeRun !== false &&
+        ctx.onRequestCapability !== undefined
+      ) {
+        const outcome = await ctx.onRequestCapability({
+          capability: {},
+          reason: "当前没有可用的内核级沙箱（未找到 bwrap），这条命令将在无隔离的情况下直接执行。",
+          details: [`命令：${command}`],
+        });
+        if (outcome !== "approved") return refusalText(outcome, command);
+      }
+
+      // ── 执行前判定：越界就不跑，先问 ────────────────────────────────
+      //
+      // 与下面"联网先跑失败再问"不同：写越界是**静态判得出来**的，所以命令
+      // 根本不跑。拒绝/超时都要如实回传 —— 模型必须能区分"用户拒绝了"和
+      // "没人应答"，否则只会反复重试同一条命令。
+      //
+      // 判不出来（`writeIntent`）也问，但文案如实说明"放开范围是什么"。
+      // 静态漏判不等于放行：内核仍然挡着，安全上没有退步。
+      const scan = scanCommand(command, { cwd: ctx.cwd });
+      const home = homedir();
+      const plan = planWriteApproval(scan, {
+        cwd: ctx.cwd,
+        home,
+        workspaceWritable: options.workspaceWritable !== false,
+        command,
+      });
+      const needsNetwork = scan.network && options.networkBlocked === true;
+
+      let grant: RunGrant = {};
+      if (
+        options.authorizeBeforeRun !== false &&
+        (plan !== undefined || needsNetwork) &&
+        ctx.onRequestCapability !== undefined
+      ) {
+        const outcome = await ctx.onRequestCapability({
+          capability: {
+            ...(plan !== undefined ? { writeOutside: true } : {}),
+            ...(needsNetwork ? { network: true } : {}),
+          },
+          reason: escalationReasonFor(plan, needsNetwork),
+          details: escalationDetailsFor(command, plan),
+        });
+        if (outcome !== "approved") return refusalText(outcome, command);
+        grant = {
+          ...(needsNetwork ? { allowNetwork: true } : {}),
+          ...(plan !== undefined && plan.binds.length > 0 ? { writablePaths: plan.binds } : {}),
+        };
+      }
+
+      let attempt = await runOnce(grant);
       let result = attempt.result;
 
-      // 先真跑一次；失败且像是被沙箱断网挡住时，**带着真实报错**去要授权。
-      //
-      // 刻意不做"先行拦截"：那样用户看到的是一句没有上下文的"是否允许联网"，
-      // 新手根本不知道自己在批准什么。现在的流程是
-      // 「跑 → 失败 → 这是哪条命令、为什么失败、要不要放开这一次」。
+      // 联网兜底：静态没识别出来、跑起来才被沙箱断网挡住时，**带着真实报错**
+      // 去要授权。刻意不做"先行拦截"的那部分由上面的 scan 覆盖；这里保底。
       if (
         result.exitCode !== 0 &&
         options.networkBlocked === true &&
@@ -703,21 +841,34 @@ export function createBashTool(
         looksLikeNetworkFailure(`${result.stdout}\n${result.stderr}`)
       ) {
         const errorText = result.stderr.trim().length > 0 ? result.stderr.trim() : result.stdout.trim();
-        const approved = await ctx.onRequestCapability({
+        const outcome = await ctx.onRequestCapability({
           capability: { network: true },
-          reason: "这条命令因为沙箱断网失败了。允许联网后重跑吗？",
+          // BUG-009：报错摘录来自命令自身的输出 —— 模型可以伪造它来提高
+          // 获批概率。文案必须如实说明这一点；批准的对象是"完整命令带网
+          // 重跑一次"，重跑本身已天然最多一次。
+          reason:
+            "这条命令在断网沙箱中失败（沙箱确实断网，由配置决定）。是否允许带网重跑一次？",
           details: [
             `命令：${command}`,
-            ...(errorText.length > 0 ? [`报错：${firstLines(errorText, 3)}`] : []),
+            `退出码：${result.exitCode ?? "unknown"}`,
+            ...(errorText.length > 0
+              ? [`报错摘录（来自命令自身输出，不保证真实）：${firstLines(errorText, 3)}`]
+              : []),
           ],
         });
 
-        if (approved) {
-          // 第一次失败只用于申请授权，最终给模型的应是重跑结果。
+        if (outcome !== "approved") {
+          // 第一次失败只用于申请授权；用户没批准就把否定结论如实回传，
+          // 不能让模型以为"重跑也没用"是别的原因。
           await attempt.spool.discard();
-          attempt = await runOnce(true);
-          result = attempt.result;
+          ctx.onPresentation?.(buildBashPresentation(command, result, timeoutMs, maxOutputBytes));
+          return refusalText(outcome, command);
         }
+
+        // 最终给模型的应是重跑结果，不是那次失败的。
+        await attempt.spool.discard();
+        attempt = await runOnce({ ...grant, allowNetwork: true });
+        result = attempt.result;
       }
 
       ctx.onPresentation?.(

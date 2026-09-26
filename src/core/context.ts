@@ -95,9 +95,53 @@ export function prefixHash(
   return hasher.digest("hex");
 }
 
+/* ------------------------------------------------------------------ */
+/* 增量前缀链（PERF-001）                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 前缀链与整段重算的取舍：
+ *
+ * `prefixHash` 每次都把**全部前缀**重序列化再哈希 —— O(全部前缀字节)/次，
+ * 而 loop 在每个模型步都调它（最多 800 步/轮）。消息是**追加式**的
+ * （msgid 单调递增，上下文顺序 == 插入顺序），前缀逐字节稳定，所以可以
+ * 改成 Merkle 式链：每追加一条消息只哈希 O(1) 数据。
+ *
+ * 链的定义（自洽即可 —— 它只被用于"同一函数同一前缀相等"的比较）：
+ *   chain(0) = sha256(PREFIX_CHAIN_ORIGIN)
+ *   chain(i) = sha256(chain(i-1) + ":" + sha256(canonical(toChatMessage(m_i))))
+ */
+export const PREFIX_CHAIN_ORIGIN = "bugent-prefix-chain-v1";
+
+export function prefixChainOriginHash(): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(PREFIX_CHAIN_ORIGIN);
+  return hasher.digest("hex");
+}
+
+export function chainStep(
+  prevHex: string,
+  message: StoredMessage,
+  options: BuildContextOptions = {},
+): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(prevHex);
+  hasher.update(":");
+  hasher.update(canonicalize(toChatMessage(message, options)));
+  return hasher.digest("hex");
+}
+
 /** 当前上下文里最大的 msgid（空列表返回 -1）。 */
 export function lastMsgId(messages: readonly StoredMessage[]): MsgId {
   let max = -1;
   for (const msg of messages) if (msg.msgid > max) max = msg.msgid;
   return max;
+}
+
+/** 消息序列是否按 msgid 严格递增（前缀链可用的前提）。 */
+export function isMsgidAscending(messages: readonly StoredMessage[]): boolean {
+  for (let index = 1; index < messages.length; index += 1) {
+    if (messages[index]!.msgid <= messages[index - 1]!.msgid) return false;
+  }
+  return true;
 }

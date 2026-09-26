@@ -68,9 +68,9 @@ async function execute(
   const gate = new PermissionGate({
     policy,
     mode,
-    prompter: { ask: async () => false },
+    prompter: { ask: async () => "denied" },
     ...(options.approveEscalation === true
-      ? { onEscalate: async (_request, needed: SandboxMode) => needed }
+      ? { onEscalate: async () => "approved" as const }
       : {}),
   });
   setup.registry.setGate(gate);
@@ -144,7 +144,7 @@ describe("read-only 档：进程内写工具一律被挡", () => {
       const result = await execute("read-only", cwd, entry.name, entry.args);
 
       expect(result.ok).toBe(false);
-      expect(result.output).toMatch(/不支持写入工作区|需要升到/);
+      expect(result.output).toMatch(/需要逐次批准|--mode workspace-write/);
       expect(await Bun.file(join(cwd, entry.file)).exists()).toBe(false);
     });
   }

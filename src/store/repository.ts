@@ -51,6 +51,7 @@ export type AuditEventKind =
   | "tool_call"
   | "tool_result"
   | "permission"
+  | "capability"
   | "session_config"
   | "agent_integration"
   | "error";

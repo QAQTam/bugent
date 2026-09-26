@@ -7,6 +7,9 @@
  */
 
 import type { LoopHooks } from "../core/loop.ts";
+import {
+  type AuthorizationOutcome,
+} from "../permission/authorization.ts";
 import type { GateDecision } from "../permission/gate.ts";
 import type { AgentIntegrationRecord } from "../agent/integrator.ts";
 import type { SessionStore } from "./repository.ts";
@@ -66,7 +69,31 @@ export class AuditTrail {
       summary: decision.request.summary,
       decision: decision.decision,
       allowed: decision.allowed,
+      // 档位与本次获准的越界能力都要进审计 —— 只记"允许/拒绝"无法回答
+      // "这次为什么允许"：同样的 tool+resource 在不同档位下结论可能相反。
+      mode: decision.mode,
+      ...(decision.granted !== undefined ? { granted: decision.granted } : {}),
       reason: decision.reason,
+    });
+  }
+
+  /**
+   * 能力授权（联网 / 写工作区外）的按次审批（BUG-023）。
+   *
+   * bash 的能力授权走 `onRequestCapability`，绕过 gate.check —— 之前这类
+   * 最敏感的批准（带网重跑、越界 bind）在审计流水里完全不可见。
+   * escalation.details 含命令全文；工具调用本身已有 tool_call 事件，
+   * 这里不重复记录命令，只记能力维度与结论。
+   */
+  capability(record: {
+    capability: { network?: boolean; writeOutside?: boolean };
+    reason: string;
+    outcome: AuthorizationOutcome;
+  }): void {
+    this.#record("capability", {
+      capability: record.capability,
+      reason: record.reason,
+      outcome: record.outcome,
     });
   }
 

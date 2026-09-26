@@ -1,5 +1,6 @@
 import { StreamingPatchParser } from "./streaming-parser.ts";
 import type { Hunk } from "./types.ts";
+import { decodeJsonStringPrefix } from "../core/partial-json.ts";
 
 export interface PatchProgressFile {
   path: string;
@@ -14,62 +15,6 @@ export interface PatchProgress {
   added: number;
   removed: number;
   complete: boolean;
-}
-
-interface JsonStringPrefix {
-  text: string;
-  complete: boolean;
-}
-
-function decodeJsonStringPrefix(source: string, start: number): JsonStringPrefix {
-  let text = "";
-  for (let index = start; index < source.length; index += 1) {
-    const char = source[index]!;
-    if (char === '"') return { text, complete: true };
-    if (char !== "\\") {
-      text += char;
-      continue;
-    }
-
-    index += 1;
-    if (index >= source.length) break;
-    const escaped = source[index]!;
-    switch (escaped) {
-      case '"':
-      case "\\":
-      case "/":
-        text += escaped;
-        break;
-      case "b":
-        text += "\b";
-        break;
-      case "f":
-        text += "\f";
-        break;
-      case "n":
-        text += "\n";
-        break;
-      case "r":
-        text += "\r";
-        break;
-      case "t":
-        text += "\t";
-        break;
-      case "u": {
-        const hex = source.slice(index + 1, index + 5);
-        if (hex.length < 4 || !/^[0-9a-fA-F]{4}$/.test(hex)) {
-          return { text, complete: false };
-        }
-        text += String.fromCharCode(Number.parseInt(hex, 16));
-        index += 4;
-        break;
-      }
-      default:
-        text += escaped;
-        break;
-    }
-  }
-  return { text, complete: false };
 }
 
 /**
@@ -145,23 +90,44 @@ export function patchProgress(
 /** 累积 arguments 增量，并给出可供 TUI 实时渲染的 patch 统计。 */
 export class PatchStreamProgress {
   #parser = new StreamingPatchParser();
-  #patchText = "";
   #lastError: unknown;
-
-  get patchText(): string {
-    return this.#patchText;
-  }
+  #lastProgress: PatchProgress | undefined;
+  /**
+   * 增量提取状态（PERF-004）：
+   *   - `search`  还没找到 patch 文本起点，每个增量在新后缀里找；
+   *   - `raw`     arguments 本身就是 patch 文本（custom tool 形式）；
+   *   - `json`    patch 是 JSON 字符串值（`{"patch":"..."}` 或裸引号串），
+   *               用可续位的 decodeJsonStringPrefix 只解码新增后缀。
+   * 旧实现每个增量都对**全量 rawArgs** 跑正则 + 全量解码 + 全量 slice，
+   * O(L²)；500KB 的 patch 会把 UI 线程拖死。
+   */
+  #mode: "search" | "raw" | "json" = "search";
+  #valueStart = 0;
+  #consumed = 0;
+  #decodedAny = false;
 
   hunks(): Hunk[] {
     return this.#parser.hunks();
   }
 
   push(rawArgs: string): PatchProgress | undefined {
-    const patchText = extractPatchText(rawArgs);
-    if (patchText === undefined || patchText.length === 0) return undefined;
-    const delta = patchText.slice(this.#patchText.length);
-    this.#patchText = patchText;
-    if (delta.length === 0) return patchProgress(this.#parser.hunks(), false);
+    if (this.#mode === "search") {
+      this.#findPatchStart(rawArgs);
+      if (this.#mode === "search") return undefined;
+    }
+
+    let delta: string;
+    if (this.#mode === "raw") {
+      delta = rawArgs.slice(this.#valueStart + this.#consumed);
+      this.#consumed = rawArgs.length - this.#valueStart;
+    } else {
+      const scan = decodeJsonStringPrefix(rawArgs, this.#valueStart + this.#consumed);
+      delta = scan.text;
+      this.#consumed = scan.consumed - this.#valueStart;
+    }
+
+    if (delta.length > 0) this.#decodedAny = true;
+    if (delta.length === 0) return this.#lastProgress;
 
     try {
       this.#parser.pushDelta(delta);
@@ -170,11 +136,41 @@ export class PatchStreamProgress {
       // 半截 patch 暂时不完整；最终 finish() 会给出真实错误。
       this.#lastError = error;
     }
-    return patchProgress(this.#parser.hunks(), false);
+    this.#lastProgress = patchProgress(this.#parser.liveHunks(), false);
+    return this.#lastProgress;
+  }
+
+  /** 只在还没找到起点时运行；找到后每个增量只碰自己的新后缀。 */
+  #findPatchStart(rawArgs: string): void {
+    // 先试整体形式（custom tool 直接发 patch 文本）
+    const trimmed = rawArgs.trimStart();
+    const lead = rawArgs.length - trimmed.length;
+    if (trimmed.startsWith("*** Begin Patch")) {
+      this.#mode = "raw";
+      this.#valueStart = lead;
+      this.#consumed = 0;
+      return;
+    }
+
+    // `{"patch":"..."}` 形式：键出现得早，正则只在找不到时反复跑全量；
+    // 找到一次即固化起点。
+    const match = /"patch"\s*:\s*"/.exec(rawArgs);
+    if (match !== null) {
+      this.#mode = "json";
+      this.#valueStart = match.index + match[0].length;
+      this.#consumed = 0;
+      return;
+    }
+
+    if (trimmed.startsWith('"')) {
+      this.#mode = "json";
+      this.#valueStart = lead + 1;
+      this.#consumed = 0;
+    }
   }
 
   finish(): PatchProgress {
-    if (this.#patchText.length === 0) {
+    if (!this.#decodedAny) {
       throw this.#lastError ?? new Error("apply_patch arguments 中没有 patch");
     }
     this.#parser.finish();

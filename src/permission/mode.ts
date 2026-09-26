@@ -1,34 +1,47 @@
 /**
  * 沙箱档位 —— 权限模型的核心。
  *
- * 三档递进，**档位本身就是预先授权范围**：
+ * **档位 = 默认批准范围，不是能力边界。**
  *
- *   read-only        根只读 + 工作区只读 + 断网
- *   workspace-write  根只读 + 工作区可写 + 断网
- *   no-sandbox       不隔离，可读写任意位置、可联网
+ *   read-only        不用问就能读；写工作区 / 写工作区外 / 联网 → 逐次批准
+ *   workspace-write  不用问就能读 + 写工作区；写工作区外 / 联网 → 逐次批准
+ *   no-sandbox       不用问就能做任何事（不拦截，但仍记录审计）
+ *
+ * 三档**都能读工作区之外** —— 读是自由的，档位不限制读。
  *
  * 为什么档位比"每个工具问一次"好：
  *   沙箱越严，越不需要问。read-only 档下内核保证了 bash 改不了任何东西，
  *   所以 bash 可以**自动放行**，不需要每次弹窗。反过来 no-sandbox 档
  *   是用户主动选的，也就等于主动授权了。
  *
- *   这样弹窗只在**越档**时出现（想写、想联网），而不是每次都打断。
+ *   这样弹窗只在**越出默认批准范围**时出现，而不是每次都打断。
+ *
+ * 两条容易搞错的边界：
+ *
+ *   1. **越界走按次授权，不走"升档"。** 批准一次只生效一次 —— 批准一次写盘
+ *      就把档位永久改成 workspace-write，会让"每次写入都要提交用户审批"
+ *      这句话失去意义（实测过：第一次批准之后，后续写入全都不再问）。
+ *
+ *   2. **沙箱恒开，不随档位变化。** no-sandbox 的语义是"默认批准一切、
+ *      不再拦截"，不是"关掉隔离"。它仍然带 pid 隔离、session 隔离、
+ *      环境变量白名单与 no_new_privs。
  */
 
 export type SandboxMode = "read-only" | "workspace-write" | "no-sandbox";
 
+/**
+ * 不用问就能做的范围。超出这个范围的操作一律走**按次授权**。
+ */
+export type DefaultApprove = "read" | "workspace-write" | "all";
+
 export interface ModeCapabilities {
-  /** 工作区是否可写。同时约束 bash 沙箱与进程内的文件工具。 */
-  workspaceWrite: boolean;
-  /** 是否用 bwrap 隔离。 */
-  sandboxed: boolean;
-  /** 是否允许读工作区之外（目前只有 read_file 用得到）。 */
-  readOutside: boolean;
+  /** 默认批准范围。 */
+  defaultApprove: DefaultApprove;
   label: string;
 }
 
 /**
- * 三档**只描述文件系统与进程隔离**。
+ * 档位**只描述默认批准范围**。
  *
  * 网络刻意不在这里 —— 它是**按次授权**的独立能力（见 CapabilityGrant）：
  * 把"联网"绑进档位会导致"为了联网不得不丢掉文件系统隔离"，
@@ -36,22 +49,16 @@ export interface ModeCapabilities {
  */
 export const MODES: Record<SandboxMode, ModeCapabilities> = {
   "read-only": {
-    workspaceWrite: false,
-    sandboxed: true,
-    readOutside: false,
-    label: "只读 · 工作区不可写 · 断网",
+    defaultApprove: "read",
+    label: "只读 · 写工作区/写工作区外/联网需逐次批准",
   },
   "workspace-write": {
-    workspaceWrite: true,
-    sandboxed: true,
-    readOutside: false,
-    label: "可写工作区 · 根只读 · 断网",
+    defaultApprove: "workspace-write",
+    label: "可写工作区 · 写工作区外/联网需逐次批准",
   },
   "no-sandbox": {
-    workspaceWrite: true,
-    sandboxed: false,
-    readOutside: true,
-    label: "无沙箱 · 可读写任意位置 · 网络不受限",
+    defaultApprove: "all",
+    label: "默认批准一切 · 沙箱仍在，只是不拦截",
   },
 };
 
@@ -66,24 +73,38 @@ export function capabilitiesOf(mode: SandboxMode): ModeCapabilities {
 }
 
 /**
- * 需要档位提供的能力（进程内工具用）。
+ * 一次调用需要什么越界能力（进程内工具用）。
  *
- * 注意**没有 network** —— 联网不走档位，走 CapabilityGrant 的按次授权。
+ * 注意**没有 network 的档位含义** —— 联网不走档位，走 CapabilityGrant 的按次授权。
+ * 这里列出它只是为了让"需不需要问"这件事有一个统一的判定入口。
  */
 export interface ModeRequirement {
   /** 需要写工作区。 */
   write?: boolean;
+  /** 需要写工作区之外。只能由**逐次**判断得出（路径参数决定），不能静态声明。 */
+  writeOutside?: boolean;
 }
 
-/** 当前档位是否已覆盖该需求。 */
-export function modeSatisfies(mode: SandboxMode, requirement: ModeRequirement): boolean {
-  const caps = MODES[mode];
-  if (requirement.write === true && !caps.workspaceWrite) return false;
+/**
+ * 当前档位的默认批准范围是否覆盖该需求。
+ *
+ * `false` 的含义是"需要逐次批准"，**不是"不允许"**。
+ */
+export function defaultApproves(mode: SandboxMode, requirement: ModeRequirement): boolean {
+  const approve = MODES[mode].defaultApprove;
+  if (approve === "all") return true;
+  if (requirement.writeOutside === true) return false;
+  if (requirement.write === true) return approve === "workspace-write";
   return true;
 }
 
-/** 满足需求的最低档位（用于提示用户"需要升到哪一档"）。 */
+/**
+ * 想满足该需求，用户至少要切到哪一档。
+ *
+ * 只用于**提示文案**（"切到 X 档就不用每次问了"），不用于自动改档位。
+ */
 export function minimumModeFor(requirement: ModeRequirement): SandboxMode {
+  if (requirement.writeOutside === true) return "no-sandbox";
   return requirement.write === true ? "workspace-write" : "read-only";
 }
 
@@ -97,11 +118,12 @@ export function escalate(mode: SandboxMode, steps = 1): SandboxMode {
 export function describeRequirement(requirement: ModeRequirement): string {
   const parts: string[] = [];
   if (requirement.write === true) parts.push("写入工作区");
+  if (requirement.writeOutside === true) parts.push("写入工作区之外");
   return parts.join(" + ") || "该操作";
 }
 
 /* ------------------------------------------------------------------ */
-/* 按次能力授权（网络）                                                 */
+/* 按次能力授权                                                         */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -110,15 +132,20 @@ export function describeRequirement(requirement: ModeRequirement): string {
  * 联网走这条路：命令先在断网沙箱里真跑一次，失败了再拿着**真实失败原因**
  * 去问用户。而不是先拦下来问一个没有上下文的"是否允许联网" ——
  * 那样用户（尤其是新手）根本不知道自己在批准什么。
+ *
+ * 写工作区外走同一条路：路径参数决定这次调用越不越界，所以只能逐次判、
+ * 逐次问。
  */
 export interface CapabilityGrant {
   /** 允许联网。 */
   network?: boolean;
+  /** 允许本次调用写工作区之外。 */
+  writeOutside?: boolean;
 }
 
 export function describeCapability(grant: CapabilityGrant): string {
   const parts: string[] = [];
   if (grant.network === true) parts.push("访问网络");
+  if (grant.writeOutside === true) parts.push("写入工作区之外");
   return parts.join(" + ") || "该能力";
 }
-

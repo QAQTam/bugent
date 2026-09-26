@@ -94,6 +94,8 @@ export async function applyWorkspaceUndo(
   }
 
   const staged = new Map<string, string | undefined>();
+  /** 每个 path 在 undo 前的真实状态 —— 提交失败时按它回滚（BUG-019）。 */
+  const preCommit = new Map<string, string | undefined>();
   const applied: string[] = [];
   const readStaged = async (path: string): Promise<string | undefined> => {
     if (staged.has(path)) return staged.get(path);
@@ -106,6 +108,7 @@ export async function applyWorkspaceUndo(
     if (!file.reversible) continue;
 
     const current = await readStaged(file.path);
+    if (!preCommit.has(file.path)) preCommit.set(file.path, current ?? undefined);
     if (!matchesAfterState(current, file)) {
       return { ok: false, applied: [], conflicts: [file.path], skipped: [...plan.irreversible] };
     }
@@ -133,9 +136,40 @@ export async function applyWorkspaceUndo(
     if (!applied.includes(file.path)) applied.push(file.path);
   }
 
-  for (const [path, text] of staged) {
-    if (text === undefined) await fs.remove(path);
-    else await fs.write(path, text);
+  /*
+   * 提交（BUG-019）：两阶段 + 失败回滚。
+   * 旧实现顺序写盘，半途失败（ENOSPC / EACCES）会留下"半套 undo"，且与
+   * 预检之间没有回滚手段。现在每个 path 的提交前状态都在 preCommit 里 ——
+   * 任何一步失败就按逆序把已提交的 path 恢复到提交前状态，再如实抛错。
+   * 回滚自身失败属于磁盘级灾难，抛出合并错误提醒用户手动处理。
+   */
+  const committed: { path: string; previous: string | undefined }[] = [];
+  try {
+    for (const [path, text] of staged) {
+      const previous = preCommit.get(path);
+      if (text === undefined) await fs.remove(path);
+      else await fs.write(path, text);
+      committed.push({ path, previous });
+    }
+  } catch (error) {
+    const rollbackErrors: string[] = [];
+    for (const entry of committed.reverse()) {
+      try {
+        if (entry.previous === undefined) await fs.remove(entry.path);
+        else await fs.write(entry.path, entry.previous);
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `${entry.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        );
+      }
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (rollbackErrors.length > 0) {
+      throw new Error(
+        `undo 提交失败（${message}），回滚也失败，请手动检查：${rollbackErrors.join("；")}`,
+      );
+    }
+    throw error;
   }
 
   return { ok: true, applied, conflicts: [], skipped: [...plan.irreversible] };

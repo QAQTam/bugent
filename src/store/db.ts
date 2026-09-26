@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 const GOAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS session_goals (
@@ -273,11 +273,12 @@ CREATE TABLE IF NOT EXISTS events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, msgid);
 CREATE INDEX IF NOT EXISTS idx_branches_session ON branches(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_providers_session ON session_providers(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id, at);
+/* messages 不再建 idx_messages_session：与主键 (session_id, msgid) 完全同构，
+ * 每条消息写入都要多维护一份（PERF-006）。v11 迁移里 DROP。 */
 
 ${GOAL_SCHEMA}
 `;
@@ -427,6 +428,12 @@ function migrate(db: Database): void {
   if (version < 10) {
     db.exec(GOAL_SCHEMA);
   }
+
+  if (version < 11) {
+    // idx_messages_session 与 messages 主键 (session_id, msgid) 完全同构，
+    // 纯写放大（PERF-006）。老库的残留索引在这里清掉。
+    db.exec("DROP INDEX IF EXISTS idx_messages_session;");
+  }
 }
 
 /**
@@ -467,6 +474,10 @@ export function openDatabase(options: OpenDatabaseOptions): Database {
   // 所以不能指望构造参数，必须显式设 PRAGMA。
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec("PRAGMA foreign_keys = ON");
+  // WAL 下 NORMAL 仍是进程崩溃安全的（只丢 OS 掉电窗口），但把每条消息
+  // 一次的 WAL fsync 省掉 —— 消息是同步 API 逐条写的，FULL 会把 agent 循环
+  // 卡在磁盘上。
+  db.exec("PRAGMA synchronous = NORMAL");
 
   // journal_mode 切换与建表都可能撞上别的进程，需要重试。
   // 多个进程同时首次建库时，这里是唯一的真实争用点。

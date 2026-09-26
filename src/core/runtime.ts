@@ -9,6 +9,7 @@ import type { AgentSession } from "./session.ts";
 import type { PermissionGate } from "../permission/gate.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import type { SandboxMode } from "../permission/mode.ts";
+import type { AuthorizationOutcome } from "../permission/authorization.ts";
 import type { ToolRegistry } from "../tools/types.ts";
 import type { AuditTrail } from "../store/audit.ts";
 import type { ModelClient } from "../provider/types.ts";
@@ -90,8 +91,8 @@ export class SessionRuntime {
 
 /** runtime 只需要这两个权限交互入口；TUI 会提供更完整的 interaction。 */
 export interface SessionInteraction {
-  askPermission(request: PermissionRequest): Promise<boolean>;
-  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean>;
+  askPermission(request: PermissionRequest): Promise<AuthorizationOutcome>;
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<AuthorizationOutcome>;
 }
 
 export interface CreateSessionRuntimeOptions {
@@ -123,6 +124,12 @@ export interface CreateSessionRuntimeOptions {
   /** 省略时沿用该 session 已保存的档位，再退回 workspace-write。 */
   mode?: SandboxMode;
   writablePaths?: readonly string[];
+  /**
+   * 沙箱子进程是否允许联网。默认 false（联网走按次授权）。
+   *
+   * 由 `--allow-network` / `config.sandbox.allowNetwork` 传入。
+   */
+  allowNetwork?: boolean;
   passEnv?: readonly string[];
   policy: import("../permission/policy.ts").PermissionPolicy;
   interaction: SessionInteraction;
@@ -255,6 +262,7 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
   const setup = createDefaultTools({
     mode,
     ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
+    ...(options.allowNetwork !== undefined ? { allowNetwork: options.allowNetwork } : {}),
     ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
     ...(goalController !== undefined ? { goalController } : {}),
     agentTools: {
@@ -309,8 +317,8 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
     mode: setup.mode,
     prompter: { ask: (request) => options.interaction.askPermission(request) },
     ...(audit !== undefined ? { onDecision: (decision) => audit.permission(decision) } : {}),
-    onEscalate: async (request, needed) =>
-      (await options.interaction.confirmModeChange(request, needed)) ? needed : undefined,
+    onEscalate: (request, needed) =>
+      options.interaction.confirmModeChange(request, needed),
   });
   setup.registry.setGate(gate);
 

@@ -82,6 +82,43 @@ describe("provider profile export/import", () => {
     });
   });
 
+  test("BUG-013: headers / proxy userinfo / extraBody 里的密钥在导出时脱敏", () => {
+    const store = makeStore();
+    store.setProviderConfig("s1", {
+      id: "gw",
+      endpoint: "openai-chat",
+      baseUrl: "https://gw.example/v1",
+      headers: {
+        Authorization: "Bearer sk-gateway-secret-123",
+        "X-Custom-Trace": "trace-42",
+        Cookie: "session=abc",
+      },
+      extraBody: {
+        api_key: "sk-inline-extra-body-key",
+        note: "just a normal note",
+        nested: { token: "eyJhbGciOiJIUzI1NiJ9.e30.abc" },
+      },
+      proxy: "http://user:hunter2@proxy.example:3128",
+    } as never);
+
+    const exported = exportProviderProfiles(store, "s1");
+    const provider = exported.providers[0]!;
+
+    expect(provider.headers?.Authorization).toBe("__REDACTED__");
+    expect(provider.headers?.Cookie).toBe("__REDACTED__");
+    // 非敏感 header 原样保留
+    expect(provider.headers?.["X-Custom-Trace"]).toBe("trace-42");
+    expect(provider.extraBody?.api_key).toBe("__REDACTED__");
+    expect(provider.extraBody?.note).toBe("just a normal note");
+    expect((provider.extraBody?.nested as Record<string, unknown>).token).toBe("__REDACTED__");
+    expect(provider.proxy).toBe("http://proxy.example:3128");
+
+    const text = serializeProviderProfiles(exported);
+    expect(text).not.toContain("sk-gateway-secret-123");
+    expect(text).not.toContain("hunter2");
+    expect(text).not.toContain("sk-inline-extra-body-key");
+  });
+
   test("序列化后可以解析回版本化文档", () => {
     const store = makeStore();
     store.setProviderConfig("s1", {

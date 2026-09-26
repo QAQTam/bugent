@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { relativeTo, resolveWithin } from "../tools/paths.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
@@ -6,9 +7,20 @@ import { deriveNewContentsFromChunks } from "./file-update.ts";
 import { parsePatch, type ParseMode } from "./parser.ts";
 import type { ApplyPatchArgs, ApplyPatchFileUpdateMode, Hunk } from "./types.ts";
 
+/** BUG-018：patch 目标文件的全文缓冲上限（读前先 stat，防 OOM）。 */
+export const MAX_PATCH_TARGET_BYTES = 64 * 1024 * 1024;
+
 export interface ApplyPatchToWorkspaceOptions {
   readonly parseMode?: ParseMode;
   readonly updateFileMode?: ApplyPatchFileUpdateMode;
+  /**
+   * 路径解析器。默认 `resolveWithin(cwd, path)` —— 只能落在工作区内。
+   *
+   * 调用方在**本次调用获准越界**时传入更宽的解析器（见
+   * `src/tools/paths.ts` 的 `resolveForWrite`），否则 patch 里的越界路径
+   * 会在解析这一步直接抛错，永远走不到闸门。
+   */
+  readonly resolvePath?: (path: string) => string;
 }
 
 export interface ApplyPatchToWorkspaceResult {
@@ -25,6 +37,8 @@ interface ExistingFile {
   readonly mode: number | undefined;
 }
 
+const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true });
+
 async function readExisting(path: string): Promise<ExistingFile> {
   let fileStat;
   try {
@@ -36,9 +50,25 @@ async function readExisting(path: string): Promise<ExistingFile> {
     throw error;
   }
   if (!fileStat.isFile()) throw new Error(`not a regular file: ${path}`);
+  // BUG-018：patch 是全文缓冲 + 全文写回 —— 先看尺寸再读，别把 agent 进程
+  // OOM 在一个几 GB 的日志上。上限与 write_file 的 MAX_WRITE_BYTES 同档。
+  if (fileStat.size > MAX_PATCH_TARGET_BYTES) {
+    throw new Error(
+      `refusing to patch a ${fileStat.size}-byte file (limit ${MAX_PATCH_TARGET_BYTES}): ${path}`,
+    );
+  }
   const bytes = await readFile(path);
   if (bytes.includes(0)) throw new Error(`refusing to modify a binary file: ${path}`);
-  return { exists: true, text: bytes.toString("utf8"), mode: fileStat.mode & 0o777 };
+  let text: string;
+  try {
+    text = UTF8_STRICT.decode(bytes);
+  } catch {
+    // 宽松解码会把非 UTF-8 字节变成 U+FFFD，写回即整文件静默损坏。
+    throw new Error(
+      `refusing to modify a non-UTF-8 file (decoding losslessly is required, otherwise the file would be corrupted): ${path}`,
+    );
+  }
+  return { exists: true, text, mode: fileStat.mode & 0o777 };
 }
 
 async function atomicWrite(path: string, text: string, mode: number | undefined): Promise<void> {
@@ -70,6 +100,7 @@ export async function applyPatchToWorkspace(
   if (args.hunks.length === 0) throw new Error("No files were modified.");
 
   const updateMode = options.updateFileMode ?? "normalize-lf";
+  const resolveTarget = options.resolvePath ?? ((path: string) => resolveWithin(cwd, path));
   const states = new Map<string, string | undefined>();
   const originals = new Map<string, ExistingFile>();
 
@@ -88,9 +119,18 @@ export async function applyPatchToWorkspace(
   };
 
   for (const hunk of args.hunks) {
-    const source = resolveWithin(cwd, hunk.path);
+    const source = resolveTarget(hunk.path);
     if (hunk.type === "add") {
-      await load(source);
+      // Add File 不能静默覆盖已存在的文件（.env / config.json 清成模板就是
+      // 一次数据损失）。本 patch 自己先删/先建过这条路径的除外。
+      if (!states.has(source)) {
+        const existing = await load(source);
+        if (existing.exists) {
+          throw new Error(
+            `Add File failed: file already exists ${relativeTo(cwd, source)} —— 修改已有文件请用 *** Update File:`,
+          );
+        }
+      }
       states.set(source, hunk.contents);
       continue;
     }
@@ -109,7 +149,14 @@ export async function applyPatchToWorkspace(
       updateMode,
     );
     if (hunk.movePath !== undefined) {
-      const destination = resolveWithin(cwd, hunk.movePath);
+      const destination = resolveTarget(hunk.movePath);
+      if (destination === source) {
+        // states.set(destination, ...) 先写、states.set(source, undefined) 后写，
+        // 同路径时后者把前者清成"删除"—— patch 跑完文件就没了。
+        throw new Error(
+          `Update File + Move to the same path would delete it: ${relativeTo(cwd, source)} —— Move to 需要一个不同的目标路径`,
+        );
+      }
       await load(destination);
       states.set(destination, derived.newContents);
       states.set(source, undefined);
@@ -143,10 +190,26 @@ export async function applyPatchToWorkspace(
   }
 
   const stagedTemps = new Map<string, string>();
+  /*
+   * BUG-012：提交期边界复核。staging/rename 会穿透中间目录的符号链接，
+   * 并行工具批可以在"resolve 之后、提交之前"把目录换成指向工作区外的链接。
+   * 授权放宽（自定义 resolvePath）时不再核对 —— 边界由授权负责。
+   */
+  const verifyInsideWorkspace = (target: string): void => {
+    if (options.resolvePath !== undefined) return;
+    let real: string | undefined;
+    try {
+      real = realpathSync(target);
+    } catch {
+      return; // 目标不存在：rename/unlink 会给出自己的错误
+    }
+    resolveWithin(cwd, real);
+  };
   try {
     for (const [path, after] of states) {
       if (after === undefined) continue;
       await mkdir(dirname(path), { recursive: true });
+      verifyInsideWorkspace(dirname(path));
       const temp = `${path}.bugent-patch-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const original = await load(path);
       await writeFile(temp, after, {
@@ -159,11 +222,14 @@ export async function applyPatchToWorkspace(
 
     for (const [path, after] of states) {
       if (after === undefined) {
+        verifyInsideWorkspace(dirname(path));
         await unlink(path);
       } else {
         const temp = stagedTemps.get(path);
         if (temp === undefined) throw new Error(`internal: missing staged temp for ${path}`);
+        verifyInsideWorkspace(dirname(path));
         await rename(temp, path);
+        verifyInsideWorkspace(path);
       }
     }
   } catch (error) {

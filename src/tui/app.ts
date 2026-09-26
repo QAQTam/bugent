@@ -29,6 +29,13 @@ import type { MsgId, StoredMessage } from "../core/message.ts";
 import { storedText } from "../core/message.ts";
 import type { ToolRegistry } from "../tools/types.ts";
 import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
+import {
+  AUTHORIZATION_TIMEOUT_MS,
+  formatCountdown,
+  withAuthorizationWindow,
+  type AuthorizationOutcome,
+} from "../permission/authorization.ts";
+import type { AuthorizationAlert } from "../permission/alert.ts";
 import { PatchStreamProgress } from "../patch/streaming-progress.ts";
 import { parseModelRef } from "../provider/registry.ts";
 import type { PersistedProviderConfig } from "../provider/registry.ts";
@@ -54,6 +61,7 @@ import { LezerMarkdownBoundaryTracker } from "./lezer-markdown-boundary.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
+import { looksLikeSlashCommand } from "./input-command.ts";
 import {
   composeInputBox,
   inputBoxGeometry,
@@ -75,6 +83,7 @@ import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "
 import { applyTheme, COLOR } from "./theme.ts";
 import { detectTerminalBackground } from "./background.ts";
 import { renderToolItem } from "./renderers.ts";
+import { renderReasoningItem } from "./render-reasoning.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel, TODO_COLLAPSED_LINES } from "./render-todo.ts";
 import {
@@ -137,8 +146,15 @@ import {
   type AskUserAnswer,
   type AskUserQuestion,
 } from "./ask-user.ts";
-import { currentTodoList, type TodoList } from "../tools/todo.ts";
+import {
+  SettingsPanel,
+  centeredPanelTop,
+  panelRowBudget,
+  type SettingsRow,
+} from "./settings-panel.ts";
+import { currentTodoList, TODO_TOOL_NAME, type TodoList } from "../tools/todo.ts";
 import { createWorkspaceFs } from "../tools/workspace-fs.ts";
+import { FileStreamProgress, isFileToolName } from "../tools/file-progress.ts";
 import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, isSandboxMode, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
@@ -171,6 +187,8 @@ interface RenderedDialog {
     /** 左上角字形，自检锚点用它比对画面。 */
     glyph: string;
   }[];
+  /** 设置面板的可点行（弹窗局部 0-based 行号 -> 行下标）。 */
+  settingsRows?: { line: number; index: number }[];
 }
 
 /** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
@@ -227,6 +245,12 @@ interface PendingDialog {
   hint: string;
   /** 可鼠标点击的按钮。键盘路径仍然保留。 */
   actions: readonly DialogAction[];
+  /**
+   * 授权窗口剩余毫秒。有值时标题右侧画倒计时（`需要授权 · 访问网络 · 还剩 47s`）。
+   *
+   * 存成取值函数而不是数字：窗口每秒回调一次，渲染时现取，免得再同步一份状态。
+   */
+  countdown?: () => number;
   resolve: (value: boolean) => void;
 }
 
@@ -253,7 +277,9 @@ type ButtonTarget =
   | { kind: "message"; value: MessageAction }
   | { kind: "moreHistory" }
   | { kind: "returnToLatest" }
-  | { kind: "todoToggle" };
+  | { kind: "todoToggle" }
+  /** 设置面板的一行：悬停/按下高亮与点击激活都按行号走。 */
+  | { kind: "settingsRow"; index: number };
 
 /** 按钮的稳定身份；比较悬停/按下目标时只认它。 */
 function buttonKey(target: ButtonTarget | undefined): string | undefined {
@@ -270,6 +296,8 @@ function buttonKey(target: ButtonTarget | undefined): string | undefined {
       return "returnToLatest";
     case "todoToggle":
       return "todoToggle";
+    case "settingsRow":
+      return `settings:${target.index}`;
   }
 }
 
@@ -315,9 +343,9 @@ function todoImpact(before: TodoList, after: TodoList): string {
 /** 屏幕坐标命中区间；row 为 1-based。 */
 
 export interface TuiInteraction {
-  askPermission(request: PermissionRequest): Promise<boolean>;
-  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean>;
-  requestCapability(escalation: CapabilityEscalation): Promise<boolean>;
+  askPermission(request: PermissionRequest): Promise<AuthorizationOutcome>;
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<AuthorizationOutcome>;
+  requestCapability(escalation: CapabilityEscalation): Promise<AuthorizationOutcome>;
   askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined>;
 }
 
@@ -355,6 +383,16 @@ export interface TuiOptions {
   banner?: string;
   /** 沙箱档位，用于状态栏与升档提示。 */
   mode?: SandboxMode;
+  /**
+   * 授权窗口长度（毫秒）。默认 60 秒 —— 生产路径不要传这个。
+   * 存在的唯一理由：PTY 用例要能验证"到点自动拒绝"，不能真等一分钟。
+   */
+  authorizationTimeoutMs?: number;
+  /**
+   * 授权硬件提醒。弹窗出现、最后 10 秒倒计时、以及批准/拒绝时各响一次，
+   * 让用户不用盯着屏幕也知道有授权在等。未传 = 不提醒。
+   */
+  alert?: AuthorizationAlert;
   /** 当前 session 的 Goal Contract controller；未持久化时省略。 */
   goalController?: GoalController;
   /** 实验性自动 continuation；默认关闭。 */
@@ -424,6 +462,9 @@ export class TuiApp implements TuiInteraction {
    */
   #textPacer = new StreamPacer({ targetTokensPerSecond: 120 });
   #reasoningPacer = new StreamPacer({ targetTokensPerSecond: 120 });
+  /** 当前 assistant step 的 live Thought；完成后清空。 */
+  #liveReasoningId: string | undefined;
+  #liveReasoningStartedAt: number | undefined;
   /**
    * 已收到 onAssistant、但显示队列还没排空的消息 id。
    *
@@ -434,6 +475,8 @@ export class TuiApp implements TuiInteraction {
   #pendingAssistantEnd: MsgId | undefined;
   /** apply_patch 参数流式解析器；工具真正开始时移除。 */
   #patchStreams = new Map<string, PatchStreamProgress>();
+  /** write_file / edit_file 参数流式解析器（实时路径与行数）。 */
+  #fileStreams = new Map<string, FileStreamProgress>();
   /** 块级布局缓存：滚动/流式渲染不再重跑整段历史。 */
   #layout = new TranscriptLayout<DisplayItem>();
   /**
@@ -539,11 +582,22 @@ export class TuiApp implements TuiInteraction {
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
+  /** 授权窗口长度。生产固定 60 秒；测试传小值，免得 PTY 用例等满一分钟。 */
+  #authorizationTimeoutMs = AUTHORIZATION_TIMEOUT_MS;
+  /**
+   * 授权硬件提醒（主板蜂鸣器 / 声卡）。未配置时为 undefined，
+   * 此时行为与之前完全一致。见 src/permission/alert.ts。
+   */
+  #alert: AuthorizationAlert | undefined;
   /** 待处理的消息操作菜单。 */
   #pendingMessageMenu: PendingMessageMenu | undefined;
   /** 进行中的 ask_user 问答流程。 */
   #askFlow: AskUserFlow | undefined;
   #askResolve: ((answers: AskUserAnswer[] | undefined) => void) | undefined;
+  /** 打开的设置面板（`/setting`）。与其它覆盖层互斥。 */
+  #settingsPanel: SettingsPanel | undefined;
+  /** 设置面板编辑态的硬件光标（面板局部坐标）；每帧由渲染分支写入。 */
+  #settingsCursor: { line: number; column: number } | undefined;
   /** 对话框在屏幕上的起始行（0-based；-1 表示当前没有对话框）。鼠标命中要用。 */
   #dialogTopRow = -1;
   /** 对话框占用的行数；用于把鼠标事件限制在弹窗区域。 */
@@ -558,6 +612,8 @@ export class TuiApp implements TuiInteraction {
   #messageButtonHits: { value: MessageAction; rect: HitRect; glyph: string }[] = [];
   /** ask_user 表单每一行的屏幕矩形。 */
   #askLineHits: { value: number; rect: HitRect }[] = [];
+  /** 设置面板每一行的屏幕矩形。 */
+  #settingsRowHits: { value: number; rect: HitRect }[] = [];
   /** 弹窗整体矩形：范围内、按钮之外的点击被吞掉，不穿透到下面的消息列表。 */
   #dialogRect: HitRect | undefined;
   /**
@@ -572,7 +628,7 @@ export class TuiApp implements TuiInteraction {
   #pressedButton: ButtonTarget | undefined;
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
-  #todoCache: { key: string; list: TodoList } | undefined;
+  #todoCache: { lastMsgid: MsgId; length: number; list: TodoList } | undefined;
   /** in_progress shimmer 相位；0..1。 */
   #todoShimmer = 0;
   /** shimmer 定时器。只在当前 turn 且有 in_progress 时运行。 */
@@ -580,6 +636,8 @@ export class TuiApp implements TuiInteraction {
 
   /** 上一次渲染时每个工具条目占用的 body 行区间，用于鼠标点击命中。 */
   #toolHits: { callId: string; rect: HitRect }[] = [];
+  /** Thought 头部行；展开只允许点头部，避免长正文误触折叠。 */
+  #reasoningHits: { id: string; rect: HitRect }[] = [];
   /** 上一次渲染时每条可操作消息占用的 body 行区间。 */
   #messageHits: { msgid: MsgId; undoMsgid: MsgId; rect: HitRect }[] = [];
   /** body 视窗在完整内容里的起始下标。 */
@@ -637,6 +695,10 @@ export class TuiApp implements TuiInteraction {
     this.#branchService = options.branchService;
     this.#audit = options.audit;
     this.#mode = options.mode ?? "workspace-write";
+    if (options.authorizationTimeoutMs !== undefined) {
+      this.#authorizationTimeoutMs = options.authorizationTimeoutMs;
+    }
+    this.#alert = options.alert;
     this.#goalController = options.goalController;
     this.#goalAutoContinue = options.goalAutoContinue ?? false;
     this.#maxGoalContinuationTurns = options.maxGoalContinuationTurns ?? 50;
@@ -676,18 +738,16 @@ export class TuiApp implements TuiInteraction {
    * 权限确认入口，供 PermissionGate 调用。
    * 会挂起当前 turn，直到用户按下 y / n。
    */
-  askPermission(request: PermissionRequest): Promise<boolean> {
-    return this.#serializeInteraction(() =>
-      this.#openDialog({
-        title: `权限确认 · ${request.tool}`,
-        body: [request.summary],
-        hint: `${DIM}Esc / Enter 取消${RESET}`,
-        actions: [
-          { label: "同意", value: true, tone: "ok", shortcut: "y" },
-          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
-        ],
-      }),
-    );
+  askPermission(request: PermissionRequest): Promise<AuthorizationOutcome> {
+    return this.#authorize({
+      title: `权限确认 · ${request.tool}`,
+      body: [request.summary],
+      hint: `${DIM}Esc / Enter 取消${RESET}`,
+      actions: [
+        { label: "同意", value: true, tone: "ok", shortcut: "y" },
+        { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+      ],
+    });
   }
 
   /**
@@ -696,18 +756,16 @@ export class TuiApp implements TuiInteraction {
    * 弹窗里一定带**真实原因与细节**（哪条命令、什么报错）——
    * 否则用户看到的是一句没有上下文的"是否允许联网"，根本不知道在批准什么。
    */
-  requestCapability(escalation: CapabilityEscalation): Promise<boolean> {
-    return this.#serializeInteraction(() =>
-      this.#openDialog({
-        title: `需要授权 · ${describeCapability(escalation.capability)}`,
-        body: [escalation.reason, ...(escalation.details ?? [])],
-        hint: `${DIM}Esc / Enter 取消${RESET}`,
-        actions: [
-          { label: "允许这一次", value: true, tone: "warn", shortcut: "y" },
-          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
-        ],
-      }),
-    );
+  requestCapability(escalation: CapabilityEscalation): Promise<AuthorizationOutcome> {
+    return this.#authorize({
+      title: `需要授权 · ${describeCapability(escalation.capability)}`,
+      body: [escalation.reason, ...(escalation.details ?? [])],
+      hint: `${DIM}Esc / Enter 取消${RESET}`,
+      actions: [
+        { label: "允许这一次", value: true, tone: "warn", shortcut: "y" },
+        { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+      ],
+    });
   }
 
   /**
@@ -715,24 +773,64 @@ export class TuiApp implements TuiInteraction {
    *
    * 和权限确认共用同一个对话框 —— 将来 `ask_user` 也接这里。
    */
-  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean> {
-    return this.#serializeInteraction(() =>
-      this.#openDialog({
-        title: `需要更高档位 · ${needed}`,
-        body: [
-          `${request.tool} 想${request.summary}`,
-          `当前档位（${this.#mode}）不允许，需要升到 ${needed}`,
-        ],
-        hint: `${DIM}Esc / Enter 取消${RESET}`,
-        actions: [
-          { label: `升到 ${needed}`, value: true, tone: "warn", shortcut: "y" },
-          { label: "拒绝", value: false, tone: "error", shortcut: "n" },
-        ],
-      }).then((approved) => {
-        if (approved) this.#mode = needed;
-        return approved;
-      }),
-    );
+  /**
+   * 越出默认批准范围的**按次**授权入口。
+   *
+   * 关键：批准**不改档位**。把"批准这次写盘"实现成"永久升到 workspace-write"，
+   * 会让 read-only 从"每次写入都要审批"退化成"审批一次之后随便写"。
+   * 改档位只能由用户主动切换（`/mode` 命令那条路径）。
+   */
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<AuthorizationOutcome> {
+    return this.#authorize({
+      title: `需要按次授权 · ${needed}`,
+      body: [
+        `${request.tool} 想${request.summary}`,
+        `当前档位（${this.#mode}）下这需要逐次批准；批准只对这一次生效`,
+      ],
+      hint: `${DIM}Esc / Enter 取消${RESET}`,
+      actions: [
+        { label: "批准这一次", value: true, tone: "warn", shortcut: "y" },
+        { label: "拒绝", value: false, tone: "error", shortcut: "n" },
+      ],
+    });
+  }
+
+  /**
+   * 三个授权入口共用的外壳：开弹窗 + 套 60 秒窗口 + 画倒计时。
+   *
+   * 倒计时走 `#requestFrame()`（与其他动画同一条帧调度），不另起一套重绘。
+   * 窗口到点时主动关掉弹窗 —— 否则那句提问会一直留在屏幕上，用户回来
+   * 按一下"允许"却发现模型早就按超时走了。
+   */
+  #authorize(dialog: Omit<PendingDialog, "resolve" | "countdown">): Promise<AuthorizationOutcome> {
+    let remaining = this.#authorizationTimeoutMs;
+    const alert = this.#alert;
+    return this.#serializeInteraction(async () => {
+      // 弹窗一出现就先响一次，把注意力从别的窗口拉回来；随后每秒的
+      // onTick 负责最后 N 秒的升级提醒（同一档只响一次，见 alert.ts）。
+      alert?.begin(this.#authorizationTimeoutMs);
+      const outcome = await withAuthorizationWindow({
+        timeoutMs: this.#authorizationTimeoutMs,
+        onTick: (ms) => {
+          remaining = ms;
+          alert?.tick(ms);
+          this.#requestFrame(true);
+        },
+        request: (signal) => {
+          const onAbort = (): void => {
+            // 只有弹窗还开着才需要关；用户已经答过的话它早就没了。
+            if (this.#pendingDialog !== undefined) this.#finishDialog(false);
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          return this.#openDialog({ ...dialog, countdown: () => remaining }).finally(() => {
+            signal.removeEventListener("abort", onAbort);
+          });
+        },
+      });
+      // 批准/拒绝/超时各有一个收尾音，用户回来时至少知道结论是什么。
+      alert?.end(outcome);
+      return outcome;
+    });
   }
 
   /**
@@ -745,6 +843,8 @@ export class TuiApp implements TuiInteraction {
     return this.#serializeInteraction(
       () =>
         new Promise<AskUserAnswer[] | undefined>((resolve) => {
+          // 同上：ask 表单是阻塞式交互，设置面板先让位
+          this.#closeSettingsPanel();
           this.#askResolve = resolve;
           this.#askFlow = new AskUserFlow({
             questions,
@@ -777,6 +877,9 @@ export class TuiApp implements TuiInteraction {
 
   #openDialog(dialog: Omit<PendingDialog, "resolve">): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
+      // 阻塞式交互优先：设置面板必须先让位。否则它会盖住弹窗、按键又被面板
+      // 吃掉，用户只会看到一个超时的授权窗口，完全不知道发生了什么。
+      this.#closeSettingsPanel();
       this.#clearButtonInteraction();
       this.#pendingDialog = { ...dialog, resolve };
       this.#requestFrame(true);
@@ -842,6 +945,15 @@ export class TuiApp implements TuiInteraction {
   }
 
   #handleKey(key: Key): void {
+    // 设置面板是模态浮层：打开期间按键全部归它。
+    // 鼠标仍要放行给统一路由，否则点行永远收不到事件。
+    const panel = this.#settingsPanel;
+    if (panel !== undefined) {
+      if (key.type === "mouse") this.#handleMouse(key);
+      else if (panel.handleKey(key) === "close") this.#closeSettingsPanel();
+      return;
+    }
+
     // ask_user 问答优先：它是多页表单，有自己的按键语义
     if (this.#askFlow !== undefined) {
       // 但鼠标要放行 —— 点击选项是问答的核心交互之一，
@@ -1000,6 +1112,16 @@ export class TuiApp implements TuiInteraction {
       }
     }
 
+    // 滚轮：设置面板打开时滚面板自己（当前焦点在面板里），否则滚正文。
+    // 这也是"面板能装下比屏幕更多的行"的唯一手段。
+    if (
+      (key.button === "wheelUp" || key.button === "wheelDown") &&
+      this.#settingsPanel !== undefined
+    ) {
+      this.#settingsPanel.scrollViewport(key.button === "wheelUp" ? -1 : 1);
+      return;
+    }
+
     if (key.button === "wheelUp") {
       if (
         this.#pendingMessageMenu !== undefined ||
@@ -1037,6 +1159,7 @@ export class TuiApp implements TuiInteraction {
       const target = this.#buttonTargetAt(key.x, key.y);
       if (!this.#sameButtonTarget(this.#hoveredButton, target)) {
         this.#hoveredButton = target;
+        this.#syncSettingsHighlight();
         this.#requestFrame(true);
       }
       return;
@@ -1049,18 +1172,21 @@ export class TuiApp implements TuiInteraction {
       if (key.pressed) {
         if (target !== undefined) {
           this.#pressedButton = target;
+          this.#syncSettingsHighlight();
           this.#requestFrame(true);
           return;
         }
         // 按在按钮之外：清掉上一次残留的按下态（按住按钮拖出去就是这种）
         if (this.#pressedButton !== undefined) {
           this.#pressedButton = undefined;
+          this.#syncSettingsHighlight();
           this.#requestFrame(true);
         }
       } else {
         const pressed = this.#pressedButton;
         if (pressed !== undefined) {
           this.#pressedButton = undefined;
+          this.#syncSettingsHighlight();
           if (this.#sameButtonTarget(pressed, target)) this.#invokeButton(pressed);
           else this.#requestFrame(true);
           return;
@@ -1090,6 +1216,10 @@ export class TuiApp implements TuiInteraction {
         // 点到选项就选中/勾选；点到弹窗其它区域时吞掉事件，不穿透到消息列表
         if (this.#askFlow?.clickLine(target.line) === true) this.#requestFrame(true);
         return;
+      case "settingsRow":
+        // 单击选中、再点同一行才激活；面板自己负责重绘通知
+        this.#settingsPanel?.clickRow(target.index);
+        return;
       case "dialogBody":
         return;
       // 四个按钮目标（moreHistory / returnToLatest / dialogButton / messageButton）
@@ -1099,9 +1229,23 @@ export class TuiApp implements TuiInteraction {
       case "dialogButton":
       case "messageButton":
         return;
-      case "tool":
+      case "tool": {
+        // PERF-002：点到"已释放"的旧卡片 = 请求回放，而不是展开
+        if (this.#transcript.isEvictedTool(target.callId)) {
+          this.#replayEvictedItems();
+          return;
+        }
         // 展开会改变布局，必须整屏重绘而不是走差分
         if (this.#transcript.toggleToolExpanded(target.callId)) this.#requestFrame(true);
+        return;
+      }
+      case "reasoning":
+        if (this.#transcript.isEvictedReasoning(target.id)) {
+          this.#replayEvictedItems();
+          return;
+        }
+        // Thought 完成后默认折叠；只有点击头部这一行才展开完整正文。
+        if (this.#transcript.toggleReasoningExpanded(target.id)) this.#requestFrame(true);
         return;
       case "message":
         this.#openMessageMenu(target.msgid, target.undoMsgid);
@@ -1114,6 +1258,24 @@ export class TuiApp implements TuiInteraction {
   #clearButtonInteraction(): void {
     this.#hoveredButton = undefined;
     this.#pressedButton = undefined;
+    this.#syncSettingsHighlight();
+  }
+
+  /**
+   * 把 hover/press 同步给设置面板。
+   *
+   * 面板要按行号决定高亮与按下态，而鼠标状态是"屏幕矩形 + 语义目标"——
+   * 两者之间只做这一次映射，渲染端不再各算一遍。
+   */
+  #syncSettingsHighlight(): void {
+    const panel = this.#settingsPanel;
+    if (panel === undefined) return;
+    const hovered =
+      this.#hoveredButton?.kind === "settingsRow" ? this.#hoveredButton.index : undefined;
+    const pressed =
+      this.#pressedButton?.kind === "settingsRow" ? this.#pressedButton.index : undefined;
+    panel.setHover(hovered);
+    panel.setPressed(pressed);
   }
 
   #sameButtonTarget(a: ButtonTarget | undefined, b: ButtonTarget | undefined): boolean {
@@ -1164,6 +1326,13 @@ export class TuiApp implements TuiInteraction {
         button: "left",
       });
     }
+    for (const entry of this.#settingsRowHits) {
+      regions.push({
+        target: { kind: "settingsRow", index: entry.value },
+        rect: entry.rect,
+        button: "left",
+      });
+    }
     if (this.#dialogRect !== undefined) {
       regions.push({ target: { kind: "dialogBody" }, rect: this.#dialogRect, button: "left" });
     }
@@ -1192,8 +1361,9 @@ export class TuiApp implements TuiInteraction {
         button: "left",
       });
     }
-    // 工具卡片与普通消息的按键语义集中在 messageRegions（纯函数，单测覆盖）。
-    regions.push(...messageRegions(this.#toolHits, this.#messageHits));
+    // 工具卡片、Thought 头部与普通消息的按键语义集中在 messageRegions
+    // （纯函数，单测覆盖）。
+    regions.push(...messageRegions(this.#toolHits, this.#messageHits, this.#reasoningHits));
 
     return regions;
   }
@@ -1240,6 +1410,8 @@ export class TuiApp implements TuiInteraction {
         return { kind: "returnToLatest" };
       case "todoToggle":
         return { kind: "todoToggle" };
+      case "settingsRow":
+        return { kind: "settingsRow", index: target.index };
       default:
         return undefined;
     }
@@ -1385,6 +1557,10 @@ export class TuiApp implements TuiInteraction {
       case "todoToggle":
         this.#toggleTodoPanel();
         return;
+      case "settingsRow":
+        // 面板自己处理"先选中、再点才激活"，并负责请求重绘
+        this.#settingsPanel?.clickRow(target.index);
+        return;
     }
   }
 
@@ -1472,6 +1648,18 @@ export class TuiApp implements TuiInteraction {
 
   #openHistoryDrawer(): void {
     this.#viewState = openHistoryView(this.#viewState, this.#layout.totalLines, this.#scrollHeight);
+    this.#requestFrame(true);
+  }
+
+  /**
+   * 点击"已释放"占位卡片后的回放（PERF-002）。
+   *
+   * 从会话消息（内存中的会话正文，持久层是 SQLite）整体重建显示流。
+   * 会话正文本身必须留着 —— 那是 provider 上下文的来源；这里释放/恢复的
+   * 是 transcript 这份渲染拷贝（输出原文 + 渲染行缓存，约两份冗余）。
+   */
+  #replayEvictedItems(): void {
+    this.#transcript.rebuildFrom(this.#session.messages);
     this.#requestFrame(true);
   }
 
@@ -1568,7 +1756,12 @@ export class TuiApp implements TuiInteraction {
       void this.#promptApiKey();
       return;
     }
-    if (text.startsWith("/")) {
+    if (text === "/setting" || text === "/settings") {
+      this.#clearInput();
+      this.#openSettingsPanel();
+      return;
+    }
+    if (looksLikeSlashCommand(text)) {
       this.#clearInput();
       this.#transcript.pushError(`未知命令：${text}。输入 / 查看命令菜单`);
       this.#requestFrame();
@@ -1617,6 +1810,7 @@ export class TuiApp implements TuiInteraction {
       { label: "/provider  切换 provider", run: () => this.#chooseProvider() },
       { label: "/model     切换模型", run: () => this.#promptModel() },
       { label: "/key       设置 API key（系统 keychain）", run: () => this.#promptApiKey() },
+      { label: "/setting   打开设置面板（居中浮层）", run: () => this.#openSettingsPanel() },
       { label: "/mode      调整沙箱档位", run: () => this.#chooseSandboxMode() },
       { label: "/new       新建会话", run: () => this.#startNewSession() },
       { label: "/exit      退出", run: () => this.#requestExit() },
@@ -2028,6 +2222,175 @@ export class TuiApp implements TuiInteraction {
     await actions[selected]?.run();
   }
 
+  /* --------------------------- 设置面板 --------------------------- */
+
+  /** `/setting`：屏幕正中的浮层设置表。 */
+  #openSettingsPanel(): void {
+    if (this.#pendingDialog !== undefined || this.#askFlow !== undefined) return;
+    this.#clearButtonInteraction();
+    this.#settingsPanel = new SettingsPanel({
+      rows: this.#settingsRows(),
+      subtitle: this.#session.id,
+      onChange: () => this.#requestFrame(),
+    });
+    this.#requestFrame(true);
+  }
+
+  #closeSettingsPanel(): void {
+    if (this.#settingsPanel === undefined) return;
+    this.#settingsPanel = undefined;
+    this.#settingsRowHits = [];
+    this.#settingsCursor = undefined;
+    this.#clearButtonInteraction();
+    this.#requestFrame(true);
+  }
+
+  /**
+   * 把宿主状态编译成设置行。
+   *
+   * 面板只认回调，不认 provider / 沙箱 / MCP —— 编译放在这里，面板才能用假行
+   * 单测，也才能在同一份渲染与命中代码上接第二种 agent。
+   *
+   * action 行一律"先关面板再走原路径"：那些流程自己会开 ask_user / 对话框，
+   * 两个覆盖层同时打开会让按键路由变成二义。
+   */
+  #settingsRows(): SettingsRow[] {
+    const rows: SettingsRow[] = [];
+    const modes: readonly SandboxMode[] = ["read-only", "workspace-write", "no-sandbox"];
+
+    rows.push({
+      id: "sandbox.mode",
+      section: "沙箱",
+      label: "档位",
+      kind: "enum",
+      options: modes,
+      display: () => this.#mode,
+      apply: (value) => {
+        if (isSandboxMode(value)) this.#reconfigureRuntime({ mode: value });
+      },
+    });
+
+    rows.push({
+      id: "model.provider",
+      section: "模型",
+      label: "provider",
+      kind: "enum",
+      options: this.#providerIds,
+      display: () => this.#providerId,
+      apply: (value) => void this.#applyProvider(value),
+    });
+    rows.push({
+      id: "model.model",
+      section: "模型",
+      label: "模型",
+      kind: "text",
+      display: () => this.#session.model,
+      apply: (value) => {
+        const model = value.trim();
+        if (model.length === 0) return;
+        this.#reconfigureRuntime({ model });
+      },
+    });
+    rows.push({
+      id: "model.apiKey",
+      section: "模型",
+      label: "API key",
+      kind: "text",
+      secret: true,
+      // 只显示"设没设"，不回显也不回填 —— 掩码长度也算泄露
+      display: () => (this.#apiKeyOverride !== undefined ? "已设置" : ""),
+      apply: (value) => void this.#applyApiKey(value),
+    });
+
+    for (const server of this.#mcpServers) {
+      rows.push({
+        id: `mcp.${server.id}`,
+        section: "MCP",
+        label: server.id,
+        kind: "toggle",
+        enabled: () => this.#mcpServers.find((entry) => entry.id === server.id)?.enabled ?? false,
+        apply: () => this.#toggleMcpServer(server.id),
+      });
+    }
+    if (this.#mcpServers.length > 0) {
+      rows.push({
+        id: "mcp.reload",
+        section: "MCP",
+        label: "重载工具快照",
+        kind: "action",
+        display: () => "",
+        invoke: () => {
+          this.#closeSettingsPanel();
+          void this.#chooseMcpReload();
+        },
+      });
+    }
+
+    if (this.#reloadSkills !== undefined) {
+      rows.push({
+        id: "skills.reload",
+        section: "Skills",
+        label: "重载 skills",
+        kind: "action",
+        display: () => "",
+        invoke: () => {
+          this.#closeSettingsPanel();
+          void this.#reloadSkillCatalog();
+        },
+      });
+    }
+
+    rows.push({
+      id: "session.context",
+      section: "会话",
+      label: "查看会话上下文",
+      kind: "action",
+      display: () => "",
+      invoke: () => {
+        this.#closeSettingsPanel();
+        void this.#openContextDialog();
+      },
+    });
+
+    return rows;
+  }
+
+  /** 面板里切 provider：与 `/provider` 同一条路径（含按 provider 取 keychain 里的 key）。 */
+  async #applyProvider(providerId: string): Promise<void> {
+    if (!this.#providerIds.includes(providerId)) return;
+    const providerConfig = this.#providerConfigs.get(providerId);
+    const apiKey = await this.#loadApiKey?.(this.#session.id, providerId);
+    this.#reconfigureRuntime({
+      providerId,
+      ...(providerConfig !== undefined ? { providerConfig } : {}),
+      ...(apiKey !== undefined ? { apiKey } : {}),
+    });
+  }
+
+  /** 面板里改 API key：与 `/key` 同一条路径（落 keychain，失败降级进程内存）。 */
+  async #applyApiKey(secret: string): Promise<void> {
+    const providerId = this.#providerId;
+    if (this.#reconfigureRuntime({ apiKey: secret })) {
+      await this.#saveApiKey?.(this.#session.id, providerId, secret);
+      this.#audit?.sessionConfig({ action: "api_key_set", providerId });
+    }
+  }
+
+  /** 面板里启停单个 MCP server：与「启停 MCP server」同一条路径。 */
+  #toggleMcpServer(serverId: string): void {
+    const target = this.#mcpServers.find((server) => server.id === serverId);
+    if (target === undefined) return;
+    const enabledIds = this.#mcpServers
+      .filter((server) => (server.id === serverId ? !server.enabled : server.enabled))
+      .map((server) => server.id);
+    if (this.#reconfigureRuntime({ mcpServerIds: enabledIds })) {
+      this.#transcript.pushNotice(
+        `MCP server ${serverId} 已${target.enabled ? "停用" : "启用"}（当前 session）`,
+      );
+      this.#requestFrame(true);
+    }
+  }
+
   /** 切换当前 session 的 MCP server 启停状态。 */
   async #chooseMcpServer(): Promise<void> {
     const answers = await this.askUser([
@@ -2121,9 +2484,9 @@ export class TuiApp implements TuiInteraction {
       {
         question: "选择当前 session 的沙箱档位",
         options: [
-          "read-only — 根只读、工作区只读、断网",
-          "workspace-write — 工作区可写、根只读、断网",
-          "no-sandbox — 不隔离（危险）",
+          "read-only — 读免问；写工作区/写外部/联网逐次批准",
+          "workspace-write — 读+写工作区免问；写外部/联网逐次批准",
+          "no-sandbox — 全部免问（沙箱仍在，只是不拦截）",
         ],
       },
     ]);
@@ -2612,10 +2975,13 @@ export class TuiApp implements TuiInteraction {
     this.#stopSpeedTicker();
     this.#stopTodoShimmer();
     this.#thinking.reset();
+    this.#liveReasoningId = undefined;
+    this.#liveReasoningStartedAt = undefined;
     this.#stopThinkingAnimation();
     this.#todoCache = undefined;
     this.#messageHits = [];
     this.#toolHits = [];
+    this.#reasoningHits = [];
 
     if (this.#createRuntime !== undefined) {
       const runtime = this.#createRuntime(this, { mode: this.#mode });
@@ -2941,7 +3307,10 @@ export class TuiApp implements TuiInteraction {
     this.#todoCache = undefined;
     this.#messageHits = [];
     this.#toolHits = [];
+    this.#reasoningHits = [];
     this.#thinking.reset();
+    this.#liveReasoningId = undefined;
+    this.#liveReasoningStartedAt = undefined;
     this.#stopThinkingAnimation();
     this.#input = "";
     this.#cursor = 0;
@@ -2970,8 +3339,10 @@ export class TuiApp implements TuiInteraction {
     this.#thinking.reset();
     this.#textPacer.reset();
     this.#reasoningPacer.reset();
+    this.#discardLiveReasoningItem();
     this.#pendingAssistantEnd = undefined;
     this.#patchStreams.clear();
+    this.#fileStreams.clear();
     this.#transcript.clearStreamingTools();
     this.#activity = { state: "working" };
     this.#stopThinkingAnimation();
@@ -2992,8 +3363,9 @@ export class TuiApp implements TuiInteraction {
         this.#noteOutput(delta);
         this.#requestFrame();
       },
-      // 思考链路：只进滚动缓冲，不进消息区、不落库
+      // 思考链路：底部 tail 保持原体验；chatview 只插一个顺序占位。
       onReasoning: (delta) => {
+        this.#ensureLiveReasoningItem();
         this.#reasoningPacer.push(delta);
         this.#noteOutput(delta);
         this.#requestFrame();
@@ -3001,10 +3373,12 @@ export class TuiApp implements TuiInteraction {
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。
       onAssistant: (message) => {
-        // reasoning 只保留当前行，直接 flush 并 reset；正文继续按显示队列走。
+        // 底部 tail 仍按原逻辑排空；chatview 的 Thought 使用持久消息原文，
+        // 并保持折叠，等待用户主动点击。
         const reasoning = this.#reasoningPacer.flush();
         if (reasoning.length > 0) this.#thinking.push(reasoning);
         this.#thinking.reset();
+        this.#finishLiveReasoningItem(message);
 
         // 上一条消息若还没排空，说明模型在一个 turn 里连续产出了多段文本。
         // 先结束上一条，保证 msgid 边界不串；正常情况下这里不会命中。
@@ -3022,6 +3396,7 @@ export class TuiApp implements TuiInteraction {
       onToolCallDelta: (delta) => {
         if (delta.reset === true) {
           this.#patchStreams.clear();
+          this.#fileStreams.clear();
           this.#transcript.clearStreamingTools();
           this.#requestFrame();
           return;
@@ -3040,6 +3415,14 @@ export class TuiApp implements TuiInteraction {
           if (progress !== undefined) {
             this.#transcript.setToolPatchProgress(delta.id, progress);
           }
+        } else if (isFileToolName(delta.name)) {
+          // write/edit：路径与行数在参数流式阶段就能显示，不必等执行完才给 diff
+          let stream = this.#fileStreams.get(delta.id);
+          if (stream === undefined) {
+            stream = new FileStreamProgress(delta.name);
+            this.#fileStreams.set(delta.id, stream);
+          }
+          this.#transcript.setToolFileProgress(delta.id, stream.push(delta.rawArgs));
         }
         this.#setActivity({ state: "working" });
         this.#requestFrame();
@@ -3055,6 +3438,11 @@ export class TuiApp implements TuiInteraction {
             // 真正的执行器会返回带行号的解析错误；预览失败不提前污染卡片。
           }
           this.#patchStreams.delete(call.id);
+        }
+        const fileStream = this.#fileStreams.get(call.id);
+        if (fileStream !== undefined) {
+          this.#transcript.setToolFileProgress(call.id, fileStream.finish());
+          this.#fileStreams.delete(call.id);
         }
         this.#transcript.startTool(call, this.#lastAssistantMsgid);
       },
@@ -3139,8 +3527,10 @@ export class TuiApp implements TuiInteraction {
         this.#textPacer.pending;
       if (!draining) this.#flushStreamPacers();
       this.#patchStreams.clear();
+      this.#fileStreams.clear();
       this.#transcript.clearStreamingTools();
       if (!draining) this.#transcript.endAssistant();
+      if (!draining) this.#discardLiveReasoningItem();
       this.#thinking.reset();
       this.#busy = false;
       this.#stopTodoShimmer();
@@ -3349,6 +3739,47 @@ export class TuiApp implements TuiInteraction {
   }
 
   /**
+   * 首个 reasoning delta 到达时插入 chatview 占位。
+   *
+   * 用事件到达时间而不是渲染时间计算耗时，避免 pacer 平滑造成的显示延迟
+   * 被算进模型思考时长。
+   */
+  #ensureLiveReasoningItem(): void {
+    if (this.#liveReasoningId !== undefined) return;
+    const startedAt = performance.now();
+    this.#liveReasoningStartedAt = startedAt;
+    this.#liveReasoningId = this.#transcript.beginReasoning(startedAt);
+  }
+
+  /** 用持久消息里的完整 reasoning 原地结束 live 占位。 */
+  #finishLiveReasoningItem(message: StoredMessage): void {
+    const id = this.#liveReasoningId;
+    const startedAt = this.#liveReasoningStartedAt;
+    this.#liveReasoningId = undefined;
+    this.#liveReasoningStartedAt = undefined;
+    if (id === undefined) return;
+
+    if (message.reasoning === undefined || message.reasoning.length === 0) {
+      this.#transcript.discardReasoning();
+      return;
+    }
+
+    this.#transcript.finishReasoning({
+      text: message.reasoning,
+      msgid: message.msgid,
+      durationMs: startedAt === undefined ? 0 : performance.now() - startedAt,
+    });
+  }
+
+  /** abort / provider error 时清掉未完成的占位，不伪造 Thought。 */
+  #discardLiveReasoningItem(): void {
+    if (this.#liveReasoningId === undefined) return;
+    this.#liveReasoningId = undefined;
+    this.#liveReasoningStartedAt = undefined;
+    this.#transcript.discardReasoning();
+  }
+
+  /**
    * 从显示队列取一小段并写入真实 UI 状态。
    *
    * 必须在每帧 compose 之前调用。队列还有内容时主动再请求一帧，
@@ -3522,9 +3953,17 @@ export class TuiApp implements TuiInteraction {
     const overlayOpen =
       this.#pendingDialog !== undefined ||
       this.#pendingMessageMenu !== undefined ||
-      this.#askFlow !== undefined;
-    // 弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
-    const maxDialogRows = Math.max(0, height - 2);
+      this.#askFlow !== undefined ||
+      this.#settingsPanel !== undefined;
+    // 设置面板是**居中浮层**：它不把正文压扁，而是盖在正文中间那几行上。
+    // 所以它的高度预算要留出上下呼吸位，正文高度也不因它改变 —— 打开/关闭
+    // 面板时正文不会跳一下。
+    const centered = this.#settingsPanel !== undefined;
+    // 贴底的弹窗占用输入框区域，不再覆盖消息区；终端再小也至少给消息区留 1 行。
+    // 居中浮层用 panelRowBudget：上下各留 2 行呼吸位，且永远给状态栏让位。
+    const maxDialogRows = centered
+      ? Math.min(panelRowBudget(height), Math.max(0, height - 2))
+      : Math.max(0, height - 2);
     const dialogContent: RenderedDialog = overlayOpen
       ? this.#renderDialog(width, maxDialogRows)
       : { lines: [], buttons: [] };
@@ -3607,7 +4046,10 @@ export class TuiApp implements TuiInteraction {
 
     const bodyHeight =
       dialogRows > 0
-        ? Math.max(1, height - 1 - todoPanel.length - dialogRows)
+        ? centered
+          ? // 居中浮层：正文拿满剩余高度，面板盖在它中间那几行上（不挤压、不位移）
+            Math.max(1, height - 1 - todoPanel.length)
+          : Math.max(1, height - 1 - todoPanel.length - dialogRows)
         : Math.max(1, height - 2 - (inputBoxHeight - 1) - todoPanel.length - thinkingRows);
 
     // 滚动上限专用的**稳定高度**：不含「回到最新消息」按钮、也不含对话框。
@@ -3640,7 +4082,10 @@ export class TuiApp implements TuiInteraction {
 
     if (dialogRows > 0) {
       // 0-based 屏幕行号；鼠标命中与 ask_user 点击都用它换算。
-      this.#dialogTopRow = 1 + bodyHeight + todoPanel.length;
+      // 居中浮层走 centeredPanelTop：上下各留一半余量，落在终端正中而不是贴底。
+      this.#dialogTopRow = centered
+        ? centeredPanelTop(height, dialogRows)
+        : 1 + bodyHeight + todoPanel.length;
       this.#dialogHeight = dialogRows;
     } else {
       this.#dialogTopRow = -1;
@@ -3698,6 +4143,7 @@ export class TuiApp implements TuiInteraction {
       this.#messageButtonHits = [];
       this.#dialogButtonHits = [];
       this.#askLineHits = [];
+      this.#settingsRowHits = [];
       for (const button of dialogContent.buttons) {
         // 被裁掉的行不算可点：框形态的按钮要三行都画出来才登记
         if (button.line + button.lineSpan - 1 >= dialogRows) continue;
@@ -3732,9 +4178,27 @@ export class TuiApp implements TuiInteraction {
           });
         }
       }
+      // 设置面板：每行登记一个可点矩形（行号是面板局部的，换算成屏幕行）。
+      // 面板整体由 #dialogRect 吞掉穿透，所以行之外点不穿到下面的消息。
+      for (const entry of dialogContent.settingsRows ?? []) {
+        if (entry.line >= dialogRows) continue;
+        this.#settingsRowHits.push({
+          value: entry.index,
+          rect: {
+            top: toScreenRow(entry.line),
+            bottom: toScreenRow(entry.line),
+            left: this.#dialogRect.left,
+            right: this.#dialogRect.right,
+          },
+        });
+      }
       this.#regions = this.#buildRegions();
 
-      if (
+      const settingsCursor = this.#settingsCursor;
+      if (width >= inner + 2 && settingsCursor !== undefined && settingsCursor.line < dialogRows) {
+        this.#inputCursorRow = this.#dialogTopRow + settingsCursor.line + 1;
+        this.#inputCursorColumn = dialogPadding + settingsCursor.column + 3;
+      } else if (
         width >= inner + 2 &&
         askCursor !== undefined &&
         askCursor.line < dialogRows
@@ -3744,6 +4208,14 @@ export class TuiApp implements TuiInteraction {
       } else {
         this.#inputCursorRow = undefined;
       }
+
+      // 居中浮层：把面板**覆盖**在正文中间那几行上（splice 替换等长区间），
+      // 而不是追加在末尾 —— 这就是"真的终端中间"。
+      if (centered) {
+        const screen = [this.#composeStatus(width), ...bodyView, ...todoPanel];
+        screen.splice(this.#dialogTopRow, dialogRows, ...dialogBlock);
+        return screen;
+      }
       return [this.#composeStatus(width), ...bodyView, ...todoPanel, ...dialogBlock];
     }
 
@@ -3751,6 +4223,7 @@ export class TuiApp implements TuiInteraction {
     this.#dialogLeftPadding = 0;
     this.#dialogRect = undefined;
     this.#askLineHits = [];
+    this.#settingsRowHits = [];
 
     const inputTopRow = bodyHeight + todoPanel.length + thinkingBlock.length + 2;
     const box = composeInputBox({
@@ -3783,19 +4256,58 @@ export class TuiApp implements TuiInteraction {
   /**
    * 当前待办（从消息历史派生）。
    *
-   * 带缓存：渲染是 60fps 级别的，而派生要倒扫历史 ——
-   * 没有 todo 的会话会每次都扫全量，白烧 CPU。
+   * 带缓存（PERF-006）：派生要倒扫历史。之前每条新消息都全量重算；
+   * 实际上只有三类追加会改变结果——新的 todo_write 调用、todo 调用的
+   * 失败结果、user 消息（hide-completed 语义）。其余追加（纯文本回复、
+   * 成功的工具结果、注入）只推进水位，不重算。
    */
   #todos(): TodoList {
     const messages = this.#session.messages;
-    const key = `${this.#session.id}:${messages.length}`;
-    if (this.#todoCache === undefined || this.#todoCache.key !== key) {
-      this.#todoCache = {
-        key,
-        list: currentTodoList(messages, { hideCompletedAfterUserTurn: true }),
-      };
+    const cached = this.#todoCache;
+    if (cached !== undefined && cached.length === messages.length) return cached.list;
+
+    let needsRecompute = cached === undefined;
+    let lastMsgid: MsgId = -1;
+    if (cached !== undefined) {
+      const tailStart = messages.findIndex((message) => message.msgid > cached.lastMsgid);
+      if (tailStart < 0) {
+        needsRecompute = true; // 缓存的 msgid 已不在历史里（分支切换等）
+      } else {
+        lastMsgid = messages[messages.length - 1]!.msgid;
+        for (let index = tailStart; index < messages.length; index += 1) {
+          const message = messages[index]!;
+          if (message.origin === "user") {
+            needsRecompute = true;
+            break;
+          }
+          if (
+            message.role === "assistant" &&
+            message.toolCalls?.some((call) => call.name === TODO_TOOL_NAME)
+          ) {
+            needsRecompute = true;
+            break;
+          }
+          if (
+            message.role === "tool" &&
+            message.parts.some(
+              (part) => part.type === "text" && part.text.startsWith("Error: "),
+            )
+          ) {
+            needsRecompute = true;
+            break;
+          }
+        }
+      }
     }
-    return this.#todoCache.list;
+
+    if (needsRecompute || cached === undefined) {
+      const list = currentTodoList(messages, { hideCompletedAfterUserTurn: true });
+      this.#todoCache = { lastMsgid: messages[messages.length - 1]?.msgid ?? -1, length: messages.length, list };
+      return list;
+    }
+
+    this.#todoCache = { lastMsgid, length: messages.length, list: cached.list };
+    return cached.list;
   }
 
   /**
@@ -3822,18 +4334,42 @@ export class TuiApp implements TuiInteraction {
    * 一次 —— 小终端上宁可按钮矮一点，也不能把动作截掉一半。
    */
   #renderDialog(width: number, maxRows: number): RenderedDialog {
-    const boxed = this.#composeDialogContent(width, "box");
+    const boxed = this.#composeDialogContent(width, "box", maxRows);
+    // 设置面板自己按预算算行数与滚动窗口，不需要 compact 退化
+    if (this.#settingsPanel !== undefined) return boxed;
     if (boxed.lines.length <= maxRows) return boxed;
-    return this.#composeDialogContent(width, "compact");
+    return this.#composeDialogContent(width, "compact", maxRows);
   }
 
-  #composeDialogContent(width: number, shape: ButtonShape): RenderedDialog {
+  #composeDialogContent(width: number, shape: ButtonShape, maxRows: number): RenderedDialog {
     const buttons: RenderedDialog["buttons"] = [];
     const inner = dialogInnerWidth(width);
     const color = fg(COLOR.dialogBorder);
     const bar = `${color}│${RESET}`;
     const row = (text: string): string =>
       `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
+
+    // 设置面板：内容与滚动窗口都由面板自己按 maxRows 算好，这里只加边框。
+    // 行号换算要 +1 —— 面板返回的是它自己的局部行，上面还有一行上边框。
+    const panel = this.#settingsPanel;
+    if (panel !== undefined) {
+      const rendered = panel.render(inner, maxRows);
+      this.#settingsCursor = rendered.cursor;
+      const settingsRows: NonNullable<RenderedDialog["settingsRows"]> = [];
+      for (const [line, index] of rendered.rowLines) settingsRows.push({ line: line + 1, index });
+      return {
+        lines: [
+          `${color}┌${"─".repeat(inner)}┐${RESET}`,
+          ...rendered.lines.map((line) => row(line)),
+          `${color}└${"─".repeat(inner)}┘${RESET}`,
+        ],
+        buttons,
+        settingsRows,
+      };
+    }
+
+    // 非设置面板的覆盖层：清掉上一帧可能留下的面板光标，否则硬件光标会漂
+    this.#settingsCursor = undefined;
 
     // ask_user：分页表单，内容由 AskUserFlow 自己渲染
     if (this.#askFlow !== undefined) {
@@ -3894,9 +4430,14 @@ export class TuiApp implements TuiInteraction {
     const dialog = this.#pendingDialog;
     if (dialog === undefined) return { lines: [], buttons };
 
+    // 授权弹窗把倒计时接在标题后面 —— 用户要能一眼看到"还有多久算拒绝"。
+    const remaining = dialog.countdown?.();
+    const title =
+      remaining === undefined ? dialog.title : `${dialog.title} · ${formatCountdown(remaining)}`;
+
     const lines = [
       `${color}┌${"─".repeat(inner)}┐${RESET}`,
-      row(` ${BOLD}${truncateAnsi(dialog.title, inner - 2)}${RESET}`),
+      row(` ${BOLD}${truncateAnsi(title, inner - 2)}${RESET}`),
     ];
     for (const entry of dialog.body) {
       lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
@@ -4104,6 +4645,7 @@ export class TuiApp implements TuiInteraction {
       this.#bodyContentOffset = 0;
       this.#toolHits = [];
       this.#messageHits = [];
+      this.#reasoningHits = [];
       this.#moreHistoryButton = undefined;
       this.#pinnedUserHit = undefined;
       this.#regions = this.#buildRegions();
@@ -4194,6 +4736,28 @@ export class TuiApp implements TuiInteraction {
         ? []
         : [{ msgid, undoMsgid, rect }];
     });
+    this.#reasoningHits = viewport.blocks.flatMap((block) => {
+      if (block.item.kind !== "reasoning") return [];
+      const visible = visibleRangeOf(
+        { start: block.start, end: block.contentEnd },
+        this.#bodyWindowStart,
+        this.#bodyContentOffset,
+        this.#bodyHeight,
+      );
+      if (visible === undefined) return [];
+      // 头部滚出视口时 layout 会把 header 吸顶到窗口首行；点击也应落在
+      // 实际画出来的那一行，而不是不可见的原始 block.start。
+      const headerLine = Math.max(block.start, this.#bodyWindowStart);
+      const row = contentLineToScreenRow(
+        headerLine,
+        this.#bodyWindowStart,
+        this.#bodyContentOffset,
+        this.#bodyHeight,
+      );
+      return row === undefined
+        ? []
+        : [{ id: block.item.id, rect: { top: row, bottom: row, left: 1, right: width } }];
+    });
 
     // 顶部几行：吸顶的本轮用户消息（如果有）、「查看更多消息」按钮。
     const top: string[] = [];
@@ -4250,6 +4814,11 @@ export class TuiApp implements TuiInteraction {
       }
 
       case "assistant": {
+        if (item.evicted === true) {
+          return [
+            DIM + "（更早消息已从内存释放 —— 点击带“已释放”标记的旧卡片回放）" + RESET,
+          ];
+        }
         if (item.text.length === 0) return [DIM + "…" + RESET];
         let cache = this.#markdownCaches.get(item);
         if (cache === undefined) {
@@ -4264,6 +4833,12 @@ export class TuiApp implements TuiInteraction {
         }
         return cache.render(item.text, width);
       }
+
+      case "reasoning":
+        if (item.evicted === true) {
+          return [DIM + "（Thought 正文已从内存释放 —— 点击回放）" + RESET];
+        }
+        return renderReasoningItem(item, width);
 
       case "tool":
         // 交给渲染扩展点：通用工具走默认外观，注册过的（如 todo_write）走自定义。

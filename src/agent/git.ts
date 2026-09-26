@@ -75,6 +75,50 @@ function outputText(value: ReadableStream<Uint8Array> | undefined): Promise<stri
   return value === undefined ? Promise.resolve("") : new Response(value).text();
 }
 
+/**
+ * git 的部分仓库配置会在 git 运行期间**以宿主机身份执行外部命令**：
+ * hooks（post-checkout / reference-transaction / pre-* …）、core.fsmonitor、
+ * clean/smudge filter。bugent 的 git 集成不在沙箱内、不过权限闸门，而
+ * `.git/config` / `.gitattributes` / `.git/hooks` 对会话内的模型是可写的 ——
+ * 不设防的话，"写个 hook/filter 再触发 git add / worktree add" 就是一次
+ * 无提示的任意代码执行，还能带走完整进程环境变量。
+ *
+ * hooks 与 fsmonitor 用 `-c` 覆盖直接关掉（-c 优先级高于 system/global/repo
+ * 配置）；filter 没有整体禁用开关，只能枚举检测，见 repoFilterNames。
+ */
+const GIT_HARDENING_ARGS: readonly string[] = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+];
+
+/** git 子进程允许继承的环境变量；其余（API key 等）一律剔除。 */
+const GIT_ENV_ALLOW: readonly RegExp[] = [
+  /^PATH$/,
+  /^HOME$/,
+  /^USER$/,
+  /^LOGNAME$/,
+  /^LANG$/,
+  /^LC_.*$/,
+  /^TZ$/,
+  /^TMPDIR$/,
+  // Windows 上的 git 需要系统根与 shell 路径
+  /^SYSTEMROOT$/i,
+  /^COMSPEC$/i,
+  /^MSYSTEM$/i,
+];
+
+function gitEnv(options: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    if (GIT_ENV_ALLOW.some((pattern) => pattern.test(key))) env[key] = value;
+  }
+  // 调用方显式传入的变量（如 GIT_OPTIONAL_LOCKS）优先于白名单继承。
+  return { ...env, ...(options ?? {}) };
+}
+
 export async function runGit(
   args: readonly string[],
   cwd: string,
@@ -87,17 +131,16 @@ export async function runGit(
   const binary = options.binary ?? "git";
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    proc = Bun.spawn([binary, ...args], {
+    proc = Bun.spawn([binary, ...GIT_HARDENING_ARGS, ...args], {
       cwd,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        ...process.env,
+        ...gitEnv(options.env),
         GIT_TERMINAL_PROMPT: "0",
         GIT_ASKPASS: "echo",
         GIT_PAGER: "cat",
-        ...(options.env ?? {}),
       },
     });
   } catch (error) {
@@ -125,6 +168,45 @@ export async function runGit(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * 枚举仓库本地配置里声明的 clean/smudge filter。
+ *
+ * `git worktree add`（checkout → smudge）与 `git add -N`（clean）都会执行
+ * 这些命令，而 `.git/config` 对模型可写 —— 没法用 `-c` 整体禁用 filter，
+ * 只能检测到就拒绝执行受影响的 git 操作（fail closed）。注意这会把
+ * git-lfs 一类合法用户挡在 worker 隔离之外：报错文案会说明原因与出路。
+ */
+async function repoFilterNames(
+  binary: string,
+  repoRoot: string,
+  timeoutMs: number | undefined,
+): Promise<readonly string[]> {
+  const result = await runGit(
+    ["config", "--local", "--get-regexp", "^filter\\.[^.]+\\.(clean|smudge)$"],
+    repoRoot,
+    { binary, timeoutMs },
+  );
+  // git config --get-regexp 无匹配时 exit code 1，属正常。
+  if (result.code !== 0) return [];
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^filter\./.test(line));
+}
+
+async function assertNoRepoFilters(
+  binary: string,
+  repoRoot: string,
+  timeoutMs: number | undefined,
+): Promise<void> {
+  const filters = await repoFilterNames(binary, repoRoot, timeoutMs);
+  if (filters.length === 0) return;
+  throw new Error(
+    `git worktree: 仓库本地配置声明了 clean/smudge filter（${filters.join("、")}），` +
+      "git 会在宿主机上执行它们；请先移除这些 filter（或走用户确认的流程）再启用 worker 隔离",
+  );
 }
 
 function parseVersion(versionOutput: string): [number, number, number] | undefined {
@@ -270,6 +352,22 @@ export async function probeGit(
   }
   const dirty = statusResult.stdout.trim().length > 0;
 
+  // 仓库本地配置声明了 clean/smudge filter 时，worktree checkout / add 会
+  // 在宿主机上执行任意命令 —— worker 隔离整体不可用，给出明确原因。
+  const filters = await repoFilterNames(binary, repoRoot, options.timeoutMs);
+  if (filters.length > 0) {
+    return unavailable(
+      `仓库本地 git 配置声明了 clean/smudge filter（${filters.join("、")}），git 会在宿主机上执行它们`,
+      {
+        binary,
+        version,
+        repoRoot,
+        head,
+        installHint: "移除这些 filter（或走用户确认的流程）后再启用 worker 隔离",
+      },
+    );
+  }
+
   return {
     available: true,
     workerReady: !dirty,
@@ -317,6 +415,8 @@ export class GitWorktreeManager {
     if (capability.head === undefined) {
       throw new Error("worker isolation unavailable: the repository has no HEAD");
     }
+    // probe 之后配置仍可能被（并行工具调用）改掉 —— create 前再查一次。
+    await assertNoRepoFilters(capability.binary, capability.repoRoot, this.#timeoutMs);
 
     const segment = safeSegment(agentId);
     const path = join(this.worktreeRoot, segment);
@@ -353,6 +453,8 @@ export class GitWorktreeManager {
 
   async diff(lease: GitWorktreeLease, capability: GitCapability): Promise<WorktreeDiff> {
     if (capability.binary === undefined) throw new Error("git worktree diff: Git binary is missing");
+    // add -N 会触发 clean filter —— 执行前再查一次（probe 与 create 之后配置仍可能被改）。
+    await assertNoRepoFilters(capability.binary, lease.sourceRoot, this.#timeoutMs);
     const addIntent = await runGit(["add", "-N", "--", "."], lease.path, {
       binary: capability.binary,
       timeoutMs: this.#timeoutMs,

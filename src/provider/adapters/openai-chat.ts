@@ -14,6 +14,7 @@ import type {
   ToolSchema,
 } from "../types.ts";
 import { messageText } from "../types.ts";
+import { stripAnsi } from "../../util/sanitize.ts";
 import { readFileSync } from "node:fs";
 
 export type ProviderProxy = string | false;
@@ -386,7 +387,10 @@ export function createOpenAIChatClient(model: string, options: OpenAIChatOptions
 
       if (!res.ok || res.body === null) {
         const detail = await res.text().catch(() => "");
-        throw new Error(`openai-chat ${res.status} ${res.statusText}: ${detail.slice(0, 500)}`);
+        // 错误体来自远端服务器，进终端/转写前剥掉转义序列（BUG-027）
+        throw new Error(
+          `openai-chat ${res.status} ${res.statusText}: ${stripAnsi(detail.slice(0, 500))}`,
+        );
       }
 
       const toolIdByIndex = new Map<number, string>();

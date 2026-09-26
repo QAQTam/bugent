@@ -3,7 +3,7 @@ import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { applyPatchSummary, applyPatchToWorkspace } from "../patch/apply.ts";
 import { parsePatch } from "../patch/parser.ts";
-import { relativeTo, resolveWithin } from "./paths.ts";
+import { PathEscapeError, relativeTo, resolveForWrite, resolveWithin } from "./paths.ts";
 
 export const APPLY_PATCH_TOOL_NAME = "apply_patch";
 
@@ -98,10 +98,33 @@ export function createApplyPatchTool(): Tool<unknown, string> {
     parameters: APPLY_PATCH_PARAMETERS,
     inputFormat: "freeform",
     parseInput: parsePatchInput,
-    // 刻意不声明 defaultPermission：写工作区就是 workspace-write 档的边界，
-    // 由档位负责（"档位即授权"），和 write_file / edit_file 保持一致。
-    // 声明成 "ask" 会导致每次 apply_patch 都弹窗，且和同类的文件工具行为不一致。
+    // 进程内工具：写工作区由档位负责，写工作区之外要按次授权。
     requires: { write: true },
+    writesOutside(input: unknown, ctx: ToolCtx): boolean {
+      try {
+        const args = parsePatch(patchText(input));
+        for (const hunk of args.hunks) {
+          const paths =
+            hunk.type === "update" && hunk.movePath !== undefined
+              ? [hunk.path, hunk.movePath]
+              : [hunk.path];
+          for (const path of paths) {
+            try {
+              resolveWithin(ctx.cwd, path);
+            } catch (error) {
+              if (error instanceof PathEscapeError) return true;
+            }
+          }
+        }
+        return false;
+      } catch {
+        // patch 还没成形（流式中的半截输入）：交给 run 自己报错
+        return false;
+      }
+    },
+    // 刻意不声明 defaultPermission：写工作区就是 workspace-write 档的默认批准
+    // 范围，由档位负责，和 write_file / edit_file 保持一致。
+    // 声明成 "ask" 会导致每次 apply_patch 都弹窗，且和同类的文件工具行为不一致。
     resources: resourceClaims,
     describe(input: unknown) {
       try {
@@ -116,7 +139,9 @@ export function createApplyPatchTool(): Tool<unknown, string> {
       }
     },
     async run(input: unknown, ctx: ToolCtx): Promise<string> {
-      const result = await applyPatchToWorkspace(patchText(input), ctx.cwd);
+      const result = await applyPatchToWorkspace(patchText(input), ctx.cwd, {
+        resolvePath: (path) => resolveForWrite(ctx.cwd, path, ctx.grant?.writeOutside === true),
+      });
       for (const edit of result.edits) ctx.onWorkspaceChange?.(edit);
       const lines = ["Success. Updated the following files:"];
       for (const path of result.added) lines.push(`A ${path}`);

@@ -11,6 +11,7 @@ import type { ToolCall, Usage } from "../provider/types.ts";
 import { mergeUsage } from "../provider/types.ts";
 import type { ToolCallDelta } from "../core/loop.ts";
 import type { PatchProgress } from "../patch/streaming-progress.ts";
+import type { FileArgsProgress } from "../tools/file-progress.ts";
 import { storedText, type MsgId, type StoredMessage } from "../core/message.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
 
@@ -30,7 +31,37 @@ export interface TranscriptLayoutChanges {
 
 export type DisplayItem =
   | { kind: "user"; text: string; msgid?: MsgId }
-  | { kind: "assistant"; text: string; msgid?: MsgId }
+  | {
+      kind: "assistant";
+      text: string;
+      msgid?: MsgId;
+      /** PERF-002：超出保留窗口后正文移出内存；点击带此标记的卡片回放。 */
+      evicted?: true;
+    }
+  | {
+      kind: "reasoning";
+      /** UI 内稳定 id；不随完成、恢复或 msgid 绑定而变化。 */
+      id: string;
+      /** live 阶段为空；完成后保存完整 reasoning 原文。 */
+      text: string;
+      done: boolean;
+      /** 默认 false：完成后必须由用户主动点击 Thought 头部才展开。 */
+      expanded: boolean;
+      /** live 阶段开始时间，仅用于计算当前进程内的耗时。 */
+      startedAt?: number;
+      /** 完成态耗时；恢复会话时通常没有该字段。 */
+      durationMs?: number;
+      /** 可选 token 估算。 */
+      tokens?: number;
+      /** 完成后绑定所属 assistant 消息。 */
+      msgid?: MsgId;
+      /** 当前 turn 内序号，从 1 开始。 */
+      sequence?: number;
+      /** 中断时标记，不伪装成正常完成。 */
+      interrupted?: boolean;
+      /** PERF-002：超出保留窗口后正文移出内存；点击卡片回放。 */
+      evicted?: true;
+    }
   | {
       kind: "tool";
       callId: string;
@@ -55,8 +86,12 @@ export type DisplayItem =
       streaming?: boolean;
       /** apply_patch 参数增量解析出的实时 diff 统计。 */
       patchProgress?: PatchProgress;
+      /** write_file / edit_file 参数增量解析出的实时路径与行数。 */
+      fileProgress?: FileArgsProgress;
       /** 用户点击折叠行后展开全文（鼠标交互）。 */
       expanded: boolean;
+      /** PERF-002：超出保留窗口后输出移出内存；点击卡片重新加载回放。 */
+      evicted?: true;
     }
   | { kind: "error"; text: string };
 
@@ -90,6 +125,15 @@ export function keepLastLines(text: string, maxLines: number): string {
 }
 
 export class Transcript {
+  /**
+   * 保留窗口（PERF-002）：窗口外的已完成条目把正文移出内存，只留
+   * "已释放"占位卡片；用户点击占位卡片时 app 调 rebuildFrom() 从会话
+   * 消息（其持久层是 SQLite）整体回放。
+   */
+  #retention: number;
+  #evictedCount = 0;
+  /** 已扫过高水位（见 #sweepEviction）。 */
+  #sweptUpTo = 0;
   #items: DisplayItem[] = [];
   /** 与 #items 对齐的内容版本；布局缓存用它判断某个块是否要重渲染。 */
   #versions: number[] = [];
@@ -97,6 +141,10 @@ export class Transcript {
   #revision = 0;
   /** 当前正在接收流式文本的 assistant 块；undefined 表示下段文本要开新块。 */
   #streamingIndex: number | undefined;
+  /** 当前 assistant step 的 live reasoning item；完成后清空。 */
+  #liveReasoningIndex: number | undefined;
+  /** reasoning UI id 计数器；只保证当前 Transcript 内稳定唯一。 */
+  #reasoningId = 1;
   /**
    * 内容变更通知。TUI 用它把"改了就重画"变成结构性保证 ——
    * 以前每个流式回调各自记得请求重绘，漏一处不会报错、只会让界面变慢。
@@ -106,6 +154,10 @@ export class Transcript {
   #layoutRebuild = false;
   #layoutAppendedFrom: number | undefined;
   #layoutDirty = new Set<number>();
+
+  constructor(options: { retentionItems?: number } = {}) {
+    this.#retention = options.retentionItems ?? 400;
+  }
 
   set onChange(handler: (() => void) | undefined) {
     this.#onChange = handler;
@@ -144,6 +196,11 @@ export class Transcript {
     return changes;
   }
 
+  /** 已被移出内存的条目数（用于 UI 提示"可点击回放"）。 */
+  get evictedCount(): number {
+    return this.#evictedCount;
+  }
+
   /**
    * **唯一**的内容变更原语：版本号递增与外部通知必须成对发生。
    *
@@ -164,6 +221,44 @@ export class Transcript {
     }
     this.#layoutDirty.add(index);
     this.#touch();
+    this.#sweepEviction();
+  }
+
+  /**
+   * 保留窗口清扫（PERF-002）：窗口外的已完成条目把正文移出内存。
+   *
+   * 移除的只是 transcript 这份渲染拷贝 —— 会话正文（session.messages，
+   * 持久层是 SQLite）不受影响，那是 provider 上下文必需的；点击占位卡片
+   * 时由 app 调 rebuildFrom() 整体回放。
+   */
+  #sweepEviction(): void {
+    const cutoff = this.#items.length - this.#retention;
+    if (cutoff <= this.#sweptUpTo) return;
+    // #sweptUpTo 是已扫过高水位：evict 过的条目不会复活，从水位往后扫即可，
+    // restore 大会话时整体 O(n) 而不是 O(n²)。
+    for (let index = Math.max(0, this.#sweptUpTo); index < cutoff; index += 1) {
+      const item = this.#items[index]!;
+      if (item.kind === "user" || item.kind === "error") continue; // 短文本，不参与释放
+      if (item.evicted === true) continue;
+      if (item.kind === "assistant" || item.kind === "reasoning") {
+        if (item.text.length === 0) continue;
+        item.text = "";
+        item.evicted = true;
+        if (item.kind === "reasoning") item.expanded = false;
+      } else if (item.kind === "tool") {
+        if (!item.done || item.output.length === 0) continue; // 运行中的不动
+        item.output = "";
+        item.expanded = false;
+        delete item.presentation;
+        delete item.patchProgress;
+        delete item.fileProgress;
+        item.evicted = true;
+      } else {
+        continue;
+      }
+      this.#evictedCount += 1;
+      this.#bump(index);
+    }
   }
 
   #bump(index: number): void {
@@ -208,6 +303,137 @@ export class Transcript {
       }
     }
     this.#streamingIndex = undefined;
+  }
+
+  /**
+   * 开始一个 live reasoning 占位。
+   *
+   * 同一 assistant step 的多个 reasoning delta 只复用同一个 item；调用方应只在
+   * 第一次 delta 时调用。返回值是稳定 UI id，完成后仍可用它切换展开状态。
+   */
+  beginReasoning(startedAt = Date.now()): string {
+    const live = this.#liveReasoningIndex;
+    if (live !== undefined) {
+      const item = this.#items[live];
+      if (item !== undefined && item.kind === "reasoning" && !item.done) return item.id;
+      this.#liveReasoningIndex = undefined;
+    }
+
+    const id = `reasoning-${this.#reasoningId}`;
+    this.#reasoningId += 1;
+    this.#push({
+      kind: "reasoning",
+      id,
+      text: "",
+      done: false,
+      expanded: false,
+      startedAt,
+    });
+    this.#liveReasoningIndex = this.#items.length - 1;
+    return id;
+  }
+
+  /**
+   * 原地结束 live reasoning。
+   *
+   * 必须保留原 index，否则后续 assistant 文本和工具卡片会跑到 Thought 前面。
+   * 完成后固定保持折叠，展开只能由用户点击触发。
+   */
+  finishReasoning(options: {
+    text: string;
+    msgid: MsgId;
+    durationMs: number;
+    tokens?: number;
+  }): void {
+    const sequence = this.#nextReasoningSequence();
+    const index = this.#liveReasoningIndex;
+    if (index !== undefined) {
+      const item = this.#items[index];
+      if (item !== undefined && item.kind === "reasoning" && !item.done) {
+        item.text = options.text;
+        item.done = true;
+        item.expanded = false;
+        item.msgid = options.msgid;
+        item.durationMs = Math.max(0, options.durationMs);
+        item.sequence = sequence;
+        if (options.tokens !== undefined) item.tokens = options.tokens;
+        this.#liveReasoningIndex = undefined;
+        this.#bump(index);
+        return;
+      }
+      this.#liveReasoningIndex = undefined;
+    }
+
+    if (options.text.length === 0) return;
+    const id = `reasoning-${this.#reasoningId}`;
+    this.#reasoningId += 1;
+    this.#push({
+      kind: "reasoning",
+      id,
+      text: options.text,
+      done: true,
+      expanded: false,
+      durationMs: Math.max(0, options.durationMs),
+      ...(options.tokens !== undefined ? { tokens: options.tokens } : {}),
+      msgid: options.msgid,
+      sequence,
+    });
+  }
+
+  /** 丢弃尚未完成的 live reasoning；用于 abort / provider error。 */
+  discardReasoning(): void {
+    const index = this.#liveReasoningIndex;
+    this.#liveReasoningIndex = undefined;
+    if (index === undefined) return;
+    const item = this.#items[index];
+    if (item === undefined || item.kind !== "reasoning" || item.done) return;
+
+    this.#items.splice(index, 1);
+    this.#versions.splice(index, 1);
+    if (this.#streamingIndex !== undefined && index < this.#streamingIndex) {
+      this.#streamingIndex -= 1;
+    }
+    this.#layoutRebuild = true;
+    this.#touch();
+  }
+
+  /** 切换已完成 Thought 的展开状态。 */
+  toggleReasoningExpanded(id: string): boolean {
+    for (let index = 0; index < this.#items.length; index += 1) {
+      const item = this.#items[index];
+      if (item !== undefined && item.kind === "reasoning" && item.id === id && item.done) {
+        item.expanded = !item.expanded;
+        this.#bump(index);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** PERF-002：该工具卡片是否是"已释放"占位（点击 = 回放而不是展开）。 */
+  isEvictedTool(callId: string): boolean {
+    return this.#items.some(
+      (item) => item.kind === "tool" && item.callId === callId && item.evicted === true,
+    );
+  }
+
+  /** PERF-002：该 Thought 是否是"已释放"占位。 */
+  isEvictedReasoning(id: string): boolean {
+    return this.#items.some(
+      (item) => item.kind === "reasoning" && item.id === id && item.evicted === true,
+    );
+  }
+
+  /** 当前 turn 内已完成 Thought 的数量 + 1。 */
+  #nextReasoningSequence(): number {
+    let sequence = 1;
+    for (let index = this.#items.length - 1; index >= 0; index -= 1) {
+      const item = this.#items[index];
+      if (item === undefined) continue;
+      if (item.kind === "user") break;
+      if (item.kind === "reasoning" && item.done) sequence += 1;
+    }
+    return sequence;
   }
 
   #openToolIndex(callId: string): number | undefined {
@@ -264,6 +490,9 @@ export class Transcript {
         if (this.#streamingIndex !== undefined && index < this.#streamingIndex) {
           this.#streamingIndex -= 1;
         }
+        if (this.#liveReasoningIndex !== undefined && index < this.#liveReasoningIndex) {
+          this.#liveReasoningIndex -= 1;
+        }
       }
     }
     if (removed) this.#layoutRebuild = true;
@@ -276,6 +505,16 @@ export class Transcript {
     const item = this.#items[index];
     if (item !== undefined && item.kind === "tool") {
       item.patchProgress = progress;
+      this.#bump(index);
+    }
+  }
+
+  setToolFileProgress(callId: string, progress: FileArgsProgress): void {
+    const index = this.#openToolIndex(callId);
+    if (index === undefined) return;
+    const item = this.#items[index];
+    if (item !== undefined && item.kind === "tool") {
+      item.fileProgress = progress;
       this.#bump(index);
     }
   }
@@ -356,6 +595,9 @@ export class Transcript {
         if (item.patchProgress !== undefined) {
           item.patchProgress = { ...item.patchProgress, complete: true };
         }
+        if (item.fileProgress !== undefined) {
+          item.fileProgress = { ...item.fileProgress, complete: true };
+        }
         if (msgid !== undefined) item.msgid = msgid;
         if (presentation !== undefined) item.presentation = presentation;
         this.#bump(i);
@@ -372,24 +614,68 @@ export class Transcript {
    * 但不在新路径里的消息。这里按 msgid 升序重放，确保 UI 与 session 上下文一致。
    */
   restore(messages: readonly StoredMessage[]): void {
+    this.#resetForRebuild();
+    this.#buildFromMessages(messages);
+    this.#sweepEviction();
+  }
+
+  /**
+   * 点击"回放"后整体重建（PERF-002）：把被移出内存的条目从会话消息
+   * （其持久层是 SQLite）重新装载并渲染。重建期间暂停清扫 —— 回放的内容
+   * 就是要读的；之后的追加继续移动保留窗口，旧内容照常再次释放。
+   */
+  rebuildFrom(messages: readonly StoredMessage[]): void {
+    this.#resetForRebuild();
+    const retention = this.#retention;
+    this.#retention = Number.MAX_SAFE_INTEGER;
+    try {
+      this.#buildFromMessages(messages);
+    } finally {
+      this.#retention = retention;
+    }
+  }
+
+  #resetForRebuild(): void {
     this.#items = [];
     this.#versions = [];
     this.#streamingIndex = undefined;
+    this.#liveReasoningIndex = undefined;
+    this.#reasoningId = 1;
+    this.#evictedCount = 0;
+    this.#sweptUpTo = 0;
     this.#layoutRebuild = true;
     this.#layoutAppendedFrom = undefined;
     this.#layoutDirty.clear();
     this.#touch();
+  }
 
+  #buildFromMessages(messages: readonly StoredMessage[]): void {
+    let reasoningSequence = 0;
     for (const message of messages) {
       if (message.role === "system") continue;
       const text = storedText(message);
 
       if (message.role === "user") {
+        reasoningSequence = 0;
         this.pushUser(text, message.msgid);
         continue;
       }
 
       if (message.role === "assistant") {
+        if (message.reasoning !== undefined && message.reasoning.length > 0) {
+          reasoningSequence += 1;
+          const id = `reasoning-${this.#reasoningId}`;
+          this.#reasoningId += 1;
+          this.#push({
+            kind: "reasoning",
+            id,
+            text: message.reasoning,
+            done: true,
+            expanded: false,
+            msgid: message.msgid,
+            sequence: reasoningSequence,
+          });
+        }
         if (text.length > 0) {
           this.appendAssistantText(text);
           this.endAssistant(message.msgid);

@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   capabilitiesOf,
+  defaultApproves,
   describeCapability,
   describeRequirement,
   escalate,
   isSandboxMode,
   minimumModeFor,
   MODE_ORDER,
-  modeSatisfies,
   MODES,
   type SandboxMode,
 } from "../src/permission/mode.ts";
@@ -44,15 +44,30 @@ describe("三档模型", () => {
     for (const mode of MODE_ORDER) expect(MODES[mode].label.length).toBeGreaterThan(0);
   });
 
-  test("能力差异只在文件系统与进程隔离上，不含网络", () => {
-    expect(capabilitiesOf("read-only").workspaceWrite).toBe(false);
-    expect(capabilitiesOf("workspace-write").workspaceWrite).toBe(true);
-    expect(capabilitiesOf("no-sandbox").sandboxed).toBe(false);
+  test("档位只描述默认批准范围，不含网络", () => {
+    expect(capabilitiesOf("read-only").defaultApprove).toBe("read");
+    expect(capabilitiesOf("workspace-write").defaultApprove).toBe("workspace-write");
+    expect(capabilitiesOf("no-sandbox").defaultApprove).toBe("all");
 
     // 网络不参与档位判断 —— 它是按次授权
-    expect(modeSatisfies("read-only", { write: false })).toBe(true);
-    expect(modeSatisfies("read-only", { write: true })).toBe(false);
-    expect(modeSatisfies("workspace-write", { write: true })).toBe(true);
+    expect(defaultApproves("read-only", {})).toBe(true);
+    expect(defaultApproves("read-only", { write: true })).toBe(false);
+    expect(defaultApproves("workspace-write", { write: true })).toBe(true);
+    expect(defaultApproves("no-sandbox", { write: true })).toBe(true);
+  });
+
+  test("读工作区之外在三档都不需要授权", () => {
+    // 档位不限制读：读是自由的，没有 requires 就永远走不到"要不要问"这一步
+    for (const mode of MODE_ORDER) {
+      expect(defaultApproves(mode, {})).toBe(true);
+    }
+  });
+
+  test("写工作区之外只有 no-sandbox 默认批准", () => {
+    expect(defaultApproves("read-only", { writeOutside: true })).toBe(false);
+    expect(defaultApproves("workspace-write", { writeOutside: true })).toBe(false);
+    expect(defaultApproves("no-sandbox", { writeOutside: true })).toBe(true);
+    expect(minimumModeFor({ writeOutside: true })).toBe("no-sandbox");
   });
 
   test("isSandboxMode 拒绝非法值", () => {
@@ -117,31 +132,60 @@ describe("档位即授权", () => {
     expect(verdict.reason).toContain("策略禁止");
   });
 
-  test("升档获批后档位真的变了，后续调用不再需要升档", async () => {
+  test("批准一次只生效一次 —— 档位不会被改掉", async () => {
     let asked: SandboxMode | undefined;
+    let approvals = 0;
     const gate = new PermissionGate({
       policy: new PermissionPolicy({}),
       mode: "read-only",
       onEscalate: async (_request, needed) => {
         asked = needed;
-        return needed;
+        approvals += 1;
+        return "approved" as const;
       },
     });
 
-    expect(await gate.check(req("write_file", "a.ts", { write: true }))).toEqual({ allowed: true });
+    expect(await gate.check(req("write_file", "a.ts", { write: true }))).toEqual({
+      allowed: true,
+      grant: {},
+    });
     expect(asked).toBe("workspace-write");
+    // 关键：档位没变。变了就意味着"每次写入都要审批"退化成"审批一次之后随便写"
+    expect(gate.mode).toBe("read-only");
+
+    // 第二次调用仍然要问 —— 这才是"按次"
+    expect(await gate.check(req("write_file", "b.ts", { write: true }))).toEqual({
+      allowed: true,
+      grant: {},
+    });
+    expect(approvals).toBe(2);
+    expect(gate.mode).toBe("read-only");
+  });
+
+  test("获准写工作区外时，授权随本次调用下发", async () => {
+    const gate = new PermissionGate({
+      policy: new PermissionPolicy({}),
+      mode: "workspace-write",
+      onEscalate: async () => "approved" as const,
+    });
+
+    const verdict = await gate.check(req("write_file", "/etc/hosts", { write: true, writeOutside: true }));
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.grant).toEqual({ writeOutside: true });
+    // 档位仍然没变
     expect(gate.mode).toBe("workspace-write");
   });
 
-  test("升档被拒时给出可操作的提示", async () => {
+  test("逐次批准被拒时给出可操作的提示", async () => {
     const gate = new PermissionGate({
       policy: new PermissionPolicy({}),
       mode: "read-only",
-      onEscalate: async () => undefined,
+      onEscalate: async () => "denied" as const,
     });
 
     const verdict = await gate.check(req("write_file", "a.ts", { write: true }));
     expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toContain("逐次批准");
     expect(verdict.reason).toContain("--mode workspace-write");
   });
 });
@@ -215,7 +259,7 @@ describe("联网授权的触发判定", () => {
     expect(looksLikeNetworkFailure("")).toBe(false);
   });
 
-  test("命令因断网失败时，授权请求带上真实命令与报错", async () => {
+  test("静态没识别的联网命令：跑失败后，授权请求带上真实命令与报错", async () => {
     const cwd = await workspace();
     const setup = createDefaultTools({ mode: "workspace-write" });
 
@@ -227,11 +271,13 @@ describe("联网授权的触发判定", () => {
       sessionId: "net",
       onRequestCapability: async (escalation: { reason: string; details?: readonly string[] }) => {
         captured = escalation;
-        return false; // 拒绝，避免真的去连外网
+        return "denied" as const; // 拒绝，避免真的去连外网
       },
     };
 
-    const command = "curl -sS -m 5 http://127.0.0.1:9/nope";
+    // 刻意选一条**静态扫不出来**的联网命令：扫描只认识 curl/git/pip 这类命令名，
+    // 解释器里的 socket 调用它看不见 —— 这条路径必须靠"跑失败再问"兜住。
+    const command = `python3 -c "import socket; socket.create_connection(('127.0.0.1',9))"`;
     const result = await setup.registry.execute({ id: "c1", name: "bash", args: { command } }, ctx);
 
     expect(captured).toBeDefined();
@@ -239,6 +285,36 @@ describe("联网授权的触发判定", () => {
     // 用户必须能看到是哪条命令、因为什么失败
     expect(captured?.details?.join("\n")).toContain(command);
     expect(captured?.details?.join("\n")).toContain("报错");
-    expect(result.output).toContain("exit code");
+    // 没批准就不能把那次失败当成结果回给模型
+    expect(result.output).toContain("用户拒绝操作");
+    expect(result.output).toContain("未执行");
+  });
+
+  test("静态识别出的联网命令：执行前就问，命令根本不跑", async () => {
+    const cwd = await workspace();
+    const setup = createDefaultTools({ mode: "workspace-write" });
+
+    let captured: { capability: { network?: boolean }; reason: string } | undefined;
+    const ctx = {
+      cwd,
+      signal: new AbortController().signal,
+      callId: "c1",
+      sessionId: "net2",
+      onRequestCapability: async (escalation: { capability: { network?: boolean }; reason: string }) => {
+        captured = escalation;
+        return "denied" as const;
+      },
+    };
+
+    // 用一个会在工作区留下痕迹的命令：如果它真的跑了，文件就会出现。
+    const command = `curl -sS -o ${join(cwd, "leak.txt")} http://127.0.0.1:9/nope`;
+    const result = await setup.registry.execute({ id: "c1", name: "bash", args: { command } }, ctx);
+
+    expect(captured?.capability.network).toBe(true);
+    expect(captured?.reason).toContain("联网");
+    // 被拒 = 命令没执行，回传的是明确结论而不是沙箱报错
+    expect(result.output).toContain("用户拒绝操作");
+    expect(result.output).toContain("未执行");
+    expect(await Bun.file(join(cwd, "leak.txt")).exists()).toBe(false);
   });
 });

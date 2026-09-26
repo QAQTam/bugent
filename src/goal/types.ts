@@ -5,6 +5,8 @@
  * durable and survives UI/tool changes; tool schemas only project parts of it.
  */
 
+import type { Usage } from "../provider/types.ts";
+
 export type GoalStatus =
   | "active"
   | "paused"
@@ -229,6 +231,10 @@ export interface ReviewResult {
   criteriaCoverage: CriteriaCoverage[];
   findings: Array<Omit<ReviewFinding, "id" | "reviewId">>;
   unresolvedQuestions: string[];
+  /** Provider usage for this independent review; not part of the model JSON contract. */
+  usage?: Usage;
+  /** Wall-clock duration for this review; not part of the model JSON contract. */
+  durationMs?: number;
 }
 
 export interface GoalReview {

@@ -92,6 +92,7 @@ describe("Goal P3 · read-only reviewer", () => {
           ];
         },
       ],
+      syntheticUsage: true,
     });
     const runner = createReadOnlyReviewRunner({
       client,
@@ -101,6 +102,9 @@ describe("Goal P3 · read-only reviewer", () => {
 
     const result = await runner.run(reviewRequest);
     expect(result.verdict).toBe("approve");
+    expect(result.usage?.input).toBeGreaterThan(0);
+    expect(result.usage?.output).toBeGreaterThan(0);
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
     expect(toolNames).toContain("read_file");
     expect(toolNames).not.toContain("write_file");
     expect(toolNames).not.toContain("edit_file");

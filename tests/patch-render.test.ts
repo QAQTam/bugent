@@ -135,13 +135,15 @@ describe("apply_patch 卡片 · 徽标必须看得见", () => {
     }
   });
 
-  test("宽度充足时徽标右对齐在行尾", () => {
+  test("宽度充足时徽标紧跟内容，不甩到行尾", () => {
     const width = 80;
     const lines = renderToolItem(streaming("src/a.ts", { added: 12, removed: 3 }), width);
-    const head = lines[0]!;
-    // 可见宽度正好铺满，且以徽标结尾
-    expect(visibleWidth(head)).toBe(width);
-    expect(Bun.stripANSI(head).trimEnd().endsWith("+12 -3")).toBe(true);
+    const plain = lines.map((line) => Bun.stripANSI(line));
+    // 头部与文件行各一个徽标，两个都紧跟在各自内容后面（间隔 2 列），
+    // 而不是右对齐到第 80 列 —— 内容在左、徽标在最右时，两者看起来是两件事。
+    expect(plain[0]).toContain("Patch  +12 -3");
+    expect(plain[1]).toContain("src/a.ts  +12 -3");
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThan(width / 2);
   });
 
   test("徽标比整行还宽时只能砍徽标，但仍然不超宽", () => {
@@ -245,12 +247,15 @@ describe("apply_patch 卡片 · 折行与悬挂缩进", () => {
     expect(fileBlock.at(-1)).toContain("-5678");
   });
 
-  test("头部徽标右对齐在头部最后一行", () => {
+  test("头部徽标落在头部最后一行，且紧跟内容", () => {
     const lines = renderToolItem(streaming(LONG_PATH, { added: 1234, removed: 5678 }), 60);
     const plain = lines.map((line) => Bun.stripANSI(line));
     const fileStart = plain.findIndex((line) => line.includes("M src/"));
     const headLines = plain.slice(0, fileStart);
-    expect(headLines.at(-1)).toContain("+1234");
+    // 头部只有显示名和徽标（不再有 "patch" 这种冗余摘要），一行装得下
+    expect(headLines).toHaveLength(1);
+    expect(headLines[0]).toContain("+1234");
+    expect(headLines[0]).toContain("Patch  +1234 -5678");
   });
 
   test("窄屏下路径折得更碎，但缩进关系不变", () => {

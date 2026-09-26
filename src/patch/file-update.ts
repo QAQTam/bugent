@@ -110,10 +110,17 @@ export function computeReplacements(
     }
 
     if (chunk.oldLines.length === 0) {
+      /*
+       * 纯插入。带 `@@` 锚点时游标已经 seek 到锚点行之后 —— 必须插在那里；
+       * 之前无条件插到 EOF，锚点被校验了却被丢弃，模型毫无感知地插错位置。
+       * 无锚点的纯插入保持"追加到文件末尾"的既定语义。
+       */
       const insertionIndex =
-        mode === "normalize-lf" && originalLines.at(-1) === ""
-          ? originalLines.length - 1
-          : originalLines.length;
+        chunk.changeContext !== undefined
+          ? lineIndex
+          : mode === "normalize-lf" && originalLines.at(-1) === ""
+            ? originalLines.length - 1
+            : originalLines.length;
       replacements.push([insertionIndex, 0, chunk.newLines]);
       continue;
     }

@@ -27,6 +27,24 @@ describe("markdown AST", () => {
     });
   });
 
+  test("表格列数以表头为准，多余 body 单元格被忽略", () => {
+    const source = [
+      "| a | b |",
+      "|---|---|",
+      "| 1 | 2 | 3 | 4 |",
+      "| 5 |",
+    ].join("\n");
+    const node = parseMarkdownTree(source).topNode.firstChild;
+    expect(readTableModel(node!, source)).toEqual({
+      alignments: ["left", "left"],
+      rows: [
+        { header: true, cells: ["a", "b"] },
+        { header: false, cells: ["1", "2"] },
+        { header: false, cells: ["5", ""] },
+      ],
+    });
+  });
+
   test("未闭合围栏不会当成完整代码块", () => {
     const source = "```bash\necho hi";
     const node = parseMarkdownTree(source).topNode.firstChild;

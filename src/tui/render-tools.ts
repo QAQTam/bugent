@@ -14,9 +14,10 @@
 import { BOLD, bg, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
-import type { ToolItem } from "./renderers.ts";
+import { toolDisplayName, type ToolItem } from "./renderers.ts";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
-import { parseDiffStat, type DiffStat } from "../tools/diff.ts";
+import { parseDiffLine, parseDiffStat, type DiffStat } from "../tools/diff.ts";
+import { jsonStringField } from "../core/partial-json.ts";
 import { parsePatch } from "../patch/parser.ts";
 import { patchProgress } from "../patch/streaming-progress.ts";
 import { highlightCode } from "./highlight.ts";
@@ -29,6 +30,15 @@ export const FOLD_SPEC = {
 
 /** diff 默认展示的最大行数（超出走"点击展开"）。 */
 export const DIFF_DISPLAY_LINES = 14;
+
+/**
+ * 低于这个宽度就不画行号列。
+ *
+ * 行号列本身占「两列数字 + 缩进」约 10 列，窄终端上把它画出来等于把正文挤成
+ * 一条缝。文本里始终带着行号（`--resume`、模型侧都一致），这里只是决定**要不要
+ * 画**——取舍放在渲染层，是"行号进文本"这个方案白送的能力。
+ */
+export const DIFF_GUTTER_MIN_WIDTH = 46;
 
 function argsSummary(item: ToolItem): string {
   const args = item.args as Record<string, unknown> | null;
@@ -43,12 +53,23 @@ function argsSummary(item: ToolItem): string {
   const patch = args.patch;
   if (typeof patch === "string") {
     const operations = patch.match(/^\*\*\* (?:Add|Delete|Update) File: /gm)?.length ?? 0;
-    return operations > 0 ? `${operations} 个文件` : "patch";
+    // 还没解析出文件头时不给摘要 —— 显示名已经是 `Patch`，再来一句 "patch"
+    // 就是 "Patch patch"。空摘要时头部只有名字，反而干净。
+    return operations > 0 ? `${operations} 个文件` : "";
   }
 
   // ask_user：显示题数比显示一整坨 JSON 有意义得多
-   const questions = args.questions;
+  const questions = args.questions;
   if (Array.isArray(questions)) return `${questions.length} 题`;
+
+  // 参数还在流式到达（半截 JSON 解析不出来）：**不要把 JSON 甩给用户看**。
+  // 退一步从原文里抠出已知的字符串字段；抠不到就什么都不显示 —— 卡片头显示
+  // `{"_raw":"{\"path\":\"src/foo…` 既难读，又每来一个 delta 就把整段原文
+  // 序列化 + 折行一次（O(n²)）。
+  const raw = args._raw;
+  if (typeof raw === "string") {
+    return jsonStringField(raw, "path") ?? jsonStringField(raw, "command") ?? "";
+  }
 
   try {
     return JSON.stringify(args);
@@ -78,23 +99,31 @@ function wrapHanging(prefix: string, body: string, width: number): string[] {
 }
 
 /**
- * 把徽标右对齐到**最后一行**行尾。
+ * 徽标与内容之间的固定间隔。
  *
- * 挑最后一行而不是第一行：折行之后第一行已经被正文占满，硬塞会把正文挤掉；
- * 末行留白多，右对齐后读起来仍然是一个稳定的"扫一眼就知道改了多少"的位置。
- * 末行也放不下时（差得很少）就单独起一行，仍然右对齐。
+ * 徽标（`+12 -3`）是"这个卡片改了多少"的补充说明，必须**贴着它说明的那行内容**。
+ * 早先把它右对齐到行尾，长路径下确实不会被截断了，但 80 列终端里内容在左、徽标
+ * 在最右，两者看起来是两件事 —— 扫一眼根本连不起来。
+ */
+const BADGE_GAP = 2;
+
+/**
+ * 把徽标紧跟在**最后一行内容之后**。
+ *
+ * 宽度不变量仍然成立：调用方（`wrapWithBadge`）折行时已经预留了
+ * `徽标宽 + 间隔`，所以最后一行必然留得下。留不下（极窄终端 / 徽标比行还宽）
+ * 才退回"单独起一行、右对齐" —— 宁可多占一行，也不能让徽标被屏幕层截掉。
  */
 function withBadge(lines: string[], badge: string, width: number): string[] {
   const badgeWidth = visibleWidth(badge);
   if (badge.length === 0 || badgeWidth === 0) return lines;
-  // 徽标比整行还宽：只能砍徽标，没有别的选择
   if (badgeWidth >= width) return [...lines, truncateAnsi(badge, width)];
 
   const out = [...lines];
   const last = out[out.length - 1] ?? "";
   const gap = width - visibleWidth(last) - badgeWidth;
-  if (gap >= 1) {
-    out[out.length - 1] = `${last}${" ".repeat(gap)}${badge}`;
+  if (gap >= BADGE_GAP) {
+    out[out.length - 1] = `${last}${" ".repeat(BADGE_GAP)}${badge}`;
     return out;
   }
   out.push(`${" ".repeat(Math.max(0, width - badgeWidth))}${badge}`);
@@ -102,22 +131,54 @@ function withBadge(lines: string[], badge: string, width: number): string[] {
 }
 
 /**
- * 头部：`⏺ 工具名 摘要`，可选一个右对齐徽标（如 `+12 -3`），返回**若干行**。
+ * 折行摘要 + 紧跟徽标。
  *
- * 摘要折行（悬挂缩进对齐到摘要起点），徽标挑到最后一行右端。早先是单行 + 截断，
- * 摘要一长就把徽标挤到行尾之外，被屏幕层硬截断 —— 截掉的恰好是这行最该看见的
- * 东西。折行之后两者都能看全，代价是卡片可能高一行。
- *
- * 右对齐要 ANSI 感知：宽度用 visibleWidth 算，否则带颜色的徽标会把间隔算错。
+ * 顺序要紧：**先扣掉徽标的宽度再折行**，否则最后一行会被正文占满，徽标只能
+ * 另起一行（或者被截断）。扣宽度这一下就是"徽标紧贴内容"与"徽标不超宽"能同时
+ * 成立的原因。
  */
-function header(item: ToolItem, width: number, marker: string, color: string, badge = ""): string[] {
-  const prefix = `${fg(color)}${marker}${RESET} ${BOLD}${item.name}${RESET} `;
-  const summary = argsSummary(item);
-  const lines =
-    summary.length > 0
-      ? wrapHanging(prefix, `${DIM}${summary}${RESET}`, width)
-      : [prefix.trimEnd()];
+function wrapWithBadge(prefix: string, body: string, badge: string, width: number): string[] {
+  const badgeWidth = badge.length === 0 ? 0 : visibleWidth(badge);
+  const budget = badgeWidth === 0 ? width : Math.max(1, width - badgeWidth - BADGE_GAP);
+  const lines = body.length > 0 ? wrapHanging(prefix, body, budget) : [prefix.trimEnd()];
   return withBadge(lines, badge, width);
+}
+
+/** 头部可选覆盖项。 */
+interface HeaderOptions {
+  /** 行首标记，默认 `⏺`。 */
+  marker?: string;
+  /** 标记颜色。 */
+  color?: string;
+  /** 右跟随的徽标（如 `+12 -3` / `1-500`）。 */
+  badge?: string;
+  /**
+   * 覆盖摘要文本。
+   *
+   * 默认摘要来自入参（`args.path` 原样）；read_file 这类工具的**结果**里有
+   * 规范化后的展示路径（工作区内=相对路径、区外=绝对路径），比入参更准也更好认。
+   */
+  summary?: string;
+}
+
+/**
+ * 头部：`⏺ 显示名 摘要 徽标`，返回**若干行**。
+ *
+ * 显示名走 `toolDisplayName()`：卡片头是给人看的，不该出现 `write_file` 这种
+ * 协议标识。摘要折行（悬挂缩进对齐到摘要起点），徽标紧跟最后一行。
+ */
+function header(item: ToolItem, width: number, options: HeaderOptions = {}): string[] {
+  const marker = options.marker ?? "⏺";
+  const color = options.color ?? COLOR.tool;
+  const badge = options.badge ?? "";
+  const summary = options.summary ?? argsSummary(item);
+  const prefix = `${fg(color)}${marker}${RESET} ${BOLD}${toolDisplayName(item.name)}${RESET} `;
+  return wrapWithBadge(
+    prefix,
+    summary.length > 0 ? `${DIM}${summary}${RESET}` : "",
+    badge,
+    width,
+  );
 }
 
 /**
@@ -128,7 +189,7 @@ function header(item: ToolItem, width: number, marker: string, color: string, ba
  */
 function bashHeader(item: ToolItem, width: number): string[] {
   const command = argsSummary(item).replace(/\s+/g, " ").trim();
-  const prefix = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}bash${RESET}`;
+  const prefix = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}${toolDisplayName(item.name)}${RESET}`;
   if (command.length === 0) return [prefix];
   return wrapHanging(`${prefix} `, highlightCode(command, "bash"), width);
 }
@@ -352,8 +413,52 @@ export function renderBashTool(item: ToolItem, width: number): string[] {
 /* 文件工具                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 从 read_file 的输出头反解"读了哪个文件、哪一段"。
+ *
+ * 输出头是工具自己写的稳定格式：
+ *   `# src/a.ts (500 lines, showing 1-500）`   ← 还有更多行
+ *   `# src/a.ts (12 lines）`                    ← 一次读完
+ *   `# src/a.ts (showing 1-500, not yet at end of file)` ← 撞到扫描上限
+ *   `# src/a.ts (empty file)`                  ← 空文件
+ *
+ * 反解它和 `parseDiffStat` 反解 diff 是同一套取舍：不需要新字段，也不会和模型
+ * 看到的内容不一致；`--resume` 重建的卡片同样只有这份文本可用。
+ *
+ * `path` 用的是输出里的展示路径（`relativeTo` 过：工作区内=相对路径，区外=
+ * 绝对路径），比入参原样更准 —— 模型可能写 `./a.ts` 或绝对路径。
+ */
+export function parseReadHeader(output: string): { path?: string; range?: string } {
+  const first = output.split("\n", 1)[0] ?? "";
+  if (!first.startsWith("# ")) return {};
+
+  // `# <path> (…）`：路径是 `# ` 与最后一个 ` (` 之间的部分
+  const paren = first.lastIndexOf(" (");
+  const path = paren > 2 ? first.slice(2, paren) : undefined;
+  const window = /showing (\d+)-(\d+)/.exec(first);
+  if (window !== null) {
+    return { ...(path !== undefined ? { path } : {}), range: `${window[1]}-${window[2]}` };
+  }
+  const total = /\((\d+) lines/.exec(first);
+  if (total !== null) {
+    return { ...(path !== undefined ? { path } : {}), range: `1-${total[1]}` };
+  }
+  return path !== undefined ? { path } : {};
+}
+
 export function renderReadFileTool(item: ToolItem, width: number): string[] {
-  const head = header(item, width, "⏺", COLOR.tool);
+  // 优先用工具**自报**的展示信息（路径与窗口都是它自己算的、最准）；
+  // `--resume` 重建的卡片没有这份元数据，才回退到从输出头反解。
+  const meta =
+    item.presentation?.kind === "file"
+      ? item.presentation
+      : item.done && item.ok
+        ? parseReadHeader(item.output)
+        : {};
+  const head = header(item, width, {
+    ...(meta.range !== undefined ? { badge: meta.range } : {}),
+    ...(meta.path !== undefined ? { summary: meta.path } : {}),
+  });
   if (!item.done) return [...head, `${DIM}  读取中…${RESET}`];
 
   const color = item.ok ? COLOR.toolOk : COLOR.error;
@@ -361,29 +466,64 @@ export function renderReadFileTool(item: ToolItem, width: number): string[] {
   return [...head, ...foldLines(body, FOLD_SPEC.file.head, FOLD_SPEC.file.tail, color, item.expanded)];
 }
 
-/** write_file / edit_file：按 diff 语义着色，右侧右对齐 +N -M。 */
+/** write_file / edit_file：按 diff 语义着色，头部紧跟 +N -M。 */
 export function renderDiffTool(item: ToolItem, width: number): string[] {
-  // 统计从工具输出里反解 —— 不需要额外字段，也不会和模型看到的内容不一致
-  const stat = item.done && item.ok ? parseDiffStat(item.output) : undefined;
-  const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
+  const progress = item.done ? undefined : item.fileProgress;
+  const file = item.presentation?.kind === "file" ? item.presentation : undefined;
+
+  // 徽标来源优先级：流式进度（跑之前）> 工具自报（刚跑完）> 反解输出（--resume）。
+  // 三者口径一致（`diffStat` 与流式统计都按 `split("\n").length` 数），所以数字
+  // 是接着涨的，不会跳。
+  const stat =
+    progress !== undefined
+      ? { added: progress.added, removed: progress.removed }
+      : file !== undefined && (file.added !== undefined || file.removed !== undefined)
+        ? { added: file.added ?? 0, removed: file.removed ?? 0 }
+        : item.done && item.ok
+          ? parseDiffStat(item.output)
+          : undefined;
+
+  // 路径同理：自报的是 `relativeTo` 过的规范路径，比入参原样准
+  const displayPath = progress?.path ?? file?.path;
+  const head = header(item, width, {
+    ...(stat !== undefined ? { badge: formatStatBadge(stat) } : {}),
+    ...(displayPath !== undefined ? { summary: displayPath } : {}),
+  });
 
   if (!item.done) return [...head, `${DIM}  写入中…${RESET}`];
 
   const [summary, ...rest] = item.output.split("\n");
   const lines: string[] = [`${DIM}${summary ?? ""}${RESET}`];
 
+  // 行号列要占掉「两列数字 + 缩进」约 10 列。窄终端上宁可不显示行号，
+  // 也不能把正文挤到只剩几个字 —— 文本里带着行号，渲染时按宽度取舍即可。
+  const showGutter = width >= DIFF_GUTTER_MIN_WIDTH;
+
   const colored = rest.map((line) => {
-    const prefix = line[0];
-    const text = line.slice(1);
+    const parsed = parseDiffLine(line);
+    const prefix = parsed?.kind ?? line[0] ?? " ";
+    let text = parsed?.text ?? line.slice(1);
+    // 行号列原样复用文本里已经对齐好的那两列（自己再算一遍就会和文本不一致）
+    const gutter =
+      showGutter && parsed?.gutter !== undefined ? `${DIM}  ${parsed.gutter}${RESET}` : "";
+    // 省略标记行在文本里带着一列**空行号**（占位对齐用）。不画行号时那几列要一起
+    // 丢掉，否则窄屏上它会比别的行多缩进一截。
+    if (!showGutter) text = text.replace(/^ +(?=⋯)/, "");
+
+    // hunk 头（`@@ -3,7 +3,8 @@`）：自带语义，不参与 +/- 着色，也不带行号列
+    if (parsed === undefined && line.startsWith("@@")) {
+      return `${fg(COLOR.tool)}  ${line}${RESET}`;
+    }
+
     // 标记列（`  +` / `  -` 共 3 格）铺底色，做成一条能一眼扫到的色带；
     // 正文仍用降过饱和的前景色 —— 语义与颜色都不丢。
     if (prefix === "+") {
-      return `${bg(COLOR.diffAddBg)}${fg(COLOR.diffAdd)}  +${RESET}${fg(COLOR.diffAdd)}${text}${RESET}`;
+      return `${gutter}${bg(COLOR.diffAddBg)}${fg(COLOR.diffAdd)}  +${RESET}${fg(COLOR.diffAdd)}${text}${RESET}`;
     }
     if (prefix === "-") {
-      return `${bg(COLOR.diffRemoveBg)}${fg(COLOR.diffRemove)}  -${RESET}${fg(COLOR.diffRemove)}${text}${RESET}`;
+      return `${gutter}${bg(COLOR.diffRemoveBg)}${fg(COLOR.diffRemove)}  -${RESET}${fg(COLOR.diffRemove)}${text}${RESET}`;
     }
-    return `${DIM}  ${line}${RESET}`;
+    return `${gutter}${DIM}  ${parsed === undefined ? line : `${prefix}${text}`}${RESET}`;
   });
 
   return [
@@ -447,7 +587,9 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
         ? patchStatFromArgs(item.args)
         : undefined
       : { added: progress.added, removed: progress.removed };
-  const head = header(item, width, "⏺", COLOR.tool, stat === undefined ? "" : formatStatBadge(stat));
+  const head = header(item, width, {
+    ...(stat !== undefined ? { badge: formatStatBadge(stat) } : {}),
+  });
 
   if (!item.done) {
     const lines = [...head];
@@ -462,13 +604,12 @@ export function renderApplyPatchTool(item: ToolItem, width: number): string[] {
           ? `${file.path} → ${file.destination}`
           : file.path;
       const badge = file.added > 0 || file.removed > 0 ? formatStatBadge(file) : "";
-      // 路径折行（续行对齐到路径起点），徽标挑到最后一行右端 —— 长路径不再
-      // 把徽标顶出行外，也不再被截成半截认不出是哪个文件。
+      // 路径折行（续行对齐到路径起点），徽标紧跟路径 —— 长路径不再把徽标顶出
+      // 行外，也不再把它甩到屏幕最右侧。
       lines.push(
-        ...withBadge(
-          wrapHanging(`${fg(patchKindColor(file.kind))}  ${marker} `, rawPath, width).map(
-            (line) => `${line}${RESET}`,
-          ),
+        ...wrapWithBadge(
+          `${fg(patchKindColor(file.kind))}  ${marker} `,
+          `${rawPath}${RESET}`,
           badge,
           width,
         ),

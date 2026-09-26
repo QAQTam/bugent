@@ -14,7 +14,7 @@
 import { BOLD, DIM, RESET, fg } from "./markdown.ts";
 import { truncateAnsi, visibleWidth } from "./ansi.ts";
 import { COLOR } from "./theme.ts";
-import type { ToolItem } from "./renderers.ts";
+import { toolDisplayName, type ToolItem } from "./renderers.ts";
 import { countTodos, tryParseTodos, type Todo, type TodoStatus } from "../tools/todo.ts";
 
 export const TODO_MARKERS: Record<TodoStatus, string> = {
@@ -203,7 +203,9 @@ export function renderTodoTool(item: ToolItem, width: number): string[] {
   if (todos === undefined) {
     // 参数畸形或被拒绝：如实说明，不要假装成功
     const note = item.done && !item.ok ? item.output.split("\n")[0] ?? "" : "参数无效";
-    return [`${fg(COLOR.error)}⏺ todo_write${RESET} ${DIM}${truncateAnsi(note, 60)}${RESET}`];
+    return [
+      `${fg(COLOR.error)}⏺ ${toolDisplayName(item.name)}${RESET} ${DIM}${truncateAnsi(note, 60)}${RESET}`,
+    ];
   }
 
   const counts = countTodos(todos);
@@ -216,7 +218,7 @@ export function renderTodoTool(item: ToolItem, width: number): string[] {
       ? ` · ${args.summary.trim()}`
       : "";
 
-  const line = `⏺ todo_write${summary} · 共 ${todos.length} 项${
+  const line = `⏺ ${toolDisplayName(item.name)}${summary} · 共 ${todos.length} 项${
     parts.length > 0 ? ` · ${parts.join(" · ")}` : ""
   }`;
   return [

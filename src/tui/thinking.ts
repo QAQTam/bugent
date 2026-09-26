@@ -12,7 +12,8 @@
  * 用户看的是"模型此刻在想什么"，不是思考全文。
  * 所以这里是 O(1) 内存：一行的字符数封顶，与总思考长度无关。
  *
- * reasoning 是 UI-only 数据：不写入 AgentSession、不分配 msgid、不进上下文。
+ * 这里只维护底部 live tail；完整 reasoning 由 AgentSession 持久化，并在
+ * chatview 中作为默认折叠的 Thought item 展示。
  * 它由 TUI 在 assistant 消息边界和 runtime 切换时 reset，避免跨 msgid 串线。
  *
  * 状态不用文字表达，只看菊花本身：

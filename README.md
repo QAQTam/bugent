@@ -1,15 +1,3 @@
-一个最大化利用bun最新版API的AI AGENT.
-小目标：bun最新版+ts 7+TUI+WEBUI
-Phase 1. 确立以多provider 多endpoint的架构设计，第一阶段直接隔离agentloop不知道endpoint类型的设计
-Phase 2. 确立loop的上下文注入由message（msgid）标记，msgid0为systemprompt,此后按照上下文注入顺序依次排序，确保缓存命中优先（做足测试）
-Phase 3. 新增bash工具
-Phase 4. 完成最小loop
-Phase 5. 设计config布局以及TUI设计，用bun自己的terminal api实现更合适。或者引入Ink：无论如何都要确保O（1）性能优化。做足测试
-Phase 6. 开始设计权限管理和沙箱，首轮应该测试Linux下沙箱设计
-Phase 7. 拓展write_file read_file edit_file工具
-Phase 8. tui支持渲染markdown和代码高亮
-Phase 9. 支持多session并行对话，先做一个实例一个新对话，考虑并发锁问题
-Phase 10. 消息落盘，进行第一轮安全审计。
 
 ---
 
@@ -37,9 +25,9 @@ bun run src/index.ts
 bun run src/index.ts --plain
 
 # 权限与沙箱
-bun run src/index.ts --mode read-only         # 根只读 + 工作区只读 + 断网
-bun run src/index.ts --mode workspace-write   # 根只读 + 工作区可写 + 断网（默认）
-bun run src/index.ts --mode no-sandbox        # 不隔离
+bun run src/index.ts --mode read-only         # 读免问；写工作区/写外部/联网逐次批准
+bun run src/index.ts --mode workspace-write   # 读+写工作区免问；写外部/联网逐次批准（默认）
+bun run src/index.ts --mode no-sandbox        # 全部免问（沙箱仍在，只是不拦截）
 bun run src/index.ts --yes                    # 跳过所有规则检查（危险）
 
 # 会话
@@ -51,13 +39,13 @@ bun run src/index.ts --no-persist     # 不落盘
 bun test
 bun run typecheck
 
-# 编译 0.2.0 单文件二进制与发布归档
+# 编译 0.2.1 单文件二进制与发布归档
 bun run package:bugent
-./dist/bugent/bugent-0.2.0-linux-x64/bugent --version
+./dist/bugent/bugent-0.2.1-linux-x64/bugent --version
 ```
 
 单文件二进制内嵌 system prompt 和 `libbugent-sandbox.so`。首次启动时把原生
-provider 解包到 `~/.bugent/runtime/0.2.0/lib/`，因此 MCP 沙箱不依赖发布目录
+provider 解包到 `~/.bugent/runtime/0.2.1/lib/`，因此 MCP 沙箱不依赖发布目录
 旁边存在额外动态库。
 
 **按平台打包**：`scripts/package-platform.ts` 是「这个平台上有哪些能力要关掉」
@@ -220,8 +208,11 @@ P4 已接线：
 P5 已接线（实验性，默认 `auto_continue = false`）：
 
 - 每个 Goal turn 记录 input/output/cached token 与 active time。
+- Goal 预算按 `input - cached + output` 计新增工作量；reviewer 的独立 usage 也计入。
+- `max_goal_token_budget` 同时是上限和未显式指定时的默认预算。
 - 用户消息、排队消息和 `waiting_user` 始终优先于 continuation。
 - 达到 token budget / provider usage limit 时停止自动推进。
+- 达到 token budget 会注入一次收尾 developer context，要求模型停止新的实质工作并总结。
 - 连续 3 个 Goal turn 没有权威状态变化时进入 `blocked`。
 - `max_consecutive_turns` 防止 continuation 无限循环。
 
@@ -284,15 +275,25 @@ bun run scripts/prompt-lab.ts --task study --trials 24
 已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter、MCP stdio、Skills、Linux 原生 sandbox provider。
 待实现：`openai-responses`、`anthropic-messages`。
 
-## 权限模型：档位即授权
+## 权限模型：档位 = 默认批准范围
 
-三档递进，**档位本身就是预先授权范围**：
+**档位不是能力边界，是"哪些事不用问"。** 沙箱至始至终都开着；档位只决定
+闸门要不要按次问你。三档都能**自由读工作区之外**。
 
-| 档位 | 根 | 工作区 | 网络 | 进程隔离 |
-| --- | --- | --- | --- | --- |
-| `read-only` | 只读 | **只读** | 断 | bwrap |
-| `workspace-write` | 只读 | 可写 | 断 | bwrap |
-| `no-sandbox` | — | 可写 | 通 | 无 |
+| 档位 | 读工作区外 | 写工作区 | 写工作区外 | 联网 | 隔离 |
+| --- | --- | --- | --- | --- | --- |
+| `read-only` | 免问 | 逐次批准 | 逐次批准 | 逐次批准 | bwrap |
+| `workspace-write`（默认） | 免问 | 免问 | 逐次批准 | 逐次批准 | bwrap |
+| `no-sandbox` | 免问 | 免问 | 免问 | 免问 | bwrap（只是不拦截） |
+
+两条容易搞错的地方：
+
+- **批准一次只生效一次。** 越界走的是**按次授权**，不是"升档" —— 批准一次
+  写盘不会把 `read-only` 永久改成 `workspace-write`。否则"每次写入都要
+  审批"这句话就失去意义了。
+- **`no-sandbox` 不等于关掉沙箱。** 它的语义是"默认批准一切、不再拦截"。
+  隔离层（pid / session / 环境变量白名单 / `no_new_privs`）仍然生效 ——
+  所以 `no-sandbox` 下依然拿得到 `close_range`、进程隔离这些硬化的好处。
 
 ### 为什么 read-only 能挡住 `sed -i` 和 `python` 写文件
 
@@ -307,7 +308,7 @@ read-only 档：重定向写 / sed -i / python 写 / tee  → 文件内容一个
 workspace-write 档：同样四种写法全部成功，但写工作区外仍被挡
 ```
 
-### 弹窗只在"越档"时出现
+### 弹窗只在"越出默认批准范围"时出现
 
 **沙箱越严，越不需要问。** read-only 档下内核保证 bash 改不了任何东西，
 所以 bash **自动放行**，不打断你；workspace-write 档下工作区就是声明的边界。
@@ -328,25 +329,79 @@ resource = "git push*"
 decision = "ask"
 ```
 
-### 联网：先跑、失败、带着原因要授权
+### 两条判定路径，一套按次授权
+
+改之前是**同一件事、两个工具、两种结果**：`write_file` 写工作区外会弹窗，
+而 `bash` 重定向写同一个路径只会得到一句 `Read-only file system` ——
+用户连申请授权的机会都没有。唯一出路是切到 `no-sandbox`（默认批准一切），
+而那正是 `src/permission/mode.ts` 明令禁止的"升档"。
+
+现在两条路径统一到同一套语义（完整规范见 `docs/permission-authorization-spec.md`）：
+
+| 工具类别 | 判在哪 | 时机 |
+| --- | --- | --- |
+| 进程内工具（`read_file` / `write_file` / `edit_file` / `apply_patch`） | 权限体系第一层（调用前闸门） | 调用前 |
+| 沙箱子进程（`bash`） | 权限沙箱体系（执行前静态判定 + 内核兜底） | **执行前**（能判定时） |
+
+bash 这条路径靠 `src/sandbox/command-scan.ts` 在执行前扫命令：重定向、
+写命令（`sed -i` / `tee` / `cp` / `rm` …）、输出选项（`curl -o` / `dd of=`）、
+解释器 + 写信号。命中就弹窗，**命令根本不跑**；批准后本次 argv 真的
+`--bind` 上那个目录，所以"批准了就能写"不再是一句空话。
+
+判不出来的（`python -c` 里的动态路径）也问，但只在命令明确提到 `$HOME` 时才放开
+home —— 判不出目标就"哪里都放开"是把授权变成猜谜。静态漏判不等于放行：
+内核仍然挡着，安全上没有任何退步。
+
+`no-sandbox` 档不做事前拦截：那一档的语义就是"默认批准一切"，档位本身就是预先授权。
+
+### 授权窗口 60 秒，带倒计时
+
+三个授权入口（`ask` 规则、越界按次授权、能力授权）共用 `src/permission/authorization.ts`
+的一个窗口，结果是**三态**而不是布尔：
+
+| 结果 | 含义 | 回传模型 |
+| --- | --- | --- |
+| `approved` | 用户在窗口内批准 | 继续执行 |
+| `denied` | 用户明确拒绝 | `用户拒绝操作` |
+| `timeout` | 60 秒内没有任何输入 | `授权已超时` |
+
+**超时 = 拒绝**（fail closed），不是默认批准 —— 无人值守时不能替用户做决定。
+TUI 弹窗标题右侧显示倒计时（`需要授权 · 写工作区之外 · 还剩 47s`），归零自动关闭；
+CLI 的 `readline` 没有内建超时，同样由窗口兜住。
+
+### 联网：能静态识别的先问，识别不出的先跑再问
 
 网络**不绑在档位上**（否则会为了联网不得不丢掉文件系统隔离）。默认断网，
-流程是：
+所以两条路都要过按次授权：
+
+**能静态识别的（`curl` / `wget` / `git push` / `npm install` …）在执行前就弹窗** ——
+扫描器认得命令名，不必先失败一次：
 
 ```
 模型调用 bash("npm install")
-  ↓ 先在断网沙箱里真跑一次
-失败：Could not connect to server
-  ↓ 检测到是网络受限
-弹窗：「这条命令因为沙箱断网失败了。允许联网后重跑吗？
-       命令：npm install
-       报错：curl: (7) Could not connect to server」
-  ↓ 批准 → 保持沙箱，只放开这一次的网络，重跑同一条命令
-  ↓ 拒绝 → 原始失败结果原样返回给模型
+  ↓ 扫描命中"联网"，命令还没跑
+弹窗：「这条命令需要联网。
+       命令：npm install」
+  ↓ 批准 → 本次不加 --unshare-net，跑同一条命令
+  ↓ 拒绝 / 超时 → 命令不执行，回传「用户拒绝操作」/「授权已超时」
 ```
 
-刻意**不做先行拦截**：那样用户看到的是一句没有上下文的"是否允许联网"，
-根本不知道自己在批准什么。
+**识别不出的（`python -c "socket..."` 之类）走失败后兜底**：
+
+```
+模型调用 bash("python3 -c 'import socket; ...'")
+  ↓ 先在断网沙箱里真跑一次
+失败：Network is unreachable
+  ↓ 检测到是网络受限
+弹窗：「这条命令因为沙箱断网失败了。允许联网后重跑吗？
+       命令：python3 -c 'import socket; ...'
+       报错：Network is unreachable」
+  ↓ 批准 → 保持沙箱，只放开这一次的网络，重跑同一条命令
+  ↓ 拒绝 / 超时 → 那次失败不返回，回传明确的否定结论
+```
+
+兜底这条路**刻意不做事前拦截**：没有真实报错的"是否允许联网"，
+用户根本不知道自己在批准什么。
 
 ### 状态栏
 
@@ -597,12 +652,17 @@ OpenAI Chat adapter 默认回放 `reasoning`，可通过 provider 配置选择�
 reasoning_replay = "reasoning" # reasoning | reasoning_content | both | none
 ```
 
-TUI 展示仍保持 O(1) 内存：只保留当前思考行，输入框上方固定预留 3 行，
+TUI 的 live 阶段仍保持 O(1) 内存：只保留当前思考行，输入框上方固定预留 3 行，
 思考占中间一行，超宽时横向滚动，右侧永远是最新字符。
 
 ```
 ✻ The riddle: "一个农夫有17只羊…        ← 菊花在转，超宽时滚动
 ```
+
+思考完成后，chatview 中原来的 `✻ Thinking…` 会原地变成默认折叠的
+`✦ Thought`。完整思考不会自动展开；点击 Thought 头部才会展开，再点一次折叠。
+恢复会话后仍可展开历史 Thought，但耗时只在当前进程内可见（数据库没有保存
+reasoning 的开始时间）。
 
 状态不用文字表达，只看菊花本身：
 
@@ -616,7 +676,7 @@ TUI 展示仍保持 O(1) 内存：只保留当前思考行，输入框上方固�
 因此 bash、MCP 或 skill 长时间执行时，即使没有 reasoning，菊花仍会持续动画；
 断线后会停止并保留红色错误状态，不会伪装成 idle。
 
-遇到 `\n` 就销毁当前行重新开始。持久化的 reasoning 用于协议回放，不用于展开思考全文。
+遇到 `\n` 就销毁当前行重新开始；底部 tail 与可展开的持久化 Thought 是两条独立展示路径。
 
 > `deepseek-v4.1-flash` 需要显式设置 `extra_body = { reasoning_effort = "high" }`
 > 才会返回 `reasoning_content`；`glm-5.3-flash` 默认就有。

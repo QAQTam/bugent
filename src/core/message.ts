@@ -41,7 +41,7 @@ export interface StoredMessage {
   readonly origin: MessageOrigin;
   /** origin === "inject" 时的来源；用于 MCP/skills 的协议 role 渲染。 */
   readonly injectionSource?: InjectionSource;
-  /** assistant 的思考链路；用于 provider reasoning replay，不作为正文展示。 */
+  /** assistant 的思考链路；用于 provider reasoning replay，也可在 TUI 中按需查看。 */
   readonly reasoning?: string;
   readonly toolCallId?: string;
   readonly toolCalls?: readonly ToolCall[];

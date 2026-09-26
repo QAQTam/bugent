@@ -29,6 +29,17 @@ describe("Markdown 表格渲染", () => {
     for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(8);
   });
 
+  test("body 多余单元格不会把表扩列", () => {
+    const text = "| a | b |\n|---|---|\n| 1 | 2 | 3 | 4 |";
+    const lines = renderMarkdown(text, 80).map((line) => Bun.stripANSI(line));
+
+    expect(lines[0]?.match(/┬/g)).toHaveLength(1);
+    expect(lines.join("\n")).toContain("1");
+    expect(lines.join("\n")).toContain("2");
+    expect(lines.join("\n")).not.toContain("3");
+    expect(lines.join("\n")).not.toContain("4");
+  });
+
   test("表格会被切成独立 segment，不混进普通 prose", () => {
     const segments = splitMarkdown("intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nend");
     expect(segments.map((segment) => segment.kind)).toEqual([

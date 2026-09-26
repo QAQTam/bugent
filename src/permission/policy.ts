@@ -11,6 +11,11 @@
  *   - 对特定操作强制询问：`{tool:"bash", resource:"git push*", decision:"ask"}`
  *
  * 默认**不预置任何 allow 规则** —— 放行由档位负责，不需要在这里列白名单。
+ *
+ * ⚠️ bash 规则按**原始命令文本**匹配（resource = 整条命令串）。这是有意的
+ * 取舍：挡不住 `env rm -rf /`、`sudo rm -rf /`、`bash -c "…"`、`${IFS}`、
+ * 引号/换行/大小写变体 —— 规则匹配字面量，不解析命令语义。要把 bash 限制住，
+ * 靠的是档位（read-only 档内核挡写）与按次授权；deny 适合挡"这条具体命令"。
  */
 
 import type { ModeRequirement } from "./mode.ts";

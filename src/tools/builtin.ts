@@ -6,6 +6,7 @@
  */
 
 import { createBashTool, createShellRunner, resolveShell, type ShellRunner } from "./bash.ts";
+import { sep } from "node:path";
 import {
   createEditFileTool,
   createReadFileTool,
@@ -28,6 +29,13 @@ export interface DefaultToolsOptions {
   writablePaths?: readonly string[];
   /** 额外放行给子进程的环境变量名。 */
   passEnv?: readonly string[];
+  /**
+   * 沙箱子进程是否允许联网。默认 false。
+   *
+   * 由 `--allow-network` / `config.sandbox.allowNetwork` 传入。默认的断网不是
+   * "禁止联网"，而是**联网授权的触发机制**：先真跑一次失败，再拿真实报错问用户。
+   */
+  allowNetwork?: boolean;
   /** 直接覆盖执行层（测试用，优先级最高）。 */
   runner?: ShellRunner;
   /** 持久化 session 的 Goal controller；存在时 todo_write 进入 Goal 校验模式。 */
@@ -46,6 +54,14 @@ export interface ToolsSetup {
     enabled: boolean;
     /** 状态说明，用于在 TUI/CLI 上如实告知用户。 */
     note: string;
+    /**
+     * 子进程是否处于"断网沙箱"—— 决定 bash 失败后要不要走联网授权。
+     *
+     * 暴露出来是为了让"`--allow-network` 到底有没有接上"可被断言：
+     * 这个字段曾经整条链路断过（CLI 解析了、没人消费），而单测因为直接
+     * 调 `buildSandboxArgv` 而绕过了接线。
+     */
+    networkBlocked: boolean;
   };
   /**
    * 工具自报的默认权限规则。
@@ -83,37 +99,59 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
   let note: string;
   /** 是否处于"断网沙箱"—— 决定 bash 失败后要不要走联网授权。 */
   let networkBlocked = false;
+  /** 执行层没有内核隔离时，bash 需要退到"逐条询问"兜底（见 BashToolOptions）。 */
+  let bashNeedsPerRunApproval = false;
+
+  // 档位只决定"要不要问"，不决定"有没有隔离"。所以 bwrap 恒开 ——
+  // no-sandbox 的语义是"默认批准一切、不再拦截"，不是"关掉沙箱"。
+  const approvesAll = caps.defaultApprove === "all";
+  const workspaceWrite = caps.defaultApprove !== "read";
 
   if (options.runner !== undefined) {
     runner = options.runner;
     enabled = false;
     note = "使用自定义执行层";
-  } else if (!caps.sandboxed) {
-    runner = createShellRunner();
-    enabled = false;
-    note = `无沙箱（${mode}）· 可读写任意位置 · 网络不受限`;
   } else if (!isSandboxAvailable()) {
     runner = createShellRunner();
     enabled = false;
+    bashNeedsPerRunApproval = true;
     // 说清楚"档位还在、但只是工具层门控"：没有 bwrap 时子进程没有内核级隔离，
     // read-only 档挡得住 write_file，挡不住 bash 里的一条 `echo > file`。
-    note = "未找到 bwrap：子进程没有内核级隔离，档位只约束工具调用（bash 仍可写）";
+    note = "未找到 bwrap：子进程没有内核级隔离，bash 每条命令都会先请求确认";
   } else {
+    // 联网是**按次授权**的：默认断网跑一次，失败后再拿真实报错问用户。
+    // `allowNetwork` 为 true 表示用户已经全局授权，此时不再走那条按次路径。
+    const networkAllowed = options.allowNetwork === true || approvesAll;
+    // defaultApprove === "all" 表示"不再拦截"，于是把整个文件系统叠加成可写。
+    // 隔离层本身仍然生效（pid / session / 环境变量白名单 / no_new_privs）。
+    const writablePaths = [
+      ...(options.writablePaths ?? []),
+      ...(approvesAll ? [sep] : []),
+    ];
     runner = createSandboxedShellRunner(
       {
-        workspaceWrite: caps.workspaceWrite,
-        ...(options.writablePaths !== undefined ? { writablePaths: options.writablePaths } : {}),
-        allowNetwork: false,
+        workspaceWrite,
+        ...(writablePaths.length > 0 ? { writablePaths } : {}),
+        allowNetwork: networkAllowed,
       },
       undefined,
       { ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}) },
     );
     enabled = true;
-    networkBlocked = true;
+    networkBlocked = !networkAllowed;
     note = `bwrap 沙箱 · ${caps.label}`;
   }
 
-  registry.register(createBashTool(runner, { networkBlocked }));
+  registry.register(
+    createBashTool(runner, {
+      networkBlocked,
+      workspaceWritable: workspaceWrite,
+      // `no-sandbox` 的语义就是"默认批准一切"，那一档不该再弹窗。
+      authorizeBeforeRun: !approvesAll,
+      // 没有内核沙箱时，"漏判≠放行"的前提消失 —— 退到逐条询问兜底。
+      requireApprovalEveryRun: bashNeedsPerRunApproval,
+    }),
+  );
 
   // shell 解析的说明（缺 bash 时给出装什么、或 BUGENT_SHELL 指到哪）拼进沙箱说明，
   // 免得用户只看到每条命令都 ENOENT
@@ -143,7 +181,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     registry,
     mode,
     agentTools,
-    sandbox: { enabled, note },
+    sandbox: { enabled, note, networkBlocked },
     defaultPermissionRules: registry.defaultPermissionRules(),
   };
 }

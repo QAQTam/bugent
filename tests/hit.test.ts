@@ -38,6 +38,14 @@ describe("消息区按键语义", () => {
     expect(regions.some((entry) => entry.button === "left")).toBe(false);
   });
 
+  test("Thought 头部左键展开，普通消息仍只认右键", () => {
+    const regions = messageRegions([], [message], [{ id: "reasoning-1", rect }]);
+    expect(regions).toEqual([
+      { target: { kind: "reasoning", id: "reasoning-1" }, rect, button: "left" },
+      { target: { kind: "message", msgid: 7, undoMsgid: 7 }, rect, button: "right" },
+    ]);
+  });
+
   test("工具卡片与普通消息共存时，左键先落到工具卡片上", () => {
     const regions = messageRegions([tool], [message]);
     const left = regions.filter((entry) => entry.button === "left");
@@ -56,6 +64,7 @@ describe("命中目标 id", () => {
     expect(hitTargetName({ kind: "returnToLatest" })).toBe("returnToLatest");
     expect(hitTargetName({ kind: "moreHistory" })).toBe("moreHistory");
     expect(hitTargetName({ kind: "tool", callId: "c1" })).toBe("tool:c1");
+    expect(hitTargetName({ kind: "reasoning", id: "reasoning-1" })).toBe("reasoning:reasoning-1");
     expect(hitTargetName({ kind: "message", msgid: 7, undoMsgid: 7 })).toBe("message:7");
   });
 });

@@ -12,7 +12,7 @@
  * 新增带自定义外观的工具 = 加一个 renderer 文件 + 这里加一行。
  */
 
-import { registerToolRenderer } from "./renderers.ts";
+import { registerToolDisplayName, registerToolRenderer } from "./renderers.ts";
 import { renderTodoTool } from "./render-todo.ts";
 import {
   renderApplyPatchTool,
@@ -25,9 +25,26 @@ import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
 
 let registered = false;
 
+/**
+ * 工具注册名 -> TUI 显示名。
+ *
+ * 只有这里的映射表认识工具名（见文件头）。加新工具时两边各加一行：renderer 决定
+ * 长什么样，显示名决定叫它什么。没列的工具照原样显示注册名。
+ */
+const DISPLAY_NAMES: readonly (readonly [string, string])[] = [
+  ["bash", "Bash"],
+  ["read_file", "Read"],
+  ["write_file", "Write"],
+  ["edit_file", "Edit"],
+  [APPLY_PATCH_TOOL_NAME, "Patch"],
+  [TODO_TOOL_NAME, "Todo"],
+];
+
 export function registerBuiltinToolRenderers(): void {
   if (registered) return;
   registered = true;
+
+  for (const [name, label] of DISPLAY_NAMES) registerToolDisplayName(name, label);
 
   registerToolRenderer(TODO_TOOL_NAME, renderTodoTool);
   registerToolRenderer("bash", renderBashTool);

@@ -1,2 +1,2 @@
 /** Keep the compiled CLI version aligned with package.json. */
-export const BUGENT_VERSION = "0.2.0";
+export const BUGENT_VERSION = "0.3.2";

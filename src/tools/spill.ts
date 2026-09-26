@@ -10,13 +10,28 @@
  */
 
 import { mkdir, rm } from "node:fs/promises";
-import { resolve, sep } from "node:path";
 import { configDir } from "../config/toml.ts";
 
 export const OUTPUT_DIR_NAME = "output";
 
 export type OutputStreamName = "stdout" | "stderr";
 type FileSink = ReturnType<Bun.BunFile["writer"]>;
+
+/**
+ * 落盘 id 的路径段校验（兜底）。
+ *
+ * sessionId（内部生成 / --resume 恢复）与 callId（provider 返回，见
+ * loop.ts 的 safeToolCallId）最终都会拼进 `~/.bugent/output/` 下的文件名。
+ * 这一层不信任上游已经规整过 —— 出现 `..`、路径分隔符或超长值时宁可抛错，
+ * 绝不写盘：一次工具产物丢失可以接受，一次任意路径写不行。
+ */
+function assertPathSegment(value: string, label: string): string {
+  const safe = /^[A-Za-z0-9._-]{1,128}$/.test(value) && value !== "." && value !== "..";
+  if (!safe) {
+    throw new Error(`${label} 含非法字符，拒绝写盘：${JSON.stringify(value.slice(0, 64))}`);
+  }
+  return value;
+}
 
 /**
  * bash 运行期间的两路输出暂存器。
@@ -54,8 +69,10 @@ export async function spillOutput(
   text: string,
   home?: string,
 ): Promise<string> {
+  assertPathSegment(sessionId, "sessionId");
+  assertPathSegment(callId, "callId");
   const dir = sessionOutputDir(sessionId, home);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = `${dir}/${callId}.txt`;
   await Bun.write(path, text);
   return path;
@@ -83,8 +100,10 @@ export async function createOutputSpool(
   callId: string,
   home?: string,
 ): Promise<OutputSpool> {
+  assertPathSegment(sessionId, "sessionId");
+  assertPathSegment(callId, "callId");
   const dir = sessionOutputDir(sessionId, home);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
 
   const finalPath = `${dir}/${callId}.txt`;
   const tempPaths: Record<OutputStreamName, string> = {
@@ -148,11 +167,4 @@ export async function createOutputSpool(
       await rm(tempPaths.stderr, { force: true });
     },
   };
-}
-
-/** 路径是否落在产物目录内（read_file 的只读白名单判定）。 */
-export function isInsideOutputRoot(target: string, home?: string): boolean {
-  const root = resolve(outputRoot(home));
-  const resolved = resolve(target);
-  return resolved === root || resolved.startsWith(root + sep);
 }

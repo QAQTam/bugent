@@ -30,11 +30,15 @@ function positiveIntEnv(name: string): number {
  * 第一轮发一次工具调用，之后照旧回显 —— 否则"内容由工具产出"的界面（待办面板、
  * 工具卡片）在端到端测试里造不出来，只能靠真实模型碰运气。工具名由调用方给，
  * provider 层因此仍然不认识任何具体工具。
+ *
+ * `BUGENT_MOCK_REASONING` 会在正文前注入一段 reasoning，用于 PTY 验证
+ * Thinking -> Thought 以及点击展开。
  */
 function mockScript(): MockTurn[] {
   // 流式模拟：把回复切成小块并逐块延迟吐字，让 TUI 的增量渲染可被观测。
   // 只在测试里用 env 打开，默认保持"一次性吐完"的原行为。
   const chunkChars = positiveIntEnv("BUGENT_MOCK_CHUNK_CHARS");
+  const reasoningText = Bun.env.BUGENT_MOCK_REASONING ?? "";
 
   const echo: MockTurn = (req) => {
     const last = [...req.messages].reverse().find((message) => message.role === "user");
@@ -46,7 +50,16 @@ function mockScript(): MockTurn[] {
         : Array.from({ length: Math.ceil(full.length / chunkChars) }, (_, index) =>
             full.slice(index * chunkChars, (index + 1) * chunkChars),
           );
+    const reasoningDeltas =
+      reasoningText.length === 0
+        ? []
+        : chunkChars === 0
+          ? [reasoningText]
+          : Array.from({ length: Math.ceil(reasoningText.length / chunkChars) }, (_, index) =>
+              reasoningText.slice(index * chunkChars, (index + 1) * chunkChars),
+            );
     return [
+      ...reasoningDeltas.map((delta): ChatChunk => ({ type: "reasoning", delta })),
       ...deltas.map((delta): ChatChunk => ({ type: "text", delta })),
       { type: "done", reason: "stop" },
     ];
@@ -59,8 +72,35 @@ function mockScript(): MockTurn[] {
   if (typeof parsed.name !== "string" || parsed.name.length === 0) {
     throw new Error('BUGENT_MOCK_TOOL_CALL 需要形如 {"name":"todo_write","args":{…}} 的 JSON');
   }
+
+  const callId = "mock-tool-call-1";
+  const toolName = parsed.name;
+  if (chunkChars === 0) {
+    return [{ toolCalls: [{ id: callId, name: toolName, args: parsed.args ?? {} }] }, echo];
+  }
+
+  // 参数分片吐：让"参数还在流式到达"的界面（实时路径 / +N -M）在端到端测试里
+  // 可观测。一次吐完的话 TUI 只会渲染最终状态，中间态永远测不到。
+  const argsText = JSON.stringify(parsed.args ?? {});
+  const argsDeltas = Array.from({ length: Math.ceil(argsText.length / chunkChars) }, (_, index) =>
+    argsText.slice(index * chunkChars, (index + 1) * chunkChars),
+  );
   return [
-    { toolCalls: [{ id: "mock-tool-call-1", name: parsed.name, args: parsed.args ?? {} }] },
+    {
+      chunks: [
+        { type: "tool_call", id: callId, name: toolName, argsDelta: "" },
+        ...argsDeltas.map(
+          (delta): ChatChunk => ({
+            type: "tool_call",
+            id: callId,
+            name: toolName,
+            argsDelta: delta,
+          }),
+        ),
+        { type: "usage", usage: { input: 0, output: 0 } },
+        { type: "done", reason: "tool_calls" },
+      ],
+    },
     echo,
   ];
 }

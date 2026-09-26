@@ -93,9 +93,12 @@ const RUNTIME_READ_ROOTS = [
   "/lib",
   "/lib64",
   /*
-   * Bun/JSC probes procfs during startup (maps/cpu/filesystems). Landlock
-   * cannot hide selected procfs entries, so this is a deliberate read-only
-   * grant. It is still much narrower than bwrap's historical `--ro-bind / /`.
+   * Bun/JSC 启动时会探测 procfs（maps/cpu/filesystems）。这里请求的 "/proc"
+   * 是一个**标记**：provider.c 不会照字面放行整个 /proc —— 那会让同 uid 的
+   * 沙箱子进程读走 /proc/<ppid>/environ，把环境变量白名单整个击穿。它在
+   * apply()（子进程侧）被展开为 /proc/self + 少数几个静态探测文件
+   * （cpuinfo/filesystems/meminfo/stat/uptime），父进程及其它进程的条目
+   * 一律不可见。
    */
   "/proc",
 ] as const;

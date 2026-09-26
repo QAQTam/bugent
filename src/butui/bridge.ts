@@ -20,11 +20,12 @@ import { startConfiguredSkills } from "../skills/runtime.ts";
 import { createDefaultTools } from "../tools/builtin.ts";
 import type { CapabilityEscalation, ToolRegistry } from "../tools/types.ts";
 import { newSessionId } from "../util/id.ts";
+import type { AuthorizationOutcome } from "../permission/authorization.ts";
 
 export interface BugentButuiInteraction {
-  askPermission(request: PermissionRequest): Promise<boolean>;
-  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<boolean>;
-  requestCapability(escalation: CapabilityEscalation): Promise<boolean>;
+  askPermission(request: PermissionRequest): Promise<AuthorizationOutcome>;
+  confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<AuthorizationOutcome>;
+  requestCapability(escalation: CapabilityEscalation): Promise<AuthorizationOutcome>;
 }
 
 export interface CreateBugentButuiOptions {
@@ -91,8 +92,8 @@ export async function createBugentButuiRuntime(
     policy,
     mode: setup.mode,
     prompter: { ask: request => options.interaction.askPermission(request) },
-    onEscalate: async (request, needed) =>
-      (await options.interaction.confirmModeChange(request, needed)) ? needed : undefined,
+    onEscalate: (request, needed) =>
+      options.interaction.confirmModeChange(request, needed),
   });
   setup.registry.setGate(gate);
 

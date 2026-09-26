@@ -2,6 +2,123 @@
 
 从 `init` 到现在的全部改动。按「做了什么 → 为什么这么做 → 踩了什么坑」组织。
 
+## 权限授权统一（未发布）
+
+把「同一件事、两个工具、两种结果」收成一套语义，并给所有授权入口加上时限。
+完整规范：`docs/permission-authorization-spec.md`。
+
+### 问题：bash 被排除在闸门外
+
+`write_file` 写工作区外会弹窗；`bash` 重定向写同一个路径只会得到
+`Read-only file system`。根因不是漏接线 —— `src/tools/types.ts` 明确写着
+"走沙箱的工具不用声明 `requires`，内核会挡住"。**这条推理只在 `read-only` 档成立**：
+那一档本来就该硬挡。但 `workspace-write` 档的档位语义是"写工作区外 → 逐次批准"，
+bash 却连申请的机会都没有，唯一出路是切到 `no-sandbox`（默认批准一切，含整个 `/` 可写）。
+
+而那正是 `src/permission/mode.ts` 明令禁止的模式：**"越界走按次授权，不走升档"**。
+bash 这条路径上，"按次授权"被降级成了"永久全量授权"。
+
+### 做了什么
+
+- **两层边界写进规范。** 进程内工具走第一层（调用前闸门，`requires` + `writesOutside`）；
+  沙箱子进程走第二层（执行前静态判定 + 内核兜底）。两条路共用同一套按次授权语义。
+- **新增 `src/sandbox/command-scan.ts`：执行前越界判定。** 纯函数，识别重定向、
+  写命令（`sed -i` / `tee` / `cp` / `rm` …）、输出选项（`curl -o` / `dd of=` / `--output=`）、
+  解释器 + 写信号（`open(f,'w')` / `writeFile` / `shutil.` …）。**命中就弹窗，命令根本不跑。**
+- **批准后本次 argv 真放开。** `ShellRunOptions.writablePaths` → `buildSandboxArgv`
+  逐个 `--bind`。目标不存在时绑**最近的已存在祖先目录**（`--bind` 要求源存在），
+  范围写进弹窗。`read-only` 档批准写工作区时绑工作区本身。
+- **新增 `src/permission/authorization.ts`：60 秒授权窗口 + 三态。**
+  `approved` / `denied` / `timeout`，超时 = 拒绝（fail closed）。
+  三个入口（`ask` 规则、越界按次授权、能力授权）全部接上；`onRequestCapability`
+  的返回类型从 `boolean` 改成 `AuthorizationOutcome`，贯通 loop / TUI / CLI / butui。
+- **TUI 弹窗带倒计时。** 三个入口共用 `TuiApp#authorize`：标题右侧 `· 还剩 47s`，
+  走既有帧调度每秒重绘，归零自动关掉弹窗（否则用户回来按"允许"时模型早就按超时走了）。
+- **回传模型可区分。** `用户拒绝操作` / `授权已超时（授权窗口内未收到确认）`。
+  超时文案不带秒数 —— 窗口长度由实现方决定，闸门写死一个数字迟早对不上。
+
+### 踩的坑
+
+- **`--bind` 的挂载顺序。** 本次可写路径必须排在 `--tmpfs /tmp` **之后**，
+  否则工作区落在 `/tmp` 下时会被 tmpfs 盖掉，报 `bwrap: Can't chdir to …`（实测）。
+- **`/tmp` 是私有 tmpfs，但工作区可能就在 `/tmp` 里。** 一开始把 `/tmp` 直接从
+  `writeTargets` 里剔掉，于是临时 worktree（cwd 在 `/tmp` 下）的 read-only 档
+  永远不弹窗、也不绑工作区，命令直接 `chdir` 失败。正确做法是：**仍记进
+  `writeTargets`，只从 `outsidePaths` 里排除**。
+- **全局关键词兜底扫描会误报。** 先写了一版"命令文本里出现 mkdir/open/write 就问"，
+  结果 `grep -rn "mkdir" src`、`git commit -m "fix open( bug"` 都会弹窗 ——
+  关键词出现在引号里是常态。改成只对**解释器**这条分支生效，且 `open()` 必须带
+  写模式（`open(f)` / `open(f,'r')` 是读）。
+- **`-o` 的含义按命令不同。** `curl -o f` 是写文件，`ssh -o X` 是"给个选项"，
+  `grep -o` 不接受参数。所以短选项查表，长选项（`--output`）才通用。
+- **超时文案不能写死秒数。** 一开始在闸门里写 `（60 秒内未收到确认）`，
+  但窗口长度由 TUI/CLI 决定（测试会覆盖成 2 秒），写死的数字必然和真实配置对不上。
+- **顺带发现并修掉的既有 bug：`read-only` 档下工作区在 `/tmp` 里就全军覆没。**
+  `--tmpfs /tmp` 会把工作区遮掉，而 `read-only` 档此前完全不绑工作区 ——
+  于是 `--chdir` 找不到目录，**每一条 bash 命令都失败**，连 `echo hello` 都跑不起来。
+  写"验证 read-only 档批准写工作区外"的用例时才暴露出来（因为那条用例把 cwd 放在
+  `mkdtemp` 的 `/tmp` 下）。修法是无条件把工作区绑回来：可写档绑可写，只读档绑**只读**，
+  且必须排在按次授权的 `--bind` **之前**，否则按次授权覆盖不掉它。
+
+### 验证
+
+```text
+bun run typecheck                    # pass
+bun test                             # 1110 pass / 1 skip / 0 fail（原 1030）
+```
+
+新增/改写的用例：
+
+```text
+tests/authorization.test.ts        14 例：三态 / 倒计时 / 无终端不干等
+tests/command-scan.test.ts         45 例：越界 / 联网 / 反误报 / 绑定范围
+tests/bash-authorization.test.ts   17 例：执行前拦、批准后真落盘、联网批准后真连上
+tests/sandbox.test.ts              挂载顺序与 read-only 档的工作区存在性
+tests/mode.test.ts                 事前拦截与事后兜底两条路径
+tests/tui-pty.test.ts              PTY 端到端：倒计时弹窗、bash 越界弹窗
+```
+
+## 0.2.1 发布摘要
+
+修掉权限模型里三处「声明了但没接线」——语义在类型层写得很完整，消费端只接了一半。
+三处的根因都在 `06a32bb`（三档重构）或更早，`git log -S` 可逐条回溯。
+
+- **档位改成「默认批准范围」，不再冒充能力边界。** 三档都能**自由读工作区之外**；
+  档位只决定"哪些事不用问"。`ModeCapabilities` 的 `workspaceWrite` / `sandboxed` /
+  `readOutside` 换成单个 `defaultApprove: "read" | "workspace-write" | "all"`。
+  其中 `readOutside` 从 `06a32bb` 引入起**就没有任何消费者**（`git grep readOutside`
+  在引入它的那个提交里也只有 3 处，全在 mode.ts 自己内部），所以"三档自由读"
+  从来没有生效过。
+- **越界走按次授权，不再"升档"。** 原来批准一次写盘会把 `read-only` **永久**改成
+  `workspace-write` —— 实测第二次写入就不再询问，于是"每次写入都要提交用户审批"
+  这句话彻底失效。现在批准只对这一次调用生效；档位只有用户主动切换才会变。
+  TUI 的弹窗文案同步改成「批准这一次」。
+- **写工作区之外有了授权通道。** 新增 `Tool.writesOutside(input, ctx)` 做**逐次**判定
+  （静态的 `requires` 表达不了"这一次写到了哪"），闸门据此按次问用户，授权经
+  `ToolCtx.grant` 下发到工具，由 `resolveForWrite` 决定路径解析宽度。
+  在此之前 `resolveWithin` 直接抛 `PathEscapeError`，**闸门根本看不到这次调用**。
+- **`no-sandbox` 不再关掉沙箱。** 它的语义是"默认批准一切、不拦截"，不是"去掉隔离"。
+  bwrap 恒开；`no-sandbox` 用 `--bind / /` 叠加可写并放开网络，仍保留 pid 隔离、
+  session 隔离、环境变量白名单与 `no_new_privs`。**这是行为变化**：`/tmp` 变成 tmpfs，
+  跨 bash 调用的临时文件不再共享；环境变量按白名单过滤。
+- **恢复 `--allow-network`。** `06a32bb` 的重构把 `SandboxConfig.allowNetwork`、
+  `index.ts` 里的消费行、`builtin.ts` 的传参一起删了，只留下 CLI 解析 —— 开关成了死代码。
+  补齐的同时把 `ToolsSetup.sandbox.networkBlocked` 暴露出来，让"这根线接没接上"
+  可以被断言。**原来的测试直接调 `buildSandboxArgv`，绕过了接线，所以线上断了测试照样全绿。**
+- **修掉 bash 落盘路径读不回来。** `bash.ts` 一直告诉模型
+  `[use read_file on that path when you need the details]`，而 `read_file` 被
+  `resolveWithin` 锁在工作区内 —— 每次输出超长，模型都会拿到一个自己读不了的死指针，
+  然后反复重试、白白烧轮次。随"三档自由读工作区外"一并解决。
+- **审计补记档位与本次授权。** `GateDecision.escalatedTo` 写进结构体但从没被审计层记录；
+  换成 `granted` 并连同 `mode` 一起落审计 —— 只记"允许/拒绝"回答不了"这次为什么允许"，
+  同样的 `tool + resource` 在不同档位下结论可能相反。
+- 删掉 `isInsideOutputRoot`（`spill.ts`）：注释写着"read_file 的只读白名单判定"，
+  同样零消费者。
+- 测试：新增 `tests/permission-modes.test.ts`（20 例，断言到"文件真的落盘了吗"
+  "沙箱真的还在吗"这一层，而不是断言返回值形状）；`tui-pty.test.ts` 里硬编码的点击
+  坐标改成用 `rowOfIn()` 按内容定位 —— 档位 label 一变就会把 transcript 顶下去，
+  写死的行号会点到空白。
+
 ## 0.2.0 发布摘要
 
 - 输入框换成制表符框：默认 1 行内容，折行或 `Ctrl+J` 按需长高（最多 5 行）；

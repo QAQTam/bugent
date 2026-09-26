@@ -8,6 +8,7 @@
 import type { ProviderConfig } from "../provider/registry.ts";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import type { SandboxMode } from "../permission/mode.ts";
+import type { AlertConfig } from "../permission/alert.ts";
 import type { McpStdioServerConfig } from "../mcp/stdio.ts";
 import type { ReviewPolicy } from "../goal/types.ts";
 
@@ -30,6 +31,13 @@ export interface SandboxConfig {
   mode?: SandboxMode;
   /** 额外可写路径（仅沙箱档位有效）。 */
   writablePaths?: string[];
+  /**
+   * 启动时就允许联网（等价于 `--allow-network`）。
+   *
+   * 默认 false —— 联网是**按次授权**的：命令先在断网沙箱里真跑一次，失败了
+   * 再拿着真实报错问用户。这个开关只用于"我就是要全程联网"的场景。
+   */
+  allowNetwork?: boolean;
   /**
    * 额外放行给子进程的环境变量名。
    *
@@ -71,6 +79,13 @@ export interface BugentConfig {
   agent?: AgentConfig;
   permissions?: PermissionsConfig;
   sandbox?: SandboxConfig;
+  /**
+   * 授权硬件提醒：弹窗出现 / 最后 N 秒 / 结论各响一次。
+   *
+   * 默认**关闭** —— 它会真的让机器发声，不能替用户默认打开。
+   * 通道与节奏见 src/permission/alert.ts。
+   */
+  alert?: AlertConfig;
   mcp?: McpConfig;
   skills?: SkillsConfig;
   goals?: GoalsConfig;

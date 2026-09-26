@@ -82,6 +82,23 @@ describe("StreamingMarkdownCache", () => {
     }
   });
 
+  test("表格从表头逐字符增长时仍与全量输出一致", () => {
+    const cache = new StreamingMarkdownCache(
+      (text, width) => renderMarkdown(text, width),
+      { boundaryTracker: new LezerMarkdownBoundaryTracker() },
+    );
+    const width = 48;
+    const prefix = "## 表格\n\n| a | b |";
+    const rest = "\n|---|---|\n| 1 | 2 |";
+    let text = prefix;
+
+    expect(cache.render(text, width)).toEqual(renderMarkdown(text, width));
+    for (const char of rest) {
+      text += char;
+      expect(cache.render(text, width)).toEqual(renderMarkdown(text, width));
+    }
+  });
+
   test("与全量 renderMarkdown 输出保持一致", () => {
     const cache = new StreamingMarkdownCache((text, width) => renderMarkdown(text, width));
     const width = 48;

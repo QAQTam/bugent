@@ -30,6 +30,24 @@ export function registeredToolRenderers(): string[] {
   return [...registry.keys()];
 }
 
+/**
+ * TUI 显示名。
+ *
+ * 工具名（`write_file` / `apply_patch`）是**给模型看的协议标识**，不是给人看的
+ * 文案：卡片头部是用户扫一眼就知道"它干了什么"的地方，不该出现下划线和内部
+ * 命名。映射集中在这里（本文件已经是"唯一认识工具名的地方"），未知工具**回退
+ * 注册名** —— 宁可显示得难看，也不要静默丢掉"这是哪个工具"这条信息。
+ */
+const displayNames = new Map<string, string>();
+
+export function registerToolDisplayName(name: string, label: string): void {
+  displayNames.set(name, label);
+}
+
+export function toolDisplayName(name: string): string {
+  return displayNames.get(name) ?? name;
+}
+
 function safeJson(value: unknown): string {
   try {
     return JSON.stringify(value ?? {});
@@ -41,13 +59,19 @@ function safeJson(value: unknown): string {
 /** 默认外观：`⏺ 工具名 {参数}` + 输出。 */
 export function renderGenericTool(item: ToolItem, width: number): string[] {
   const argsText = safeJson(item.args);
-  const budget = Math.max(0, width - visibleWidth(item.name) - 4);
-  const head = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}${item.name}${RESET} ${DIM}${truncateAnsi(
+  const label = toolDisplayName(item.name);
+  const budget = Math.max(0, width - visibleWidth(label) - 4);
+  const head = `${fg(COLOR.tool)}⏺${RESET} ${BOLD}${label}${RESET} ${DIM}${truncateAnsi(
     argsText,
     budget,
   )}${RESET}`;
 
   const lines = [head];
+  if (item.evicted === true) {
+    // PERF-002：正文已移出内存。这不是错误态，引导用户点击回放。
+    lines.push(`${DIM}  （更早内容已从内存释放 —— 点击此卡片重新加载回放）${RESET}`);
+    return lines;
+  }
   if (item.done) {
     const color = item.ok ? COLOR.toolOk : COLOR.error;
     for (const line of renderPlain(item.output, Math.max(1, width - 2))) {
@@ -59,6 +83,8 @@ export function renderGenericTool(item: ToolItem, width: number): string[] {
 
 /** 查表渲染，没有注册就回退到通用外观。 */
 export function renderToolItem(item: ToolItem, width: number): string[] {
+  // 已释放的卡片不走自定义渲染器 —— 它们会去解析已经清空的 output。
+  if (item.evicted === true) return renderGenericTool(item, width);
   const custom = registry.get(item.name);
   const lines = custom !== undefined ? custom(item, width) : renderGenericTool(item, width);
 

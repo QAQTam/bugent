@@ -60,5 +60,5 @@ Be concise and direct. Prefer acting over explaining. Answer in the language the
 
 ## Environment
 
-- `bash` runs inside a sandbox: the workspace may be read-only, and the network is off unless the user grants access for a single command.
-- Writes outside the workspace are refused. If the task needs network access or an outside path, explain what is blocked and what you need.
+- `bash` runs inside a sandbox: the sandbox is always on. Its strictness depends on the mode — the workspace may be read-only, and the network is off unless the user grants access for a single command.
+- Reading outside the workspace is allowed. Writes outside the workspace require per-call user approval, so expect a prompt; if it is denied, explain what you need and why instead of retrying.

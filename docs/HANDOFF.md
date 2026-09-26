@@ -2,8 +2,188 @@
 
 > 更新时间：2026-09-26
 > 分支：`master`
-> 功能检查点：`41ec617 perf(tui): 解耦流式到达与 120fps 显示`
+> 功能检查点：`aed6cf9 fix(tui): TAB 统一展开成空格，修掉 read_file 卡片右侧滚动条缺口`
 > 状态：TUI 流式平滑、Lezer Markdown AST、表格行级增量已完成并单独提交；工作区仍有其他同事的 Goal/tools/prompt/agent 改动，禁止一起提交
+> 本轮补充：**权限授权统一**（bash 执行前判定 + 60s 授权窗口 + 弹窗倒计时）已落地、全量回归通过、未提交；上一轮 Goal 预算优化同样未提交
+
+## 权限授权统一（2026-09-26）
+
+规范：`docs/permission-authorization-spec.md`。起因是"同一件事、两个工具、两种结果"：
+`write_file` 写工作区外会弹窗，`bash` 重定向写同一个路径只会得到 `Read-only file system`
+—— 用户连申请授权的机会都没有，唯一出路是切 `no-sandbox`（默认批准一切），
+而那正是 `mode.ts` 明令禁止的"升档"。
+
+### 本轮已落地
+
+- **两层边界**：进程内工具走调用前闸门；沙箱子进程走"执行前静态判定 + 内核兜底"。
+  两条路共用同一套按次授权（`CapabilityGrant`）与同一个 60 秒窗口。
+- **`src/sandbox/command-scan.ts`（新增）**：纯函数扫描重定向 / 写命令 / 输出选项 /
+  解释器 + 写信号，产出 `outsidePaths`、`network`、`writeIntent`；
+  `planWriteApproval()` 把扫描翻成"要不要问、批准后放开什么"；
+  `writableAncestors()` 算 `--bind` 的源目录（目标不存在时上提）。
+- **bash 执行前拦**：命中越界就不跑，弹窗；拒绝/超时回传
+  `用户拒绝操作` / `授权已超时（授权窗口内未收到确认）`。
+  静态识别得出的联网命令（`curl` / `git push` / `npm install`）同样事前问；
+  识别不出的（解释器里的 socket）保留"跑失败 → 带真实报错 → 按次授权"兜底。
+- **批准后真放开**：`ShellRunOptions.writablePaths` → `buildSandboxArgv` 逐个 `--bind`。
+  `read-only` 档批准写工作区时绑工作区本身（能盖掉那条只读判定）。
+- **`src/permission/authorization.ts`（新增）**：60 秒窗口 + 三态
+  `approved` / `denied` / `timeout`，**超时 = 拒绝**（fail closed）。
+- **三态贯通**：`onRequestCapability` / `SessionInteraction` / `TuiInteraction` /
+  `BugentButuiInteraction` 的返回类型从 `boolean` 改成 `AuthorizationOutcome`。
+- **TUI 弹窗倒计时**：三个入口共用 `TuiApp#authorize`，标题右侧 `· 还剩 47s`，
+  走既有帧调度每秒重绘，归零自动关掉弹窗。
+- **CLI 同样有时限**：`node:readline` 没有内建超时，由窗口到点关掉它。
+
+### 涉及模块
+
+```text
+src/permission/authorization.ts   60s 窗口 + 三态（新增）
+src/permission/gate.ts            check() 三态；GateVerdict/GateDecision 增 refusal
+src/permission/prompt.ts          StdinPrompter 套窗口；ScriptedPrompter 接受 boolean 或三态
+src/sandbox/command-scan.ts       执行前判定 + 批准范围规划（新增）
+src/sandbox/bwrap.ts              options.writablePaths -> --bind
+src/tools/bash.ts                 执行前判定 -> 弹窗 -> 按次放开
+src/tools/types.ts                onRequestCapability 返回三态
+src/tools/builtin.ts              workspaceWritable 传给 bash
+src/core/loop.ts src/core/runtime.ts src/butui/bridge.ts src/index.ts
+src/tui/app.ts                    #authorize + 标题倒计时
+docs/permission-authorization-spec.md  README.md  CHANGELOG.md
+tests/authorization.test.ts  tests/command-scan.test.ts  tests/bash-authorization.test.ts
+tests/mode.test.ts  tests/tui-pty.test.ts  tests/permission-modes.test.ts
+tests/permission-wiring.test.ts  tests/runtime.test.ts
+```
+
+### 验证状态
+
+```text
+bun run typecheck
+# pass
+
+bun test
+# 1110 pass / 1 skip / 0 fail（本轮之前是 1030 pass / 1 skip / 0 fail）
+```
+
+行为矩阵（实测，`bash`）：
+
+| 档位 | 操作 | 弹窗 | 批准后 | 拒绝后 |
+| --- | --- | --- | --- | --- |
+| `read-only` | 写工作区内 / 写工作区外 / 联网 | 是 | 真的成功 | 拦下·没跑 |
+| `workspace-write` | 写工作区内 | 否 | 成功 | — |
+| `workspace-write` | 写工作区外 / 联网 | 是 | 真的成功 | 拦下·没跑 |
+| `no-sandbox` | 全部 | 否 | 成功 | — |
+
+"批准后真的成功"是**跑通验证**过的，不是断言返回值形状：写工作区外真的落盘；
+联网批准后用 `Bun.serve` 起本地服务、`curl` 真的连上（拒绝则连不上）。
+
+PTY 端到端两条（真终端、真 CLI）：
+- 倒计时弹窗：`write_file` 写工作区外 → 弹窗显示 `还剩 2s` → 到点自动关闭 →
+  模型收到 `授权已超时（授权窗口内未收到确认）`，且文件没落盘。
+- bash 越界：`bash("echo hi > <工作区外>")` → 弹窗标题 `需要授权 · 写入工作区之外`、
+  正文带命令与目标 → 按 `n` → 模型收到 `用户拒绝操作`，命令没执行。
+
+### 本轮踩的坑（改这块别再踩）
+
+- `--bind` 的**挂载顺序**：本次可写路径必须排在 `--tmpfs /tmp` 之后，
+  否则工作区落在 `/tmp` 下会被 tmpfs 盖掉（`bwrap: Can't chdir to …`）。
+- `/tmp` 是私有 tmpfs **不代表可以把它从 `writeTargets` 里剔掉**：
+  工作区本身可能就在 `/tmp`（临时 worktree、测试目录）。只能从 `outsidePaths` 里排除。
+- **不要做全局关键词兜底扫描**：`grep -rn "mkdir" src` / `git commit -m "fix open( bug"`
+  都会被误判。写信号只对解释器分支生效，且 `open()` 必须带写模式。
+- 短选项 `-o` 含义按命令不同（`curl -o f` vs `ssh -o X`），只有 `--output` 这类
+  长选项能对所有命令通用。
+- **超时文案不能写死秒数**：窗口长度由实现方（TUI/CLI）决定，闸门不知道具体值。
+- **`read-only` 档必须无条件绑工作区（只读）**：`--tmpfs /tmp` 会把它遮掉，
+  不绑回来则工作区在 `/tmp` 下时每条命令都 `Can't chdir`（既有 bug，本轮修掉）。
+  这条基础策略必须排在按次授权的 `--bind` **之前**，否则按次授权覆盖不掉它。
+
+### 剩余挂账（授权方向）
+
+| 优先级 | 设计 | 主要模块 | 当前状态 | 关键约束 |
+| --- | --- | --- | --- | --- |
+| P0 | 沙箱内写盘的可观测性 | `src/sandbox/command-scan.ts`、`src/core/workspace.ts` | bash 写工作区**仍然不产生 `WorkspaceFileChange`**，`/undo` 看不到 | 见 `docs/workspace-ledger-sandbox.md`（overlay 账本路线，引擎已在 `项目/wsbox`） |
+| P1 | 扫描器的命令表补全 | `src/sandbox/command-scan.ts` | 目前覆盖常见命令；`tar -x`、`git checkout` 等仍靠内核兜底 | 宁可漏判（内核兜底）也不要把只读命令变成弹窗 |
+| P1 | 授权记录进审计 | `src/store/audit.ts`、`src/permission/gate.ts` | `GateDecision.refusal` 已带结论，但 bash 走的是 `onRequestCapability`，未进审计流水 | 要能回答"这次为什么被拒/超时" |
+| P2 | 扫描器的命令表补全（写路径） | `src/sandbox/command-scan.ts` | `git checkout`、`tar -x`、`make install` 等仍靠内核兜底 | 宁可漏判（内核兜底）也不要把只读命令变成弹窗 |
+
+## Goal 预算优化挂账（2026-09-26）
+
+### 本轮已落地
+
+- 预算口径改为 `input - cached + output`；cached token 只审计，不占 Goal 预算。
+- `max_goal_token_budget` 现在同时是“上限”和“未显式指定时的默认预算”。
+- reviewer / final auditor 的独立 provider usage 计入 Goal。
+- 达到预算时：
+  - Goal 进入 `budget_limited`
+  - 停止自动 continuation
+  - 对同一 Goal 只注入一次 `Goal Budget Limit` 收尾上下文
+  - 收尾上下文走 `session.enqueueInjection(..., "goal")`，不直接改写 active turn
+- `/goal status` 现在显示 remaining budget 与 active time。
+
+本轮涉及模块：
+
+```text
+src/goal/controller.ts       Goal 状态机、预算判定、收尾注入、review usage 记账
+src/goal/review.ts           reviewer 返回 usage / duration
+src/goal/types.ts            ReviewResult 增加 usage / durationMs
+src/store/goal-repository.ts Goal token/time 账本与预算口径
+src/tui/app.ts               /goal status 输出入口（dialogLines）
+tests/goal-controller.test.ts
+tests/goal-repository.test.ts
+tests/goal-review.test.ts
+README.md
+docs/goal-mode-spec.md
+```
+
+验证状态：
+
+```text
+bun run typecheck
+# pass
+
+bun test
+# 1031 pass / 0 fail
+```
+
+同日关联变更（也已落地、未提交）：
+
+- chatview 的 live `Thinking` 完成后原地变成默认折叠的 `Thought`；只有点击 Thought 头部才展开。
+- 相关模块：
+  ```text
+  src/tui/transcript.ts
+  src/tui/render-reasoning.ts
+  src/tui/hit-target.ts
+  src/tui/app.ts
+  src/provider/registry.ts
+  tests/transcript.test.ts
+  tests/reasoning-render.test.ts
+  tests/hit.test.ts
+  tests/tui-pty.test.ts
+  ```
+- 设计稿：`docs/reasoning-display-design.md`
+
+### 剩余设计挂账
+
+| 优先级 | 设计 | 主要模块 | 当前状态 / 入口 | 关键约束 |
+| --- | --- | --- | --- | --- |
+| P0 | 用户可控预算更新 | `src/tui/app.ts`、`src/goal/controller.ts`、`src/store/goal-repository.ts` | 尚无 `/goal budget <n>`；`budget_limited` 目前无法通过正常 UI 提升预算后恢复 | 只有用户/系统能改预算；模型只能申请创建时的 budget |
+| P0 | 预算预留与硬上限语义 | `src/core/loop.ts`、`src/goal/controller.ts`、`src/store/goal-repository.ts` | 当前仍是 turn 结束后记账，允许当前 turn 超预算 | 若做预留，要定义 reserve/commit/release；不能破坏现有 append-only 与错误恢复 |
+| P0 | 所有子代理 usage 汇总 | `src/agent/supervisor.ts`、`src/agent/read-only-executor.ts`、`src/agent/integrator.ts`、`src/goal/controller.ts` | reviewer/final auditor 已计入；worker/explorer/其他子代理尚未统一计入 root Goal | 不能重复计费；要区分 root Goal、review、worker 的 usage 归属 |
+| P1 | 系统生成的最终 Goal 账单 | `src/goal/controller.ts`、`src/store/goal-repository.ts`、`src/goal/handoff.ts`、`src/tui/app.ts` | `listTurnAccounting()` 已有逐 turn 数据，但没有 UI/CLI 最终报告 | 最终账单应以系统账本为准，模型只负责总结，不负责提供数字 |
+| P1 | 持久化 budget-limit 已报告标记 | `src/goal/controller.ts`、`src/store/goal-repository.ts` | 当前 `#budgetLimitReportedGoalId` 只存在内存，进程重启可能重复注入 | 若持久化，需避免与 resume/edit budget 冲突 |
+| P1 | 预算阈值预警 | `src/goal/controller.ts`、`src/tui/app.ts` | 目前只有达到预算后的提示，没有 80% / 90% 预警 | 预警应是 UI/context 提示，不应改变 Goal 状态 |
+| P1 | 结构化 completion budget report | `src/tools/goal.ts`、`src/goal/controller.ts` | 目前没有 Codex 风格的 completion report 字段 | 数字必须来自系统账本；不能只靠模型转述 |
+| P2 | mid-turn 增量记账 | `src/core/loop.ts`、`src/core/session.ts`、`src/goal/controller.ts` | 当前只在 `completeTurn()` / review 完成时记账 | 若做 mid-turn，优先走安全边界；不要直接改写运行中上下文 |
+| P2 | Time budget 执行 | `src/goal/types.ts`、`src/goal/controller.ts`、`src/config/schema.ts` | 当前只有 `timeUsedSeconds` 统计，没有 time limit | 需要区分 wall-clock、tool 执行时间和 idle |
+| P2 | 完整 Goal 审计输出 | `src/goal/controller.ts`、`src/goal/handoff.ts` | Handoff 已有 Budget 表，但 final audit 完成通知没有系统账单 | 最终报告应覆盖 token、cached、active time、review 成本和停止原因 |
+
+### 设计护栏
+
+- 保留 bugent 的 `Goal -> Checkpoint -> Plan -> Todo -> Evidence -> Review -> Handoff -> Epoch`，不要压扁成 Codex 的薄 Goal。
+- 保留独立 reviewer 和 final audit；不能退回“主模型自审即完成”。
+- 不直接照搬 Codex 的 active-turn steering。bugent 优先走安全边界注入，保护 append-only msgid 和前缀缓存稳定性。
+- 预算数字必须来自 provider usage / 系统账本；模型只能解释，不能生成权威预算。
+- 允许超预算时，必须明确是“当前 turn 收尾超支”而不是“预算失效”。
 
 ## 当前检查点
 

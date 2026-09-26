@@ -10,13 +10,14 @@
  * 大小写风格被卡住。
  */
 
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import { isSandboxMode } from "../permission/mode.ts";
 import type { EndpointKind, ProviderConfig } from "../provider/registry.ts";
 import type { McpStdioServerConfig } from "../mcp/stdio.ts";
+import type { AlertChannel, AlertConfig } from "../permission/alert.ts";
 import type { BugentConfig, GoalsConfig, McpConfig, SandboxConfig, SkillsConfig } from "./schema.ts";
 
 export const CONFIG_DIR_NAME = ".bugent";
@@ -88,6 +89,15 @@ function asPositiveInteger(value: unknown, field: string): number | undefined {
   return value;
 }
 
+/** 0..1 的浮点，用于音量这类"比例"字段。 */
+function asUnitFloat(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`config.toml: ${field} 必须是 0..1 之间的数字`);
+  }
+  return value;
+}
+
 function asProxy(value: unknown, field: string): ProviderConfig["proxy"] {
   if (value === undefined) return undefined;
   if (typeof value === "string" || value === false) return value;
@@ -124,6 +134,18 @@ function asTls(raw: unknown, field: string): ProviderConfig["tls"] {
 
 const DECISIONS: readonly PermissionDecision[] = ["allow", "ask", "deny"];
 const REASONING_REPLAYS = ["none", "reasoning", "reasoning_content", "both"] as const;
+
+/**
+ * extra_body 必须是表（PERF 之外的 BUG-026）：TOML 里写成字符串/数组时，
+ * 旧实现原样 cast 后被 `...extraBody` 展开进请求体，索引键会变成
+ * `{"0":"h","1":"i"}` 这样的垃圾字段发给 API。
+ */
+function parseExtraBody(value: unknown, at: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`config.toml: ${at}.extra_body 必须是 [extra_body] 表（键值对）`);
+  }
+  return value as Record<string, unknown>;
+}
 
 function parseProvider(raw: unknown, index: number): ProviderConfig {
   if (raw === null || typeof raw !== "object") {
@@ -164,7 +186,7 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
     ...(baseUrl !== undefined ? { baseUrl } : {}),
     ...(apiKey !== undefined ? { apiKey } : {}),
     ...(table.extra_body !== undefined || table.extraBody !== undefined
-      ? { extraBody: pick(table, "extra_body", "extraBody") as Record<string, unknown> }
+      ? { extraBody: parseExtraBody(pick(table, "extra_body", "extraBody"), at) }
       : {}),
     ...(proxy !== undefined ? { proxy } : {}),
     ...(tls !== undefined ? { tls } : {}),
@@ -405,6 +427,57 @@ function parseGoals(raw: unknown): GoalsConfig | undefined {
   };
 }
 
+const ALERT_CHANNELS: readonly AlertChannel[] = ["speaker", "sound", "bell"];
+
+function isAlertChannel(value: string): value is AlertChannel {
+  return (ALERT_CHANNELS as readonly string[]).includes(value);
+}
+
+/**
+ * `[alert]` —— 授权硬件提醒。
+ *
+ * 注意 enabled 默认 false：这个开关会真的让机器发声，不能替用户默认打开。
+ */
+function parseAlert(raw: unknown): AlertConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config.toml: alert 必须是表");
+  }
+  const table = raw as Raw;
+  const enabled = asBool(table.enabled, "alert.enabled");
+  const rawChannels = asStringArray(table.channels, "alert.channels");
+  const channels = rawChannels?.map((channel) => {
+    if (!isAlertChannel(channel)) {
+      throw new Error(
+        `config.toml: alert.channels 只支持 speaker / sound / bell，收到 ${JSON.stringify(channel)}`,
+      );
+    }
+    return channel;
+  });
+  const urgencyWindowMs = asPositiveInteger(
+    pick(table, "urgency_window_ms", "urgencyWindowMs"),
+    "alert.urgency_window_ms",
+  );
+  const volume = asUnitFloat(table.volume, "alert.volume");
+  const speakerDevice = asString(
+    pick(table, "speaker_device", "speakerDevice"),
+    "alert.speaker_device",
+  );
+  const soundPlayer = asStringArray(
+    pick(table, "sound_player", "soundPlayer"),
+    "alert.sound_player",
+  );
+
+  return {
+    ...(enabled !== undefined ? { enabled } : {}),
+    ...(channels !== undefined ? { channels } : {}),
+    ...(urgencyWindowMs !== undefined ? { urgencyWindowMs } : {}),
+    ...(volume !== undefined ? { volume } : {}),
+    ...(speakerDevice !== undefined ? { speakerDevice } : {}),
+    ...(soundPlayer !== undefined ? { soundPlayer } : {}),
+  };
+}
+
 /** TOML 文本 -> BugentConfig。 */
 export function parseConfigToml(text: string): BugentConfig {
   const root = Bun.TOML.parse(text) as Raw;
@@ -425,6 +498,7 @@ export function parseConfigToml(text: string): BugentConfig {
   const mcp = parseMcp(pick(root, "mcp"));
   const skills = parseSkills(pick(root, "skills"));
   const goals = parseGoals(pick(root, "goals"));
+  const alert = parseAlert(pick(root, "alert"));
 
   const rawRules = pick(permissionsTable, "rules") ?? [];
   if (!Array.isArray(rawRules)) {
@@ -458,11 +532,20 @@ export function parseConfigToml(text: string): BugentConfig {
   const passEnv = asStringArray(pick(sandboxTable, "pass_env", "passEnv"), "sandbox.pass_env");
   if (passEnv !== undefined) sandbox.passEnv = passEnv;
 
+  const allowNetwork = asBool(
+    pick(sandboxTable, "allow_network", "allowNetwork"),
+    "sandbox.allow_network",
+  );
+  if (allowNetwork !== undefined) sandbox.allowNetwork = allowNetwork;
+
   const systemPromptFile = asString(
     pick(agentTable, "system_prompt_file", "systemPromptFile"),
     "agent.system_prompt_file",
   );
   const maxSteps = pick(agentTable, "max_steps", "maxSteps");
+  if (maxSteps !== undefined && (typeof maxSteps !== "number" || !Number.isFinite(maxSteps) || !Number.isInteger(maxSteps) || maxSteps <= 0)) {
+    throw new Error("config.toml: agent.max_steps 必须是正整数");
+  }
 
   return {
     defaultModel,
@@ -479,6 +562,7 @@ export function parseConfigToml(text: string): BugentConfig {
     ...(mcp !== undefined ? { mcp } : {}),
     ...(skills !== undefined ? { skills } : {}),
     ...(goals !== undefined ? { goals } : {}),
+    ...(alert !== undefined ? { alert } : {}),
   };
 }
 
@@ -510,10 +594,11 @@ resource = "rm -rf /*"
 decision = "deny"
 
 [sandbox]
-# 档位：read-only | workspace-write | no-sandbox
-#   read-only        根只读 + 工作区只读 + 断网（bash 自动放行，内核保证改不动）
-#   workspace-write  根只读 + 工作区可写 + 断网
-#   no-sandbox       不隔离，可读写任意位置
+# 档位 = 默认批准范围，不是隔离开关；沙箱恒开，档位只决定"要不要问"。
+#   read-only        读免问；写工作区 / 写工作区外 / 联网 → 逐次批准
+#   workspace-write  读 + 写工作区免问；写工作区外 / 联网 → 逐次批准
+#   no-sandbox       全部免问（沙箱仍在，只是不拦截）
+# 读工作区之外在三档都是自由的；批准一次只生效一次，不会改档位。
 mode = "workspace-write"
 
 # 额外可写路径（工作目录总是可写）
@@ -522,6 +607,26 @@ writable_paths = []
 # 环境变量是**白名单制**：只保留 PATH/HOME/TERM/LANG 等少数几个，
 # 其余（含各种 API key）一律不传给子进程。需要什么在这里显式加。
 pass_env = []
+
+# 启动时就允许联网（等价于 --allow-network）。默认 false ——
+# 联网是按次授权的：命令先在断网沙箱里真跑一次，失败了再拿真实报错问你。
+allow_network = false
+
+# ---- 授权硬件提醒 ----
+# 授权弹窗 60 秒没人应答就按超时**拒绝**。终端 BEL 只在终端里响，TUI 重绘时
+# 还常被吞掉；这个开关让提醒走硬件：
+#   speaker  主板蜂鸣器（绕过音量/耳机/静音，需要 /dev/input/eventN 写权限）
+#   sound    声卡合成音（无特权要求，但会被静音影响）
+#   bell     终端 BEL（兜底）
+# 时序：弹窗出现响一次 → 最后 urgency_window_ms 内按 10/5/3/1 四档升级 →
+# 批准/拒绝各一个收尾音。
+[alert]
+enabled = false
+channels = ["speaker", "sound"]
+urgency_window_ms = 10000
+volume = 0.55
+# speaker_device = "/dev/input/event17"
+# sound_player = ["paplay", "--raw", "--format=s16le", "--rate=48000", "--channels=1"]
 
 # ---- Goal Mode ----
 # P5 阶段仍默认关闭自动 continuation；显式 /goal 始终可用。
@@ -598,5 +703,8 @@ export async function ensureConfigFile(path = configFilePath()): Promise<boolean
   await mkdir(dirname(path), { recursive: true });
   if (await Bun.file(path).exists()) return false;
   await Bun.write(path, DEFAULT_CONFIG_TOML);
+  // 模板里有 api_key 字段位，用户几乎必然把密钥写进来 —— 0644 会被同机
+  // 其它用户读到。只在新建时收紧：已存在的文件是用户自己的权限决定。
+  await chmod(path, 0o600);
   return true;
 }

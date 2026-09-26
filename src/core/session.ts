@@ -10,7 +10,15 @@
  */
 
 import type { ChatMessage, ModelClient, ToolCall } from "../provider/types.ts";
-import { buildContext, lastMsgId, prefixHash } from "./context.ts";
+import {
+  buildContext,
+  chainStep,
+  isMsgidAscending,
+  lastMsgId,
+  prefixChainOriginHash,
+  prefixHash,
+  type BuildContextOptions,
+} from "./context.ts";
 import {
   makeMessage,
   SYSTEM_MSGID,
@@ -97,6 +105,16 @@ export class AgentSession {
   #onMessage: ((message: StoredMessage) => void) | undefined;
   #lastSentPrefixHash: string | undefined;
   #extensionRole: "developer" | "system";
+  /** msgid 最大值的缓存：追加是单调的，O(1) 维护（PERF-006 的 lastMsgId 扫描）。 */
+  #lastMsgIdCache: MsgId = -1;
+  /**
+   * 增量前缀链（PERF-001）：#chainSteps[i] 是 context 顺序前 i+1 条消息的链值。
+   * 追加式会话里扩展是 O(1)/条；任意 upto 的查询都是 O(1) 查表。
+   * restore 打乱顺序或 extensionRole 变化时清空重建（惰性）。
+   */
+  #chainSteps: string[] = [];
+  #chainBase = prefixChainOriginHash();
+  #chainUsable = true;
 
   /** 当前打开的 tool batch；有值时禁止 user / injection / 新 assistant。 */
   #openToolBatch: OpenToolBatch | undefined;
@@ -118,6 +136,12 @@ export class AgentSession {
       // 恢复路径：历史里已经包含 msgid 0 的 system prompt，不再新建
       this.#messages = [...init.restore];
       this.#nextMsgId = init.nextMsgId ?? lastMsgId(this.#messages) + 1;
+      this.#lastMsgIdCache = lastMsgId(this.#messages);
+      // 插入顺序 == 上下文顺序（system 优先 + msgid 升序）时前缀链才可用；
+      // 打乱过顺序的历史直接降级回整段重算。
+      this.#chainUsable = isMsgidAscending(this.#messages);
+      this.#chainSteps = [];
+      this.#chainBase = prefixChainOriginHash();
       this.#repairOrphanedToolCalls();
       this.#assertToolCallSequences();
     } else {
@@ -165,7 +189,8 @@ export class AgentSession {
   }
 
   get lastMsgId(): MsgId {
-    return lastMsgId(this.#messages);
+    // 追加单调递增，缓存 O(1)；restore 时已在构造里算好
+    return this.#lastMsgIdCache;
   }
 
   get extensionRole(): "developer" | "system" {
@@ -174,7 +199,11 @@ export class AgentSession {
 
   /** 渲染期切换 MCP/skills manifest 的协议角色；不修改历史消息。 */
   setExtensionRole(role: "developer" | "system"): void {
+    if (this.#extensionRole === role) return;
     this.#extensionRole = role;
+    // role 参与每条消息的协议形态 —— 链必须整体重建
+    this.#chainSteps = [];
+    this.#chainBase = prefixChainOriginHash();
   }
 
   /* --------------------------- 追加消息 --------------------------- */
@@ -402,7 +431,31 @@ export class AgentSession {
   }
 
   prefixHash(uptoMsgId?: MsgId): string {
-    return prefixHash(this.#messages, uptoMsgId, { extensionRole: this.#extensionRole });
+    const options: BuildContextOptions = { extensionRole: this.#extensionRole };
+    if (this.#chainUsable) {
+      // 增量链路径（PERF-001）：追加式会话（插入顺序 == 上下文顺序）下，
+      // 扩展只对新增消息 O(1)，任意 upto 的查询是 O(1) 查表。问到不存在的
+      // msgid 时按"该前缀为空"处理（旧实现对空前缀会抛错，这里没有调用方）。
+      this.#extendChain(options);
+      const position = this.#chainPosition(uptoMsgId);
+      return position === 0 ? this.#chainBase : this.#chainSteps[position - 1]!;
+    }
+    return prefixHash(this.#messages, uptoMsgId, options);
+  }
+
+  /** upto 在 context 顺序里的位置（前多少条）。msgid 升序，二分即可。 */
+  #chainPosition(uptoMsgId: MsgId | undefined): number {
+    if (uptoMsgId === undefined || uptoMsgId >= this.#lastMsgIdCache) {
+      return this.#messages.length;
+    }
+    let low = 0;
+    let high = this.#messages.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (this.#messages[mid]!.msgid <= uptoMsgId) low = mid + 1;
+      else high = mid;
+    }
+    return low;
   }
 
   /** loop 在真正发请求前调用，记录"这一轮发出去的前缀"。 */
@@ -534,7 +587,7 @@ export class AgentSession {
   }): StoredMessage {
     const msgid = this.#nextMsgId;
     this.#nextMsgId += 1;
-    const parent = lastMsgId(this.#messages);
+    const parent = this.#lastMsgIdCache;
 
     const msg = makeMessage({
       msgid,
@@ -551,7 +604,21 @@ export class AgentSession {
     });
 
     this.#messages.push(msg);
+    this.#lastMsgIdCache = msg.msgid;
     this.#onMessage?.(msg);
     return msg;
+  }
+
+  /** 惰性扩展前缀链到当前全部消息（每条 O(1)，只在追加后补差量）。 */
+  #extendChain(options: BuildContextOptions): void {
+    let prev =
+      this.#chainSteps.length > 0
+        ? this.#chainSteps[this.#chainSteps.length - 1]!
+        : this.#chainBase;
+    while (this.#chainSteps.length < this.#messages.length) {
+      const message = this.#messages[this.#chainSteps.length]!;
+      prev = chainStep(prev, message, options);
+      this.#chainSteps.push(prev);
+    }
   }
 }

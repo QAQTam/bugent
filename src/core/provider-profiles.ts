@@ -74,19 +74,80 @@ function exportTls(tls: PersistedProviderConfig["tls"]): ProviderTlsProfile | un
   return Object.keys(safe).length > 0 ? safe : undefined;
 }
 
+/**
+ * 导出侧的密钥脱敏（BUG-013）。
+ *
+ * "永不导出 apiKey" 的不变量过去只挡了 `apiKey` 字段本身 —— 用户完全可能把
+ * 密钥放进 `headers.Authorization`、`proxy` 的 userinfo 或 `extra_body` 里
+ * （网关鉴权就是这么接的）。导出文档是设计来分享/外发的，这三个通道必须
+ * 一并处理：
+ *   - headers：鉴权类键（authorization / cookie / *api*key* / token / secret）
+ *     的值替换为 "__REDACTED__"，其余键原样保留；
+ *   - proxy：剥掉 userinfo（http://user:pass@host → http://host）；
+ *   - extraBody：深度遍历，字符串值命中密钥形态（sk-… / Bearer … / 长十六进制
+ *     / base64 形态的赋值）时整体替换为 "__REDACTED__"。
+ */
+
+const REDACTED = "__REDACTED__";
+
+const SENSITIVE_HEADER_RE = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|.*api[-_]?key.*|.*token.*|.*secret.*)$/i;
+
+const SECRET_LIKE_RE =
+  /(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,}|[A-Fa-f0-9]{32,}|[A-Za-z0-9+/]{40,}={0,2})/;
+
+/** extraBody 里"这个字段名就是密钥位"的形态：值是字符串就直接脱敏。 */
+const SENSITIVE_FIELD_RE = /(api[-_]?key|token|secret|password|passwd|authorization)/i;
+
+function redactHeaderValue(key: string, value: string): string {
+  return SENSITIVE_HEADER_RE.test(key.trim()) ? REDACTED : value;
+}
+
+function redactProxy(proxy: string): string {
+  // 只剥 userinfo，保留 scheme/host/port
+  return proxy.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]+@/i, "$1");
+}
+
+function redactDeep(value: unknown): unknown {
+  if (typeof value === "string") {
+    return SECRET_LIKE_RE.test(value) ? REDACTED : value;
+  }
+  if (Array.isArray(value)) return value.map(redactDeep);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof item === "string" && SENSITIVE_FIELD_RE.test(key)) {
+        out[key] = REDACTED;
+        continue;
+      }
+      out[key] = redactDeep(item);
+    }
+    return out;
+  }
+  return value;
+}
+
 function exportProvider(config: PersistedProviderConfig): ProviderProfileExport {
   const tls = exportTls(config.tls);
+  const headers = config.headers
+    ? Object.fromEntries(
+        Object.entries(config.headers).map(([key, value]) => [key, redactHeaderValue(key, value)]),
+      )
+    : undefined;
+  const proxy =
+    typeof config.proxy === "string" ? redactProxy(config.proxy) : config.proxy;
   return {
     id: config.id,
     endpoint: config.endpoint,
     ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
-    ...(config.headers !== undefined ? { headers: config.headers } : {}),
-    ...(config.extraBody !== undefined ? { extraBody: config.extraBody } : {}),
+    ...(headers !== undefined && Object.keys(headers).length > 0 ? { headers } : {}),
+    ...(config.extraBody !== undefined
+      ? { extraBody: redactDeep(config.extraBody) as Record<string, unknown> }
+      : {}),
     ...(config.reasoningReplay !== undefined
       ? { reasoningReplay: config.reasoningReplay }
       : {}),
     ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
-    ...(config.proxy !== undefined ? { proxy: config.proxy } : {}),
+    ...(proxy !== undefined ? { proxy } : {}),
     ...(tls !== undefined ? { tls } : {}),
   };
 }
