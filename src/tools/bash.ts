@@ -14,6 +14,7 @@
 import type { JSONSchema } from "../provider/types.ts";
 import { homedir } from "node:os";
 import { win32 } from "node:path";
+import { statSync } from "node:fs";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
@@ -39,6 +40,7 @@ export const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
  */
 export const MAX_MODEL_OUTPUT_CHARS = 3000;
 
+/** 本次运行使用的 shell 覆盖（per-call `shell` 参数解析结果）。 */
 export interface ShellRunOptions {
   command: string;
   cwd: string;
@@ -46,6 +48,8 @@ export interface ShellRunOptions {
   timeoutMs: number;
   maxOutputBytes: number;
   signal: AbortSignal;
+  /** per-call 指定的 shell；缺省用 runner 构造时的默认解析。 */
+  shell?: ShellResolution;
   /** 流式回调：边跑边把输出推给 UI（不参与最终结果）。 */
   onProgress?: (chunk: string, stream: "stdout" | "stderr") => void;
   /**
@@ -166,13 +170,21 @@ async function readCapped(
         if (progress.length > 0) onChunk(progress, streamName);
       }
 
-      if (truncated) continue;
+      if (truncated) {
+        // 截断后继续喂解码器（丢弃输出）：保持多字节字符的内部状态同步，
+        // 否则结尾 flush 会把跨截断点的 UTF-8 序列吐成 U+FFFD 乱码。
+        decoder.decode(value, { stream: true });
+        continue;
+      }
 
       if (bytes + value.byteLength > cap) {
         const remaining = Math.max(0, cap - bytes);
+        // 截断点按字节切、流式解码：不完整序列留在解码器状态里，
+        // 由后续 chunk（或结尾 flush）接管，文本不会以半个字符收尾。
         const piece = decoder.decode(value.subarray(0, remaining), { stream: true });
         text += piece;
         truncated = true;
+        decoder.decode(value.subarray(remaining), { stream: true });
         continue;
       }
 
@@ -197,8 +209,54 @@ async function readCapped(
 export interface ShellResolution {
   /** 起进程用的 shell 可执行文件。 */
   command: string;
+  /**
+   * shell 家族。决定 argv 模式（见 buildShellArgv），刻意**不进工具描述**：
+   * 模型第一次跑错语法、从报错里自己认出 exec 用的是什么 shell（"碰壁学习"）。
+   * powershell 5.1 与 pwsh 共用 "pwsh"（两者都支持 -EncodedCommand）。
+   */
+  kind: "posix" | "pwsh" | "cmd";
   /** 为什么用它、缺什么 —— 会拼进启动横幅里的沙箱说明。 */
   note?: string;
+}
+
+export function psEncode(command: string): string {
+  const utf16le: number[] = [];
+  for (let i = 0; i < command.length; i += 1) {
+    const code = command.charCodeAt(i);
+    utf16le.push(code & 0xff, (code >> 8) & 0xff);
+  }
+  return Buffer.from(utf16le).toString("base64");
+}
+
+/**
+ * 按 shell 家族派生 argv。
+ *
+ * `-lc` 只对 POSIX 壳成立；pwsh/PowerShell 用 `-EncodedCommand`（UTF-16LE
+ * base64）字节级保真地传命令，绕开 CreateProcess 与 PowerShell 双重引号
+ * 剥离的 quoting 地狱；cmd 用 `/d /s /c`（/d 跳过 AutoRun，/s 规整引号）。
+ */
+export function buildShellArgv(shell: ShellResolution, command: string): string[] {
+  switch (shell.kind) {
+    case "pwsh":
+      return [
+        shell.command,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-InputFormat",
+        "Text",
+        "-OutputFormat",
+        "Text",
+        "-EncodedCommand",
+        psEncode(command),
+      ];
+    case "cmd":
+      return [shell.command, "/d", "/s", "/c", command];
+    default:
+      return [shell.command, "-lc", command];
+  }
 }
 
 /**
@@ -215,37 +273,179 @@ function isWslLauncher(path: string, env: Record<string, string | undefined>): b
   return win32.normalize(path).toLowerCase() === stub.toLowerCase();
 }
 
+/** BUGENT_SHELL 指到的壳按名字认家族，决定 argv 模式。 */
+function shellKindByName(path: string): ShellResolution["kind"] {
+  const name = win32.basename(path).toLowerCase();
+  if (name.startsWith("pwsh") || name.startsWith("powershell")) return "pwsh";
+  if (name === "cmd" || name.startsWith("cmd.exe")) return "cmd";
+  return "posix";
+}
+
 /**
  * 解析本地 shell。
  *
- * 顺序：`BUGENT_SHELL` 覆盖 → PATH 上的 bash → sh。都没有时**不抛错**，
- * 而是返回一个必然失败的命令并带上说明 —— 抛错会让 bugent 在没有 POSIX
- * shell 的机器上直接起不来，而 read_file / write_file 这些根本不需要 shell。
+ * Windows 链：`pwsh 7 → powershell 5.1 → bash(Git for Windows) → cmd`。
+ * pwsh 的 MSIX 商店别名是 0 字节的 reparse point，"which 找到了"≠"能跑"，
+ * 所以候选一律用 stat 体积筛过（0 字节 ⇒ 跳过）。
+ *
+ * POSIX 链：`BUGENT_SHELL` 覆盖 → PATH 上的 bash → sh。都没有时**不抛错**，
+ * 而是返回一个必然失败的命令并带上说明 —— 抛错会让 bugent 在没有 shell 的
+ * 机器上直接起不来，而 read_file / write_file 这些根本不需要 shell。
  */
 export function resolveShell(
   platform: NodeJS.Platform = process.platform,
   env: Record<string, string | undefined> = process.env,
   which: (name: string) => string | null = (name) => Bun.which(name),
+  fileSize: (path: string) => number | null = (path) => {
+    try {
+      const size = statSync(path, { throwIfNoEntry: false })?.size;
+      return size === undefined ? null : size;
+    } catch {
+      return null;
+    }
+  },
 ): ShellResolution {
   const override = env.BUGENT_SHELL;
   if (override !== undefined && override.trim().length > 0) {
-    return { command: override.trim(), note: "shell 来自 BUGENT_SHELL" };
+    const command = override.trim();
+    return { command, kind: shellKindByName(command), note: "shell 来自 BUGENT_SHELL" };
   }
+
+  const alive = (path: string): boolean => (fileSize(path) ?? 0) > 0;
+
+  if (platform === "win32") {
+    // pwsh 7：PATH 命中（MSI / scoop / choco shim）+ 显式落点兜底。
+    // 0 字节 ⇒ MSIX 应用执行别名（用户可在设置里关掉），跳过。
+    const pwshCandidates = [
+      which("pwsh"),
+      win32.resolve(env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "7", "pwsh.exe"),
+      win32.resolve(env.ProgramFiles ?? "C:\\Program Files", "PowerShell", "7-preview", "pwsh.exe"),
+      env["ProgramFiles(x86)"] === undefined
+        ? null
+        : win32.resolve(env["ProgramFiles(x86)"], "PowerShell", "7", "pwsh.exe"),
+      env.LOCALAPPDATA === undefined
+        ? null
+        : win32.resolve(env.LOCALAPPDATA, "Microsoft", "WindowsApps", "pwsh.exe"),
+    ];
+    for (const candidate of pwshCandidates) {
+      if (candidate !== null && alive(candidate)) return { command: candidate, kind: "pwsh" };
+    }
+
+    // powershell 5.1：路径确定，PS 2.0 起就支持 -EncodedCommand。
+    const systemRoot = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+    const powershell51 = win32.resolve(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    if (alive(powershell51)) return { command: powershell51, kind: "pwsh" };
+
+    // bash（Git for Windows / MSYS2）：跳过 System32 的 WSL 启动器。
+    for (const name of ["bash", "sh"]) {
+      const found = which(name);
+      if (found === null) continue;
+      if (isWslLauncher(found, env)) continue;
+      return { command: found, kind: "posix" };
+    }
+
+    // cmd：System32 恒在，解析链的确定性兜底。
+    const cmd = win32.resolve(systemRoot, "System32", "cmd.exe");
+    if (alive(cmd)) return { command: cmd, kind: "cmd" };
+    return { command: "cmd", kind: "cmd", note: "未找到 cmd.exe：子进程大概率无法启动" };
+  }
+
   for (const name of ["bash", "sh"]) {
     const found = which(name);
     if (found === null) continue;
-    if (platform === "win32" && isWslLauncher(found, env)) continue;
-    return { command: found };
+    return { command: found, kind: "posix" };
   }
-  const hint =
-    platform === "win32"
-      ? "未找到 bash/sh：请安装 Git for Windows，或用 BUGENT_SHELL 指向 bash.exe"
-      : "未找到 bash/sh：请安装 bash，或用 BUGENT_SHELL 指定路径";
-  return { command: platform === "win32" ? "bash" : "/bin/sh", note: hint };
+  const hint = "未找到 bash/sh：请安装 bash，或用 BUGENT_SHELL 指定路径";
+  return { command: "/bin/sh", kind: "posix", note: hint };
 }
 
-function defaultShell(): string {
-  return resolveShell().command;
+/**
+ * per-call `shell` 参数的解析：接受已知 shell 名或绝对/相对路径。
+ *
+ * 未知名字直接报错（不静默猜），模型能从报错里学到可选值；
+ * 路径形式按可执行名认家族，找不到文件也直接报错 —— 又是一面墙。
+ */
+export function resolveShellByName(
+  name: string,
+  env: Record<string, string | undefined> = process.env,
+  which: (name: string) => string | null = (candidate) => Bun.which(candidate),
+  fileSize: (path: string) => number | null = (path) => {
+    try {
+      const size = statSync(path, { throwIfNoEntry: false })?.size;
+      return size === undefined ? null : size;
+    } catch {
+      return null;
+    }
+  },
+): ShellResolution {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) throw new Error("`shell` must not be empty");
+
+  if (/[\\/]/.test(trimmed)) {
+    if ((fileSize(trimmed) ?? 0) <= 0) throw new Error(`shell not found: ${trimmed}`);
+    return { command: trimmed, kind: shellKindByName(trimmed) };
+  }
+
+  const base = trimmed.toLowerCase().replace(/\.exe$/u, "");
+  const alive = (path: string): boolean => (fileSize(path) ?? 0) > 0;
+
+  if (base === "pwsh" || base === "powershell") {
+    if (base === "pwsh") {
+      const found = which("pwsh");
+      if (found !== null && alive(found)) return { command: found, kind: "pwsh" };
+      const programFiles = env.ProgramFiles ?? "C:\\Program Files";
+      for (const candidate of [
+        win32.resolve(programFiles, "PowerShell", "7", "pwsh.exe"),
+        win32.resolve(programFiles, "PowerShell", "7-preview", "pwsh.exe"),
+      ]) {
+        if (alive(candidate)) return { command: candidate, kind: "pwsh" };
+      }
+    } else {
+      const found = which("powershell");
+      if (found !== null && alive(found)) return { command: found, kind: "pwsh" };
+    }
+    const systemRoot = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+    const windowsPowerShell = win32.resolve(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    if (alive(windowsPowerShell)) return { command: windowsPowerShell, kind: "pwsh" };
+    throw new Error(`shell not found: ${trimmed}`);
+  }
+
+  if (base === "cmd") {
+    const found = which("cmd");
+    if (found !== null && alive(found)) return { command: found, kind: "cmd" };
+    const systemRoot = env.SystemRoot ?? env.windir ?? "C:\\Windows";
+    const cmd = win32.resolve(systemRoot, "System32", "cmd.exe");
+    if (alive(cmd)) return { command: cmd, kind: "cmd" };
+    throw new Error(`shell not found: ${trimmed}`);
+  }
+
+  if (base === "bash" || base === "zsh" || base === "sh") {
+    const found = which(base);
+    if (found !== null && !(base === "bash" && isWslLauncher(found, env))) {
+      return { command: found, kind: "posix" };
+    }
+    throw new Error(`shell not found: ${trimmed}`);
+  }
+
+  throw new Error(
+    `unknown shell: ${trimmed} (known names: bash, zsh, sh, pwsh, powershell, cmd, or a shell executable path)`,
+  );
+}
+
+function defaultShell(): ShellResolution {
+  return resolveShell();
 }
 
 /** 由调用方决定实际启动什么进程（本地 shell / bwrap 沙箱 / …）。 */
@@ -384,25 +584,37 @@ export function createProcessRunner(
 
 /** 本地子进程 runner（不做文件系统隔离，但**仍然过滤环境变量**）。 */
 export function createShellRunner(
-  shell = defaultShell(),
+  shell: ShellResolution = defaultShell(),
   options: ProcessRunnerOptions = {},
 ): ShellRunner {
-  return createProcessRunner((options_) => [shell, "-lc", options_.command], options);
+  return createProcessRunner(
+    (options_) => buildShellArgv(options_.shell ?? shell, options_.command),
+    options,
+  );
 }
 
 /* ------------------------------------------------------------------ */
 /* 工具实现                                                            */
 /* ------------------------------------------------------------------ */
 
-export interface BashInput {
+/** exec 工具名。历史上叫 `bash`，改名为平台中立的 `exec`。 */
+export const EXEC_TOOL_NAME = "exec";
+
+export interface ExecInput {
   command?: unknown;
+  /** 可选：shell 名（bash/zsh/sh/pwsh/powershell/cmd）或可执行文件路径。 */
+  shell?: unknown;
   timeoutMs?: unknown;
 }
 
-export const BASH_PARAMETERS: JSONSchema = {
+/** 兼容别名：改名前的接口/参数名仍然可用。 */
+export type BashInput = ExecInput;
+
+export const EXEC_PARAMETERS: JSONSchema = {
   type: "object",
   properties: {
-    command: { type: "string", description: "Shell command to run in the workspace root." },
+    command: { type: "string", description: "Command to run in the workspace root." },
+    shell: { type: "string", description: "Optional. Shell name or executable path." },
     timeoutMs: {
       type: "number",
       description: `Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS}, maximum ${MAX_TIMEOUT_MS}.`,
@@ -410,6 +622,8 @@ export const BASH_PARAMETERS: JSONSchema = {
   },
   required: ["command"],
 };
+
+export const BASH_PARAMETERS = EXEC_PARAMETERS;
 
 /**
  * 能明确证明只读的命令。列表刻意保持保守：不确定的一律按写处理。
@@ -571,7 +785,7 @@ interface RunGrant {
 /** 执行前授权被拒时回给模型的文本。拒绝与超时必须能区分。 */
 function refusalText(outcome: AuthorizationOutcome, command: string): string {
   const head = describeOutcome(outcome) ?? AUTHORIZATION_DENIED;
-  return `${head}：bash 未执行这条命令 —— ${command}`;
+  return `${head}：exec 未执行这条命令 —— ${command}`;
 }
 
 function escalationReasonFor(plan: WriteApprovalPlan | undefined, needsNetwork: boolean): string {
@@ -697,7 +911,7 @@ async function clampForModel(
   return [
     text.slice(0, headBudget),
     "",
-    `[... ${omitted} characters omitted ...]`,
+    `[... truncated: ${omitted} characters omitted. Narrow the command (head/tail/grep) or read the full output path below.]`,
     text.slice(text.length - tailBudget),
     "",
     ...pathHint,
@@ -712,31 +926,45 @@ export function createBashTool(
   const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return {
-    name: "bash",
+    name: EXEC_TOOL_NAME,
     description: "Run a shell command in the workspace and return its output.",
-    parameters: BASH_PARAMETERS,
+    parameters: EXEC_PARAMETERS,
     needsSandbox: true,
 
     resources(input): readonly ResourceClaim[] {
       const command =
-        typeof (input as BashInput | null)?.command === "string"
-          ? ((input as BashInput).command as string)
+        typeof (input as ExecInput | null)?.command === "string"
+          ? ((input as ExecInput).command as string)
           : "";
       return bashResourceClaims(command);
     },
 
     describe(input: unknown): { resource: string; summary: string } {
       const command =
-        typeof (input as BashInput | null)?.command === "string"
-          ? ((input as BashInput).command as string)
+        typeof (input as ExecInput | null)?.command === "string"
+          ? ((input as ExecInput).command as string)
           : "";
       return { resource: command, summary: `执行命令：${command}` };
     },
 
-    async run(input: BashInput, ctx: ToolCtx): Promise<string> {
+    async run(input: ExecInput, ctx: ToolCtx): Promise<string> {
       const command = input.command;
       if (typeof command !== "string" || command.trim().length === 0) {
-        throw new Error("bash: `command` must be a non-empty string");
+        throw new Error("exec: `command` must be a non-empty string");
+      }
+
+      // per-call `shell`：env/config 钉死时明确拒绝（用户意图不该被模型覆盖），
+      // 否则按名字/路径解析 —— 解析失败本身也是一面墙。
+      let shellOverride: ShellResolution | undefined;
+      if (input.shell !== undefined) {
+        if (typeof input.shell !== "string") {
+          throw new Error("exec: `shell` must be a string");
+        }
+        const pinned = process.env.BUGENT_SHELL;
+        if (pinned !== undefined && pinned.trim().length > 0) {
+          throw new Error("exec: the shell is pinned via BUGENT_SHELL; per-call `shell` is disabled");
+        }
+        shellOverride = resolveShellByName(input.shell);
       }
 
       let timeoutMs = defaultTimeoutMs;
@@ -746,7 +974,7 @@ export function createBashTool(
           !Number.isFinite(input.timeoutMs) ||
           input.timeoutMs <= 0
         ) {
-          throw new Error("bash: `timeoutMs` must be a positive number");
+          throw new Error("exec: `timeoutMs` must be a positive number");
         }
         timeoutMs = Math.min(input.timeoutMs, MAX_TIMEOUT_MS);
       }
@@ -760,6 +988,7 @@ export function createBashTool(
             timeoutMs,
             maxOutputBytes,
             signal: ctx.signal,
+            ...(shellOverride !== undefined ? { shell: shellOverride } : {}),
             ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
             onOutputChunk: (stream, chunk) => spool.write(stream, chunk),
             ...(grant.allowNetwork === true ? { allowNetwork: true } : {}),

@@ -99,7 +99,9 @@ export async function applyPatchToWorkspace(
   const args = parsePatch(patchText, options.parseMode ?? "lenient");
   if (args.hunks.length === 0) throw new Error("No files were modified.");
 
-  const updateMode = options.updateFileMode ?? "normalize-lf";
+  // 默认按文件原有换行风格回写（Windows CRLF 仓库上不再被整体重写成 LF，
+  // 模型也不必依赖 seek 的 trimEnd 模糊匹配才能命中 CRLF 行）。
+  const updateMode = options.updateFileMode ?? "preserve-line-endings";
   const resolveTarget = options.resolvePath ?? ((path: string) => resolveWithin(cwd, path));
   const states = new Map<string, string | undefined>();
   const originals = new Map<string, ExistingFile>();
@@ -114,7 +116,7 @@ export async function applyPatchToWorkspace(
 
   const currentText = async (path: string, operation: string): Promise<string> => {
     const current = states.has(path) ? states.get(path) : (await load(path)).text;
-    if (current === undefined) throw new Error(`${operation} failed: file not found ${relativeTo(cwd, path)}`);
+    if (current === undefined) throw new Error(`${operation} failed: file not found ${relativeTo(cwd, path).replaceAll("\\", "/")}`);
     return current;
   };
 
@@ -172,15 +174,15 @@ export async function applyPatchToWorkspace(
 
   for (const [path, after] of states) {
     const original = await load(path);
-    if (!original.exists && after !== undefined) added.push(relativeTo(cwd, path));
-    else if (original.exists && after === undefined) deleted.push(relativeTo(cwd, path));
+    if (!original.exists && after !== undefined) added.push(relativeTo(cwd, path).replaceAll("\\", "/"));
+    else if (original.exists && after === undefined) deleted.push(relativeTo(cwd, path).replaceAll("\\", "/"));
     else if (original.exists && after !== undefined && original.text !== after) {
-      modified.push(relativeTo(cwd, path));
+      modified.push(relativeTo(cwd, path).replaceAll("\\", "/"));
     } else if (!original.exists && after === undefined) {
       continue;
     }
     edits.push({
-      path: relativeTo(cwd, path),
+      path: relativeTo(cwd, path).replaceAll("\\", "/"),
       before: original.text,
       after: after ?? "",
       beforeExists: original.exists,

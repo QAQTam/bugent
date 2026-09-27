@@ -103,11 +103,23 @@ export class PermissionPolicy {
 
   constructor(options: PermissionPolicyOptions) {
     this.#default = options.default ?? "allow";
-    this.#rules = (options.rules ?? []).map((rule) => ({
-      tool: globToRegExp(rule.tool),
-      resource: rule.resource === undefined ? undefined : globToRegExp(rule.resource),
-      decision: rule.decision,
-    }));
+    this.#rules = [];
+    for (const rule of options.rules ?? []) {
+      this.#rules.push({
+        tool: globToRegExp(rule.tool),
+        resource: rule.resource === undefined ? undefined : globToRegExp(rule.resource),
+        decision: rule.decision,
+      });
+      // `bash` → `exec` 改名的兼容别名：老配置里的 { tool: "bash" } 规则
+      // 必须继续管住改名后的 exec 工具（deny/ask 规则漏配等于放行）。
+      if (rule.tool === "bash") {
+        this.#rules.push({
+          tool: globToRegExp("exec"),
+          resource: rule.resource === undefined ? undefined : globToRegExp(rule.resource),
+          decision: rule.decision,
+        });
+      }
+    }
   }
 
   evaluate(request: PermissionRequest): PolicyEvaluation {

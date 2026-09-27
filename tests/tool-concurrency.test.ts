@@ -152,7 +152,7 @@ describe("P4 · 并发工具与资源锁", () => {
             },
             {
               id: "c2",
-              name: "bash",
+              name: "exec",
               args: {
                 command:
                   "python3 -c \"from pathlib import Path; p=Path('same.txt'); p.write_text(p.read_text() + 'from-python\\\\n')\"",

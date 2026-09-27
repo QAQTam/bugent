@@ -77,7 +77,7 @@ describe("bash 执行前授权 · 判定出越界就不跑", () => {
 
     const command = `echo hi > ${target}`;
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command } },
+      { id: "c1", name: "exec", args: { command } },
       ctxWith(cwd, [{ outcome: "denied" }], seen),
     );
 
@@ -97,7 +97,7 @@ describe("bash 执行前授权 · 判定出越界就不跑", () => {
     const command = `echo hi > ${outside("timeout.txt")}`;
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command } },
+      { id: "c1", name: "exec", args: { command } },
       ctxWith(cwd, [{ outcome: "timeout" }]),
     );
 
@@ -111,7 +111,7 @@ describe("bash 执行前授权 · 判定出越界就不跑", () => {
     const seen: CapabilityEscalation[] = [];
 
     await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo hi > inside.txt" } },
+      { id: "c1", name: "exec", args: { command: "echo hi > inside.txt" } },
       ctxWith(cwd, [], seen),
     );
 
@@ -125,7 +125,7 @@ describe("bash 执行前授权 · 判定出越界就不跑", () => {
     const seen: CapabilityEscalation[] = [];
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: `echo hi > ${outside("no-sandbox.txt")}` } },
+      { id: "c1", name: "exec", args: { command: `echo hi > ${outside("no-sandbox.txt")}` } },
       ctxWith(cwd, [], seen),
     );
 
@@ -146,7 +146,7 @@ describe("bash 执行前授权 · 批准后按次放开", () => {
     const seen: CapabilityEscalation[] = [];
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: `echo hi > ${target}` } },
+      { id: "c1", name: "exec", args: { command: `echo hi > ${target}` } },
       ctxWith(cwd, [{ outcome: "approved" }], seen),
     );
 
@@ -164,7 +164,7 @@ describe("bash 执行前授权 · 批准后按次放开", () => {
     const seen: CapabilityEscalation[] = [];
 
     await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo hi > inside.txt" } },
+      { id: "c1", name: "exec", args: { command: "echo hi > inside.txt" } },
       ctxWith(cwd, [{ outcome: "approved" }], seen),
     );
 
@@ -179,7 +179,7 @@ describe("bash 执行前授权 · 批准后按次放开", () => {
     const setup = createDefaultTools({ mode: "read-only", runner });
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo hi > inside.txt" } },
+      { id: "c1", name: "exec", args: { command: "echo hi > inside.txt" } },
       ctxWith(cwd, [{ outcome: "denied" }]),
     );
 
@@ -197,7 +197,7 @@ describe("bash 执行前授权 · 批准后按次放开", () => {
     await setup.registry.execute(
       {
         id: "c1",
-        name: "bash",
+        name: "exec",
         args: { command: `python3 -c "import os; open(os.environ['T'] + '/x','w')"` },
       },
       ctxWith(cwd, [{ outcome: "approved" }], seen),
@@ -219,7 +219,7 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
     const setup = createDefaultTools({ mode: "read-only" });
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo 改过 > inside.txt" } },
+      { id: "c1", name: "exec", args: { command: "echo 改过 > inside.txt" } },
       ctxWith(cwd, [{ outcome: "approved" }]),
     );
 
@@ -234,7 +234,7 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
     const setup = createDefaultTools({ mode: "read-only" });
 
     await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo 改过 > inside.txt" } },
+      { id: "c1", name: "exec", args: { command: "echo 改过 > inside.txt" } },
       ctxWith(cwd, [{ outcome: "denied" }]),
     );
 
@@ -249,7 +249,7 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
     const setup = createDefaultTools({ mode: "workspace-write" });
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: `echo hi > ${target}` } },
+      { id: "c1", name: "exec", args: { command: `echo hi > ${target}` } },
       ctxWith(cwd, [{ outcome: "approved" }]),
     );
 
@@ -266,7 +266,7 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
     const setup = createDefaultTools({ mode: "read-only" });
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: `echo hi > ${target}` } },
+      { id: "c1", name: "exec", args: { command: `echo hi > ${target}` } },
       ctxWith(cwd, [{ outcome: "approved" }]),
     );
 
@@ -285,7 +285,7 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
     const ctx = { cwd, signal: new AbortController().signal, callId: "c1", sessionId: "s" };
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: `echo hi > ${target}` } },
+      { id: "c1", name: "exec", args: { command: `echo hi > ${target}` } },
       ctx,
     );
 
@@ -308,13 +308,13 @@ describe("bash 执行前授权 · 真沙箱下批准就真的能写", () => {
       const setup = createDefaultTools({ mode: "workspace-write" });
 
       const approved = await setup.registry.execute(
-        { id: "c1", name: "bash", args: { command: `curl -sS -m 5 ${url}` } },
+        { id: "c1", name: "exec", args: { command: `curl -sS -m 5 ${url}` } },
         ctxWith(cwd, [{ outcome: "approved" }]),
       );
       expect(approved.output).toContain("pong");
 
       const denied = await setup.registry.execute(
-        { id: "c1", name: "bash", args: { command: `curl -sS -m 5 ${url}` } },
+        { id: "c1", name: "exec", args: { command: `curl -sS -m 5 ${url}` } },
         ctxWith(cwd, [{ outcome: "denied" }]),
       );
       expect(denied.output).not.toContain("pong");
@@ -339,14 +339,14 @@ describe("批准后的 argv 长什么样", () => {
     const argv = buildSandboxArgv(
       { ...options, writablePaths: ["/home/me", "/var/log"] },
       { workspaceWrite: false },
-      "bash",
+      { command: "bash", kind: "posix" },
     );
     expect(argv.join(" ")).toContain("--bind /home/me /home/me");
     expect(argv.join(" ")).toContain("--bind /var/log /var/log");
   });
 
   test("没有授权时不加任何 --bind", () => {
-    const argv = buildSandboxArgv(options, { workspaceWrite: false }, "bash");
+    const argv = buildSandboxArgv(options, { workspaceWrite: false }, { command: "bash", kind: "posix" });
     expect(argv.join(" ")).not.toContain("--bind");
   });
 
@@ -354,7 +354,7 @@ describe("批准后的 argv 长什么样", () => {
     const argv = buildSandboxArgv(
       { ...options, writablePaths: ["/work/repo"] },
       { workspaceWrite: false },
-      "bash",
+      { command: "bash", kind: "posix" },
     );
     const indexes = argv.reduce<number[]>((acc, value, index) => {
       if (value === "--bind" && argv[index + 1] === "/work/repo") acc.push(index);

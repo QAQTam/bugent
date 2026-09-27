@@ -212,7 +212,7 @@ describe("P1+P4 · 端到端（HTTP + SSE）", () => {
                     {
                       index: 0,
                       id: "call_bash",
-                      function: { name: "bash", arguments: '{"command":"echo from-bash-tool"}' },
+                      function: { name: "exec", arguments: '{"command":"echo from-bash-tool"}' },
                     },
                   ],
                 },

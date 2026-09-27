@@ -38,7 +38,7 @@ describe("P6 · bwrap argv 构造", () => {
   const options = runOptions("/work", "echo hi");
 
   test("默认：只读根 + 私有 /tmp + 断网 + PID 隔离", () => {
-    const argv = buildSandboxArgv(options, {}, "/bin/bash");
+    const argv = buildSandboxArgv(options, {}, { command: "/bin/bash", kind: "posix" });
 
     expect(argv[0]).toBe(SANDBOX_BINARY);
     expect(argv).toContain("--ro-bind");
@@ -50,19 +50,19 @@ describe("P6 · bwrap argv 构造", () => {
   });
 
   test("工作目录始终被挂成可写", () => {
-    const argv = buildSandboxArgv(options, {}, "/bin/bash");
+    const argv = buildSandboxArgv(options, {}, { command: "/bin/bash", kind: "posix" });
     const bindIndex = argv.indexOf("--bind");
     expect(bindIndex).toBeGreaterThan(-1);
     expect(argv.slice(bindIndex, bindIndex + 3)).toEqual(["--bind", "/work", "/work"]);
   });
 
   test("allowNetwork 时不加 --unshare-net", () => {
-    const argv = buildSandboxArgv(options, { allowNetwork: true }, "/bin/bash");
+    const argv = buildSandboxArgv(options, { allowNetwork: true }, { command: "/bin/bash", kind: "posix" });
     expect(argv).not.toContain("--unshare-net");
   });
 
   test("额外可写路径排在基础策略之后（后挂载的才能覆盖先挂载的）", () => {
-    const argv = buildSandboxArgv(options, { writablePaths: ["/a", "/b"] }, "/bin/bash");
+    const argv = buildSandboxArgv(options, { writablePaths: ["/a", "/b"] }, { command: "/bin/bash", kind: "posix" });
     const workspaceBind = argv.findIndex(
       (value, at) => value === "--bind" && argv[at + 1] === "/work",
     );
@@ -73,7 +73,7 @@ describe("P6 · bwrap argv 构造", () => {
   });
 
   test("read-only 档：工作区被绑成只读，但仍存在（/tmp 被 tmpfs 遮掉时不至于 chdir 失败）", () => {
-    const argv = buildSandboxArgv(options, { workspaceWrite: false }, "/bin/bash");
+    const argv = buildSandboxArgv(options, { workspaceWrite: false }, { command: "/bin/bash", kind: "posix" });
     const index = argv.findIndex(
       (value, at) => value === "--ro-bind" && argv[at + 1] === "/work",
     );
@@ -82,7 +82,7 @@ describe("P6 · bwrap argv 构造", () => {
   });
 
   test("命令被放在 -- 之后，作为 shell -lc 的参数", () => {
-    const argv = buildSandboxArgv(options, {}, "/bin/bash");
+    const argv = buildSandboxArgv(options, {}, { command: "/bin/bash", kind: "posix" });
     const separator = argv.indexOf("--");
     expect(argv.slice(separator + 1)).toEqual(["/bin/bash", "-lc", "echo hi"]);
   });
@@ -120,7 +120,7 @@ describe("P6 · 真实沙箱行为", () => {
   });
 
   test.skipIf(!sandboxAvailable)("允许联网时不会加 --unshare-net", () => {
-    const argv = buildSandboxArgv(runOptions("/work", "echo"), { allowNetwork: true }, "/bin/bash");
+    const argv = buildSandboxArgv(runOptions("/work", "echo"), { allowNetwork: true }, { command: "/bin/bash", kind: "posix" });
     expect(argv).not.toContain("--unshare-net");
   });
 });

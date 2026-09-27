@@ -589,7 +589,8 @@ max_steps = 800
 # 规则按顺序匹配，第一条命中即生效。
 # 注意 resource 里的 * 匹配任意字符（含 /）。
 [[permissions.rules]]
-tool = "bash"
+# exec 是现名；旧配置写 tool = "bash" 也会通过别名匹配到 exec。
+tool = "exec"
 resource = "rm -rf /*"
 decision = "deny"
 

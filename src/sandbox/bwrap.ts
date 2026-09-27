@@ -13,9 +13,11 @@
  */
 
 import {
+  buildShellArgv,
   createProcessRunner,
   resolveShell,
   type ProcessRunnerOptions,
+  type ShellResolution,
   type ShellRunner,
   type ShellRunOptions,
 } from "../tools/bash.ts";
@@ -40,8 +42,8 @@ export interface SandboxOptions {
 }
 
 /** 沙箱内的 shell 与本地 runner 用同一套解析（含 `BUGENT_SHELL` 覆盖）。 */
-function defaultShell(): string {
-  return resolveShell().command;
+function defaultShell(): ShellResolution {
+  return resolveShell();
 }
 
 export function isSandboxAvailable(binary = SANDBOX_BINARY): boolean {
@@ -52,7 +54,7 @@ export function isSandboxAvailable(binary = SANDBOX_BINARY): boolean {
 export function buildSandboxArgv(
   options: ShellRunOptions,
   sandbox: SandboxOptions,
-  shell: string,
+  shell: ShellResolution,
 ): string[] {
   const argv: string[] = [
     sandbox.binary ?? SANDBOX_BINARY,
@@ -110,7 +112,7 @@ export function buildSandboxArgv(
 
   argv.push("--chdir", options.cwd);
   argv.push("--");
-  argv.push(shell, "-lc", options.command);
+  argv.push(...buildShellArgv(options.shell ?? shell, options.command));
 
   return argv;
 }

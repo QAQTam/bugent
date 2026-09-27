@@ -32,7 +32,9 @@ let registered = false;
  * 长什么样，显示名决定叫它什么。没列的工具照原样显示注册名。
  */
 const DISPLAY_NAMES: readonly (readonly [string, string])[] = [
-  ["bash", "Bash"],
+  ["exec", "Exec"],
+  // 旧会话回放兼容：历史 transcript 里记录的工具名仍是 bash
+  ["bash", "Exec"],
   ["read_file", "Read"],
   ["write_file", "Write"],
   ["edit_file", "Edit"],
@@ -47,6 +49,8 @@ export function registerBuiltinToolRenderers(): void {
   for (const [name, label] of DISPLAY_NAMES) registerToolDisplayName(name, label);
 
   registerToolRenderer(TODO_TOOL_NAME, renderTodoTool);
+  registerToolRenderer("exec", renderBashTool);
+  // 旧会话回放兼容
   registerToolRenderer("bash", renderBashTool);
   registerToolRenderer("read_file", renderReadFileTool);
   registerToolRenderer("write_file", renderDiffTool);

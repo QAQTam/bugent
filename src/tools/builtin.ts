@@ -117,7 +117,7 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     bashNeedsPerRunApproval = true;
     // 说清楚"档位还在、但只是工具层门控"：没有 bwrap 时子进程没有内核级隔离，
     // read-only 档挡得住 write_file，挡不住 bash 里的一条 `echo > file`。
-    note = "未找到 bwrap：子进程没有内核级隔离，bash 每条命令都会先请求确认";
+    note = "未找到 bwrap：子进程没有内核级隔离，exec 每条命令都会先请求确认";
   } else {
     // 联网是**按次授权**的：默认断网跑一次，失败后再拿真实报错问用户。
     // `allowNetwork` 为 true 表示用户已经全局授权，此时不再走那条按次路径。

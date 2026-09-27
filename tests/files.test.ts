@@ -389,3 +389,90 @@ describe("P7 · 权限资源描述", () => {
     });
   });
 });
+
+describe("Windows 换行（CRLF）支持", () => {
+  const ctxFor2 = (cwd: string) => ctxFor(cwd);
+
+  test("edit_file 命中 CRLF 文件里的 LF old_string，并按 CRLF 回写", async () => {
+    const cwd = await workspace();
+    const p = join(cwd, "crlf.ts");
+    await writeFile(p, "a\r\nconst x = 1;\r\nb\r\n");
+
+    const out = await editTool.run(
+      { path: "crlf.ts", old_string: "const x = 1;", new_string: "const x = 2;" },
+      ctxFor2(cwd),
+    );
+    expect(out).toContain("edited");
+    expect(await readFile(p, "utf8")).toBe("a\r\nconst x = 2;\r\nb\r\n");
+  });
+
+  test("edit_file 的 old_string 自带 \\r\\n 时同样命中", async () => {
+    const cwd = await workspace();
+    const p = join(cwd, "crlf2.txt");
+    await writeFile(p, "one\r\ntwo\r\n");
+
+    await editTool.run(
+      { path: "crlf2.txt", old_string: "one\r\ntwo", new_string: "one\ntwo!" },
+      ctxFor2(cwd),
+    );
+    expect(await readFile(p, "utf8")).toBe("one\r\ntwo!\r\n");
+  });
+
+  test("edit_file 保持 LF 文件不变", async () => {
+    const cwd = await workspace();
+    const p = join(cwd, "lf.txt");
+    await writeFile(p, "one\ntwo\n");
+
+    await editTool.run(
+      { path: "lf.txt", old_string: "two", new_string: "two!" },
+      ctxFor2(cwd),
+    );
+    expect(await readFile(p, "utf8")).toBe("one\ntwo!\n");
+  });
+
+  test("edit_file 在混合换行文件上逐字节保真未触碰区域", async () => {
+    const cwd = await workspace();
+    const p = join(cwd, "mixed.txt");
+    await writeFile(p, "a\r\nb\nc\r\n");
+
+    await editTool.run(
+      { path: "mixed.txt", old_string: "b", new_string: "B" },
+      ctxFor2(cwd),
+    );
+    expect(await readFile(p, "utf8")).toBe("a\r\nB\nc\r\n");
+  });
+
+  test("edit_file replace_all 在 CRLF 文件上全部替换", async () => {
+    const cwd = await workspace();
+    const p = join(cwd, "all.txt");
+    await writeFile(p, "x = 1\r\ny = 1\r\n");
+
+    await editTool.run(
+      { path: "all.txt", old_string: "1", new_string: "2", replace_all: true },
+      ctxFor2(cwd),
+    );
+    expect(await readFile(p, "utf8")).toBe("x = 2\r\ny = 2\r\n");
+  });
+
+  test("read_file 回显不残留行尾 \\r", async () => {
+    const cwd = await workspace();
+    await writeFile(join(cwd, "crlf3.txt"), "alpha\r\nbeta\r\n");
+
+    const out = await readTool.run({ path: "crlf3.txt" }, ctxFor2(cwd));
+    expect(out).toContain("1\talpha\n");
+    expect(out).not.toContain("alpha\r");
+  });
+
+  test("write_file 覆盖 CRLF 文件时沿用 CRLF；新建文件按模型给的 LF", async () => {
+    const cwd = await workspace();
+    const existing = join(cwd, "keep.txt");
+    await writeFile(existing, "old\r\ncontent\r\n");
+
+    await writeTool.run({ path: "keep.txt", content: "new\ncontent\n" }, ctxFor2(cwd));
+    expect(await readFile(existing, "utf8")).toBe("new\r\ncontent\r\n");
+
+    const fresh = join(cwd, "fresh.txt");
+    await writeTool.run({ path: "fresh.txt", content: "a\nb\n" }, ctxFor2(cwd));
+    expect(await readFile(fresh, "utf8")).toBe("a\nb\n");
+  });
+});

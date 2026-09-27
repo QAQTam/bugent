@@ -105,7 +105,10 @@ async function readWindow(
     lineNumber += 1;
     if (lineNumber < options.startLine || !hasRoom()) return;
 
-    let entry = `${lineNumber}\t${line}`;
+    // CRLF 文件按 \n 切行后会残留行尾 \r —— 模型照着回显构造 old_string
+    // 时带上这个隐形字符反而匹配不上（BUG: Windows 换行），在这里剥掉。
+    const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+    let entry = `${lineNumber}\t${text}`;
     if (entry.length > options.maxChars) {
       entry = `${entry.slice(0, options.maxChars)}…[line too long, truncated]`;
       clippedLine = true;
@@ -262,11 +265,11 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
 
       // 读是自由的：三档都允许读工作区之外（档位不限制读）。
       const absolute = resolveReadable(ctx.cwd, rawPath, [ANYWHERE]);
-      const display = relativeTo(ctx.cwd, absolute);
+      const display = relativeTo(ctx.cwd, absolute).replaceAll("\\", "/");
 
       // 目录单独判断：否则 size 是 0，会掉进"文件不存在"分支，报错完全误导
       if (statSync(absolute, { throwIfNoEntry: false })?.isDirectory() === true) {
-        throw new Error(`not a file, this is a directory: ${display}. Use bash ls to see what is inside`);
+        throw new Error(`not a file, this is a directory: ${display}. Use exec ls to see what is inside`);
       }
 
       const file = Bun.file(absolute);
@@ -315,7 +318,7 @@ export function createReadFileTool(): Tool<ReadFileInput, string> {
                 "this tool always scans from the start of the file",
             );
             notes.push(
-              `use bash to read deep into large files, e.g. sed -n '${offset},${
+              `use exec to read deep into large files, e.g. sed -n '${offset},${
                 offset + MAX_READ_LINES
               }p' -- ${JSON.stringify(display)}`,
             );
@@ -396,28 +399,35 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       }
 
       const absolute = resolveWriteTarget(ctx, rawPath);
-      const display = relativeTo(ctx.cwd, absolute);
+      const display = relativeTo(ctx.cwd, absolute).replaceAll("\\", "/");
 
       // 先读旧内容，写完才能给出 diff（新建文件时旧内容为空）
       const existed = await Bun.file(absolute).exists();
       const fileStat = existed ? await stat(absolute) : undefined;
       const before = existed ? await Bun.file(absolute).text() : "";
 
+      // CRLF 文件沿用原换行风格：模型给的是 LF，落盘前按原文件展开。
+      // lone \r 不展开（保守），只处理 \r\n ↔ \n。
+      const written =
+        existed && preferredEndingOf(before) === "\r\n"
+          ? convertEnding(content, "\r\n")
+          : content;
+
       // 原子写 + TOCTOU 收窄（BUG-012）：临时文件、rename、四次边界复核都在
       // atomicWriteWithin 里；越界授权时复核自动放宽。
       const mode = fileStat?.mode === undefined ? undefined : fileStat.mode & 0o777;
-      await atomicWriteWithin(ctx.cwd, ctx.grant?.writeOutside === true, absolute, content, mode);
+      await atomicWriteWithin(ctx.cwd, ctx.grant?.writeOutside === true, absolute, written, mode);
 
       ctx.onWorkspaceChange?.({
         path: display,
         before,
-        after: content,
+        after: written,
         beforeExists: existed,
         afterExists: true,
         reversible: true,
       });
 
-      const lineCount = content.split("\n").length;
+      const lineCount = written.split("\n").length;
       const summary = existed
         ? `overwrote ${display} (${bytes} bytes, ${lineCount} lines)`
         : `created ${display} (${bytes} bytes, ${lineCount} lines)`;
@@ -426,8 +436,8 @@ export function createWriteFileTool(): Tool<WriteFileInput, string> {
       // 于是新文件显示成 `+3 -1`。直接全标成新增才对。
       // 行号从 1 起 —— 新文件的每一行都是新增，编号就是它在文件里的行号。
       const diff = existed
-        ? compactDiff(diffLines(before, content))
-        : content.split("\n").map((text, index): DiffLine => ({ kind: "+", text, after: index + 1 }));
+        ? compactDiff(diffLines(before, written))
+        : written.split("\n").map((text, index): DiffLine => ({ kind: "+", text, after: index + 1 }));
 
       // 展示元数据：TUI 不必从 diff 文本里反解统计
       const delta = diffStat(diff);
@@ -479,6 +489,63 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/* ------------------------------------------------------------------ */
+/* 换行归一（Windows CRLF 支持）                                        */
+/*                                                                    */
+/* 匹配在 LF 空间进行，写回时按文件原有换行风格还原：                  */
+/*   - read/匹配一律把 \r\n 折叠成 \n（lone \r 按 LF 处理）            */
+/*   - 替换后的新文本按文件的 preferred ending 重新展开                */
+/*   - 未触碰区域逐字节保真（不做整文件重写）                          */
+/* ------------------------------------------------------------------ */
+
+type PreferredEnding = "\n" | "\r\n";
+
+/** 文件的主导换行风格：\r\n 占多数（或存在）即 CRLF，其余视为 LF。 */
+function preferredEndingOf(text: string): PreferredEnding {
+  let crlf = 0;
+  let loneLf = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === "\r") {
+      if (text[i + 1] === "\n") {
+        crlf += 1;
+        i += 1;
+      }
+    } else if (text[i] === "\n") {
+      loneLf += 1;
+    }
+  }
+  return crlf > 0 && crlf >= loneLf ? "\r\n" : "\n";
+}
+
+function convertEnding(text: string, ending: PreferredEnding): string {
+  if (ending === "\r\n") return text.replace(/\r?\n/g, "\r\n");
+  return text.replace(/\r\n/g, "\n");
+}
+
+/**
+ * 把文本折叠到 LF 空间，并记录每个 LF 字符在原文中的位置与原始宽度。
+ * `map[i]`/`len[i]`：第 i 个 LF 字符对应原文的下标与字节数（\r\n 折叠时为 2）。
+ */
+function toLfSpace(original: string): { lf: string; map: number[]; len: number[] } {
+  let lf = "";
+  const map: number[] = [];
+  const len: number[] = [];
+  for (let i = 0; i < original.length; i += 1) {
+    const char = original[i]!;
+    if (char === "\r" && original[i + 1] === "\n") {
+      map.push(i);
+      len.push(2);
+      lf += "\n";
+      i += 1;
+    } else {
+      map.push(i);
+      len.push(1);
+      lf += char;
+    }
+  }
+  return { lf, map, len };
+}
+
 export function createEditFileTool(): Tool<EditFileInput, string> {
   return {
     name: "edit_file",
@@ -511,7 +578,7 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
 
       const replaceAll = input.replace_all === true;
       const absolute = resolveWriteTarget(ctx, rawPath);
-      const display = relativeTo(ctx.cwd, absolute);
+      const display = relativeTo(ctx.cwd, absolute).replaceAll("\\", "/");
 
       const fileStat = await stat(absolute).catch(() => undefined);
       if (fileStat === undefined) throw new Error(`file not found: ${display}`);
@@ -527,7 +594,13 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
       if (original.includes("\0")) {
         throw new Error(`refusing to edit a binary file: ${display}`);
       }
-      const occurrences = countOccurrences(original, oldString);
+
+      // 匹配在 LF 空间进行（CRLF/Mixed 文件都能命中模型给的 LF old_string），
+      // 命中区间映射回原文偏移做拼接 —— 未触碰区域逐字节保真。
+      const space = toLfSpace(original);
+      const oldLf = convertEnding(oldString, "\n");
+      const newLf = convertEnding(newString, "\n");
+      const occurrences = countOccurrences(space.lf, oldLf);
 
       if (occurrences === 0) {
         throw new Error(`old_string not found in ${display}; read the file first to confirm the exact text`);
@@ -541,12 +614,32 @@ export function createEditFileTool(): Tool<EditFileInput, string> {
 
       // Do not use String.replace(search, replacement): `$&`, `$1`, `$'`
       // would be interpreted as replacement templates instead of literal text.
-      const updated = replaceAll
-        ? original.split(oldString).join(newString)
-        : (() => {
-            const index = original.indexOf(oldString);
-            return original.slice(0, index) + newString + original.slice(index + oldString.length);
-          })();
+      const ending = preferredEndingOf(original);
+      const newRaw = convertEnding(newLf, ending);
+      const ranges: Array<[number, number]> = [];
+      if (replaceAll) {
+        let cursor = 0;
+        for (;;) {
+          const at = space.lf.indexOf(oldLf, cursor);
+          if (at === -1) break;
+          ranges.push([at, at + oldLf.length]);
+          cursor = at + oldLf.length;
+        }
+      } else {
+        const at = space.lf.indexOf(oldLf);
+        ranges.push([at, at + oldLf.length]);
+      }
+      // 从后往前拼接，前面的偏移不受影响
+      let updated = original;
+      for (let i = ranges.length - 1; i >= 0; i -= 1) {
+        const [lfStart, lfEnd] = ranges[i]!;
+        const rawStart = space.map[lfStart]!;
+        // 区间终点：最后一个 LF 字符的原文终点；old_string 以换行收尾且折叠
+        // 自 \r\n 时要把 \r 一并替换掉，否则文件里会残留孤儿 \r。
+        const lastLf = ranges[i]![1] - 1;
+        const rawEnd = lastLf < space.map.length ? space.map[lastLf]! + space.len[lastLf]! : updated.length;
+        updated = updated.slice(0, rawStart) + newRaw + updated.slice(rawEnd);
+      }
       const updatedBytes = Buffer.byteLength(updated, "utf8");
       if (updatedBytes > MAX_WRITE_BYTES) {
         throw new Error(`edited content too large: ${updatedBytes} bytes, limit ${MAX_WRITE_BYTES}`);

@@ -199,7 +199,7 @@ describe("档位对工具的实际约束", () => {
     );
 
     const result = await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "echo hello" } },
+      { id: "c1", name: "exec", args: { command: "echo hello" } },
       { cwd: process.cwd(), signal: new AbortController().signal, callId: "c1", sessionId: "s" },
     );
 
@@ -223,7 +223,7 @@ describe("档位对工具的实际约束", () => {
 
     for (const command of attempts) {
       await Bun.write(target, "原始内容\n");
-      await setup.registry.execute({ id: "c1", name: "bash", args: { command } }, ctx);
+      await setup.registry.execute({ id: "c1", name: "exec", args: { command } }, ctx);
       // 关键断言：文件内容一个字节都没变 —— 我们没解析命令，是内核挡的
       expect(await readFile(target, "utf8")).toBe("原始内容\n");
     }
@@ -237,7 +237,7 @@ describe("档位对工具的实际约束", () => {
 
     await Bun.write(target, "原始内容\n");
     await setup.registry.execute(
-      { id: "c1", name: "bash", args: { command: "sed -i 's/原始/改过/' target.txt" } },
+      { id: "c1", name: "exec", args: { command: "sed -i 's/原始/改过/' target.txt" } },
       ctx,
     );
 
@@ -278,7 +278,7 @@ describe("联网授权的触发判定", () => {
     // 刻意选一条**静态扫不出来**的联网命令：扫描只认识 curl/git/pip 这类命令名，
     // 解释器里的 socket 调用它看不见 —— 这条路径必须靠"跑失败再问"兜住。
     const command = `python3 -c "import socket; socket.create_connection(('127.0.0.1',9))"`;
-    const result = await setup.registry.execute({ id: "c1", name: "bash", args: { command } }, ctx);
+    const result = await setup.registry.execute({ id: "c1", name: "exec", args: { command } }, ctx);
 
     expect(captured).toBeDefined();
     expect(captured?.reason).toContain("断网");
@@ -308,7 +308,7 @@ describe("联网授权的触发判定", () => {
 
     // 用一个会在工作区留下痕迹的命令：如果它真的跑了，文件就会出现。
     const command = `curl -sS -o ${join(cwd, "leak.txt")} http://127.0.0.1:9/nope`;
-    const result = await setup.registry.execute({ id: "c1", name: "bash", args: { command } }, ctx);
+    const result = await setup.registry.execute({ id: "c1", name: "exec", args: { command } }, ctx);
 
     expect(captured?.capability.network).toBe(true);
     expect(captured?.reason).toContain("联网");
