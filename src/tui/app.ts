@@ -14,6 +14,7 @@
  */
 
 import type { Usage } from "../provider/types.ts";
+import { BUGENT_VERSION } from "../version.ts";
 import { combineHooks, runTurn, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
@@ -58,6 +59,12 @@ import { FrameScheduler } from "./frame-scheduler.ts";
 import { StreamPacer } from "./stream-pacer.ts";
 import { StreamingMarkdownCache } from "./streaming-markdown.ts";
 import { LezerMarkdownBoundaryTracker } from "./lezer-markdown-boundary.ts";
+import {
+  composeSplash,
+  SPLASH_EXIT_MS,
+  SPLASH_FRAME_MS,
+  type SplashInfo,
+} from "./splash.ts";
 import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
 import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
 import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
@@ -349,6 +356,19 @@ export interface TuiInteraction {
   askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined>;
 }
 
+/**
+ * 开屏的运行态。
+ *
+ * 时间戳（而不是"第几帧"）才是驱动源：帧调度会因为流式输出、窗口缩放而
+ * 抖动，动画不能跟着抖。退场同样按时间推进，与开屏共用一套。
+ */
+interface SplashState {
+  startedAt: number;
+  /** 用户敲下第一个字符的时刻；undefined = 还没开始退场。 */
+  exitStartedAt: number | undefined;
+  info: SplashInfo;
+}
+
 export interface TuiOptions {
   session: AgentSession;
   tools: ToolRegistry;
@@ -381,6 +401,13 @@ export interface TuiOptions {
   deleteApiKey?: (sessionId: string, providerId: string) => Promise<void>;
   /** 启动时的欢迎语。 */
   banner?: string;
+  /**
+   * 开屏动画。默认开着，但只在"还没有对话内容"的会话上真的显示 ——
+   * `--resume` 接着聊的会话不该再看一遍开屏。
+   *
+   * 传 `false` 可以整个关掉；它只影响正文区，状态栏与输入框的几何不受影响。
+   */
+  splash?: boolean;
   /** 沙箱档位，用于状态栏与升档提示。 */
   mode?: SandboxMode;
   /**
@@ -582,6 +609,12 @@ export class TuiApp implements TuiInteraction {
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
+  /**
+   * 开屏状态。undefined = 没有开屏（会话非空、传了 `splash: false`、或已经退场完）。
+   */
+  #splash: SplashState | undefined;
+  /** 开屏动画定时器。只在开屏可见期间运行。 */
+  #splashTimer: ReturnType<typeof setInterval> | undefined;
   /** 授权窗口长度。生产固定 60 秒；测试传小值，免得 PTY 用例等满一分钟。 */
   #authorizationTimeoutMs = AUTHORIZATION_TIMEOUT_MS;
   /**
@@ -708,8 +741,100 @@ export class TuiApp implements TuiInteraction {
     if (options.banner !== undefined) {
       this.#transcript.pushNotice(options.banner);
     }
+    // 开屏只在"还没有对话内容"的会话出现。
+    //
+    // 不能只看 `messages.length === 0`：全新 session 的上下文里已经有
+    // system / MCP / skills 三条 msgid 前缀，长度永远不为 0。
+    const hasConversation = this.#session.messages.some((message) => message.role !== "system");
+    if (options.splash !== false && !hasConversation) {
+      this.#splash = {
+        startedAt: performance.now(),
+        exitStartedAt: undefined,
+        info: {
+          version: BUGENT_VERSION,
+          clientId: this.#session.client.id,
+          mode: this.#mode,
+          cwd: this.#cwd,
+          sessionId: this.#session.id,
+        },
+      };
+    }
     this.#loadTokenizerInBackground();
     this.#probeContextWindowInBackground();
+  }
+
+  /* ---------------------------- 开屏动画 ---------------------------- */
+
+  /**
+   * 开屏期间常驻的动画定时器。
+   *
+   * 只有开屏可见时才有这个定时器：用户一敲字就退场，退场动画跑完自己停掉 ——
+   * 不会在空闲的 TUI 里留一个 20fps 的空转。
+   */
+  #startSplashAnimation(): void {
+    if (this.#splashTimer !== undefined) return;
+    this.#splashTimer = setInterval(() => {
+      const splash = this.#splash;
+      if (splash === undefined) {
+        this.#stopSplashAnimation();
+        return;
+      }
+      if (
+        splash.exitStartedAt !== undefined &&
+        performance.now() - splash.exitStartedAt >= SPLASH_EXIT_MS
+      ) {
+        this.#finishSplash();
+        return;
+      }
+      this.#requestFrame();
+    }, SPLASH_FRAME_MS);
+  }
+
+  #stopSplashAnimation(): void {
+    if (this.#splashTimer === undefined) return;
+    clearInterval(this.#splashTimer);
+    this.#splashTimer = undefined;
+  }
+
+  /**
+   * 开始退场。
+   *
+   * 由**第一个字符**触发，不是回车：用户要的是"打字就进去"，不是"再确认一次"。
+   * 重复调用无效，所以粘贴一整段也只退场一次。
+   */
+  #beginSplashExit(): void {
+    const splash = this.#splash;
+    if (splash === undefined || splash.exitStartedAt !== undefined) return;
+    splash.exitStartedAt = performance.now();
+    this.#startSplashAnimation();
+    this.#requestFrame(true);
+  }
+
+  /** 立刻收掉开屏，不等退场动画。 */
+  #finishSplash(): void {
+    if (this.#splash === undefined) return;
+    this.#splash = undefined;
+    this.#stopSplashAnimation();
+    // 正文从开屏换回消息列表，整块都变了 —— 全量重绘。
+    this.#requestFrame(true);
+  }
+
+  /** 当前该显示的开屏行；没有开屏时返回 undefined。 */
+  #composeSplash(width: number, rows: number): string[] | undefined {
+    const splash = this.#splash;
+    if (splash === undefined) return undefined;
+    const now = performance.now();
+    const exit =
+      splash.exitStartedAt === undefined
+        ? 0
+        : Math.min(1, (now - splash.exitStartedAt) / SPLASH_EXIT_MS);
+    return composeSplash({
+      width,
+      rows,
+      elapsedMs: now - splash.startedAt,
+      exit,
+      info: splash.info,
+    });
   }
 
   /**
@@ -919,10 +1044,15 @@ export class TuiApp implements TuiInteraction {
       this.#requestFrame(true);
       this.#frames.flush();
       this.#syncTodoShimmer();
+      // 开屏动画的定时器挂在 `run()` 的生命周期里，而不是构造函数里：
+      // 构造 TuiApp 但不跑 TUI 的入口（测试、将来的 WebUI）不该留一个
+      // 20fps 的常驻定时器，那会把测试进程吊住。
+      this.#startSplashAnimation();
       await exited;
     } finally {
       clearInterval(escapeTimer);
       this.#stopTodoShimmer();
+      this.#stopSplashAnimation();
       this.#stopSpeedTicker();
       // 取消挂起的合流帧，否则定时器会把进程多吊住一个窗口期。
       this.#frames.dispose();
@@ -945,6 +1075,10 @@ export class TuiApp implements TuiInteraction {
   }
 
   #handleKey(key: Key): void {
+    // 退场动画只是过场：用户在退场期间继续操作（再敲一下、点一下），立刻收尾。
+    // 让动画去等输入是本末倒置 —— 还会把后面几帧的流式揭示挤成一帧。
+    if (this.#splash?.exitStartedAt !== undefined) this.#finishSplash();
+
     // 设置面板是模态浮层：打开期间按键全部归它。
     // 鼠标仍要放行给统一路由，否则点行永远收不到事件。
     const panel = this.#settingsPanel;
@@ -1572,6 +1706,8 @@ export class TuiApp implements TuiInteraction {
   }
 
   #insert(text: string): void {
+    // 敲下第一个字符就让开屏退场：不需要额外按键，也没有"跳过"。
+    this.#beginSplashExit();
     const chars = Array.from(this.#input);
     chars.splice(this.#cursor, 0, ...Array.from(text));
     this.#input = chars.join("");
@@ -4063,22 +4199,34 @@ export class TuiApp implements TuiInteraction {
       height - 2 - (inputPlan.boxHeight - 1) - todoPanel.length - baseThinking,
     );
     const body = this.#composeBody(width, bodyHeight, scrollHeight);
+    // 开屏期间照常跑一遍正文布局（滚动上限、命中区、条目缓存都靠它保持一致），
+    // 只是最后不画它：开屏盖在正文区上，消息列表等退场后再出现。
+    const splashBody = this.#composeSplash(width, bodyHeight);
+    if (splashBody !== undefined) {
+      // 这一帧不画正文，它的可点区域当然也不该生效 —— 否则点在开屏上会
+      // 弹出某条看不见的消息的菜单。
+      this.#toolHits = [];
+      this.#messageHits = [];
+      this.#reasoningHits = [];
+    }
     const scrollbarViewportHeight = Math.max(1, bodyHeight - this.#bodyContentOffset);
-    this.#scrollbar = this.#viewState.historyOpen
-      ? undefined
-      : createScrollbarMetrics({
-          trackTop: 2 + this.#bodyContentOffset,
-          trackHeight: scrollbarViewportHeight,
-          trackColumn: width,
-          totalLines: this.#layout.totalLines,
-          viewportHeight: scrollbarViewportHeight,
-          scrollOffset: this.#viewState.scrollOffset,
-          maxOffset: maxScrollOffset(this.#layout.totalLines, this.#scrollHeight),
-        });
+    this.#scrollbar =
+      splashBody !== undefined || this.#viewState.historyOpen
+        ? undefined
+        : createScrollbarMetrics({
+            trackTop: 2 + this.#bodyContentOffset,
+            trackHeight: scrollbarViewportHeight,
+            trackColumn: width,
+            totalLines: this.#layout.totalLines,
+            viewportHeight: scrollbarViewportHeight,
+            scrollOffset: this.#viewState.scrollOffset,
+            maxOffset: maxScrollOffset(this.#layout.totalLines, this.#scrollHeight),
+          });
     const bodyView =
-      this.#scrollbar === undefined
+      splashBody ??
+      (this.#scrollbar === undefined
         ? body
-        : composeScrollbar(body, width, this.#scrollbar, 2);
+        : composeScrollbar(body, width, this.#scrollbar, 2));
 
     if (dialogRows > 0) {
       // 0-based 屏幕行号；鼠标命中与 ask_user 点击都用它换算。

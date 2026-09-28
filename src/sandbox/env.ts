@@ -12,8 +12,8 @@
  * 新增一个我们没见过的名字。白名单则相反：默认不给，要什么显式加。
  */
 
-/** 沙箱内默认保留的环境变量。 */
-const ALLOWLIST: readonly RegExp[] = [
+/** 沙箱内默认保留的环境变量（跨平台）。 */
+const BASE_ALLOWLIST: readonly RegExp[] = [
   /^PATH$/, // 没有它什么都跑不起来
   /^HOME$/, // 很多工具会读；沙箱里它是只读的
   /^USER$/,
@@ -27,6 +27,37 @@ const ALLOWLIST: readonly RegExp[] = [
   /^LC_.*$/,
   /^TMPDIR$/,
   /^HOSTNAME$/,
+];
+
+/**
+ * Windows 上额外保留的环境变量。
+ *
+ * 为什么不能只留 PATH：Windows 补全命令名靠的是**按 PATHEXT 列出的扩展名**去
+ * 试，而不是"从 PATH 里找一个同名文件"。PATHEXT 不在子进程环境里时，
+ * PowerShell 会把它退化成一个只有 `.CPL` 的兜底值，于是 `git` / `node` /
+ * `bun` 这类不带扩展名的命令名**全部**解析失败 —— 连写全路径的
+ * `C:\Windows\System32\reg.exe` 都会被当成"文档"拒绝执行。报错看着像沙箱把
+ * 命令拦了，其实是环境变量被过滤掉了。
+ *
+ * 其余几个是 Windows 自己的地基：缺 SystemRoot/ComSpec 的程序行为会飘，
+ * 缺 TEMP/TMP 的工具找不到临时目录，缺 PSModulePath 的 pwsh 加载不了模块。
+ * 这些全是**系统路径**、不含凭据，放行不破坏"默认不给"的初衷。
+ */
+const WINDOWS_ALLOWLIST: readonly RegExp[] = [
+  /^PATHEXT$/,
+  /^COMSPEC$/,
+  /^SYSTEMROOT$/,
+  /^WINDIR$/,
+  /^SYSTEMDRIVE$/,
+  /^USERPROFILE$/,
+  /^APPDATA$/,
+  /^LOCALAPPDATA$/,
+  /^PROGRAMDATA$/,
+  /^PROGRAMFILES$/,
+  /^PROGRAMFILES\(X86\)$/,
+  /^TEMP$/,
+  /^TMP$/,
+  /^PSMODULEPATH$/,
 ];
 
 export interface SanitizeEnvOptions {
@@ -46,21 +77,30 @@ export interface SanitizedEnv {
  * 过滤出沙箱可用的环境变量。
  *
  * 注意 `extra` 里的键**总是**放行 —— 那是调用方显式指定的。
+ *
+ * `platform` 可注入，便于在 Linux 上单测 Windows 那一支的行为。
  */
 export function sanitizeEnv(
   source: Record<string, string | undefined>,
   options: SanitizeEnvOptions = {},
+  platform: NodeJS.Platform = process.platform,
 ): SanitizedEnv {
-  const explicit = new Set(options.allow ?? []);
-  const extraKeys = new Set(Object.keys(options.extra ?? {}));
+  const windows = platform === "win32";
+  const allowlist = windows ? [...BASE_ALLOWLIST, ...WINDOWS_ALLOWLIST] : BASE_ALLOWLIST;
+  // Windows 的环境变量名大小写不敏感（`Path` 与 `PATH` 是同一个东西），
+  // 白名单和 `pass_env` 都得按这个语义比对。
+  const normalize = (name: string): string => (windows ? name.toUpperCase() : name);
+  const explicit = new Set((options.allow ?? []).map(normalize));
+  const extraKeys = new Set(Object.keys(options.extra ?? {}).map(normalize));
   const env: Record<string, string> = {};
   const stripped: string[] = [];
 
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
-    if (extraKeys.has(key)) continue; // 交给下面的 extra 覆盖
+    const name = normalize(key);
+    if (extraKeys.has(name)) continue; // 交给下面的 extra 覆盖
 
-    if (ALLOWLIST.some((pattern) => pattern.test(key)) || explicit.has(key)) {
+    if (allowlist.some((pattern) => pattern.test(name)) || explicit.has(name)) {
       env[key] = value;
     } else {
       stripped.push(key);

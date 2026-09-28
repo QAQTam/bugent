@@ -1037,9 +1037,11 @@ describe("TUI PTY 冒烟", () => {
 
       try {
         await waitFor(() => output, (text) => strip(text).includes("已就绪"));
+        // 开屏动画先盖住正文区，横幅要等它退场才画出来 —— 敲一下让它退场。
+        terminal.write(" ");
         // 横幅里的行内代码（provider id 等）改用浅色字色 124，而不是深色 215；
         // 行内代码不再铺底色
-        expect(output).toContain("\x1b[38;5;124m");
+        await waitFor(() => output, (text) => text.includes("\x1b[38;5;124m"));
         expect(output).not.toContain("\x1b[38;5;215m");
         expect(output).not.toContain("\x1b[48;5;");
         // 已经有线索了，就不该再发查询

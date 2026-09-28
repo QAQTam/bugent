@@ -112,7 +112,12 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     enabled = false;
     note = "使用自定义执行层";
   } else if (!isSandboxAvailable()) {
-    runner = createShellRunner();
+    // 没有 bwrap 不等于不过滤环境变量 —— `createShellRunner` 的白名单和沙箱
+    // 那条路径是同一个，所以 `pass_env` 在这里同样必须接上，否则用户唯一的
+    // 逃生口（比如 Windows 上要放行 PATHEXT）在这条路径上完全失效。
+    runner = createShellRunner(undefined, {
+      ...(options.passEnv !== undefined ? { passEnv: options.passEnv } : {}),
+    });
     enabled = false;
     bashNeedsPerRunApproval = true;
     // 说清楚"档位还在、但只是工具层门控"：没有 bwrap 时子进程没有内核级隔离，

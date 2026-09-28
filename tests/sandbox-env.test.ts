@@ -64,6 +64,60 @@ describe("沙箱环境变量过滤（白名单）", () => {
   });
 });
 
+describe("沙箱环境变量过滤（Windows 白名单，platform 可注入）", () => {
+  test("PATHEXT 与系统路径放行，凭据仍然剔除", () => {
+    const { env, stripped } = sanitizeEnv(
+      {
+        PATH: "C:\\Windows\\system32",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        SystemRoot: "C:\\Windows",
+        ComSpec: "C:\\Windows\\system32\\cmd.exe",
+        TEMP: "C:\\Temp",
+        PSModulePath: "C:\\modules",
+        APPDATA: "C:\\Users\\u\\AppData\\Roaming",
+        OPENAI_API_KEY: "sk-x",
+        AWS_SECRET_ACCESS_KEY: "aws",
+      },
+      {},
+      "win32",
+    );
+
+    // 少了 PATHEXT，pwsh 会把命令名补全退化成只剩 `.CPL`，`git`/`node` 全解析不到。
+    expect(env.PATHEXT).toBe(".COM;.EXE;.BAT;.CMD");
+    expect(env.SystemRoot).toBe("C:\\Windows");
+    expect(env.ComSpec).toBe("C:\\Windows\\system32\\cmd.exe");
+    expect(env.TEMP).toBe("C:\\Temp");
+    expect(env.PSModulePath).toBe("C:\\modules");
+    expect(env.APPDATA).toBe("C:\\Users\\u\\AppData\\Roaming");
+
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(stripped).toContain("OPENAI_API_KEY");
+    expect(stripped).toContain("AWS_SECRET_ACCESS_KEY");
+  });
+
+  test("变量名大小写不敏感（Path / pathext 同样认）", () => {
+    const { env } = sanitizeEnv({ Path: "C:\\x", pathext: ".EXE" }, {}, "win32");
+    expect(env.Path).toBe("C:\\x");
+    expect(env.pathext).toBe(".EXE");
+  });
+
+  test("pass_env 在 Windows 上也大小写不敏感", () => {
+    const { env } = sanitizeEnv({ MY_TOKEN: "x" }, { allow: ["my_token"] }, "win32");
+    expect(env.MY_TOKEN).toBe("x");
+  });
+
+  test("POSIX 上 PATHEXT 依然被剔除（Linux 行为不变）", () => {
+    const { env, stripped } = sanitizeEnv(
+      { PATH: "/usr/bin", PATHEXT: ".EXE", SystemRoot: "C:\\Windows" },
+      {},
+      "linux",
+    );
+
+    expect(Object.keys(env)).toEqual(["PATH"]);
+    expect(stripped).toContain("PATHEXT");
+  });
+});
+
 describe("沙箱环境变量过滤（真实子进程）", () => {
   const runOptions = (command: string) => ({
     command,
@@ -92,6 +146,23 @@ describe("沙箱环境变量过滤（真实子进程）", () => {
     const runner = createShellRunner();
     const result = await runner.run(runOptions('echo "[${PATH:+ok}]"'));
     expect(result.stdout.trim()).toBe("[ok]");
+  });
+
+  // 无 bwrap 的路径（Windows 就是这条）以前把 passEnv 丢了 —— 于是配置里的
+  // `sandbox.pass_env` 完全失效，用户没有别的办法放行 PATHEXT 之类的变量。
+  test.skipIf(process.platform === "win32")("无沙箱 runner 也认 passEnv", async () => {
+    const previous = process.env.BUGENT_PASS_PROBE;
+    process.env.BUGENT_PASS_PROBE = "visible-now";
+
+    try {
+      const runner = createShellRunner(undefined, { passEnv: ["BUGENT_PASS_PROBE"] });
+      const result = await runner.run(runOptions('echo "[$BUGENT_PASS_PROBE]"'));
+
+      expect(result.stdout.trim()).toBe("[visible-now]");
+    } finally {
+      if (previous === undefined) delete process.env.BUGENT_PASS_PROBE;
+      else process.env.BUGENT_PASS_PROBE = previous;
+    }
   });
 
   test.skipIf(!sandboxAvailable)("沙箱内读不到 API key，但 PATH 正常", async () => {
