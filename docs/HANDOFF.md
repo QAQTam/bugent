@@ -1,10 +1,175 @@
 # bugent Handoff
 
-> 更新时间：2026-09-26
+> 更新时间：2026-10-09
 > 分支：`master`
 > 功能检查点：`aed6cf9 fix(tui): TAB 统一展开成空格，修掉 read_file 卡片右侧滚动条缺口`
 > 状态：TUI 流式平滑、Lezer Markdown AST、表格行级增量已完成并单独提交；工作区仍有其他同事的 Goal/tools/prompt/agent 改动，禁止一起提交
 > 本轮补充：**权限授权统一**（bash 执行前判定 + 60s 授权窗口 + 弹窗倒计时）已落地、全量回归通过、未提交；上一轮 Goal 预算优化同样未提交
+> 最新一轮：**WebUI 设计落地审计 + 玻璃补强方案（已定稿，源码零改动）**（详见下节）
+> 上一轮：anthropic-messages adapter + wire 配置字段 + provider 退避重试，typecheck 与相关回归通过、未提交
+
+## WebUI 设计落地审计 + 玻璃补强方案（2026-09-29，未动手）
+
+**当前状态：只完成了审计和方案设计，`webui/` 下源码一行未改。** 本节就是为了让下一位（或下一个会话）跳过全部重新调研直接开工。用户已拍板两个前提：
+
+1. **优先级：`docs/webui/addendum-liquid-glass.md`（附录）> `docs/webui/ui-restraint-rules.md`（守则）> `docs/webui/agent-webui-spec.md`（主 spec）**。玻璃标签栏、`liquid-glass-react` 依赖都是合法的，主 spec 里"白色背景为主/禁大面积 backdrop-filter/禁新增大型依赖"相关条款被附录 §1 显式覆盖。
+2. 审计发现的问题清单成立，交给我方"继续补强"。
+
+### 审计结论（三个子代理并行核对，证据到 file:line）
+
+- 主 spec 落地率约 65%。骨架真实：token 体系、虚拟列表、rAF 批处理、写时克隆 reducer、IME 防误发、工具块全套、Todo 折叠策略、MockTransport 全场景都在。
+- 最严重缺陷：**A 档玻璃（标签滑块）实际是坏的**——库覆盖了传入的 transform（定位错 + 平移动画死）、`saturation=1.15` 被当百分号（≈灰度）、默认 padding 撑大滑块。
+- 其余大头：玻璃白名单 4 处只落地 1 处；降级机制全是死的（`glassEnabled` 无人调用、无 FPS 自动降级、matchMedia 只查一次）；流式 Markdown 性能硬要求未达标（无块切分、代码块流式中每个 delta 重建 Shiki）；rAF 批处理被 `App.tsx` 逐事件 `flushNow()` 旁路；切标签滚动位置只存不恢复；消息流式增长不跟随；消息 hover 操作栏/出现动画/Todo 滑出动画是"备而未用"的半成品；DELIVERY.md 有 3 条不实声明（玻璃分布 5 处实为 2 处、编辑/重新生成按钮"就位"实为只有 CSS 和 i18n 键、i18n 全覆盖实为 toolSummary 硬编码）。
+
+### 液态玻璃库事实（`webui/node_modules/liquid-glass-react/dist/index.esm.js`，586 行，重新发现成本高，务必先读这段）
+
+1. `LiquidGlass` 渲染 Fragment：2 个影子 div + 主容器 + 2 个 rim 高光 span，**全部**用 `positionStyles = { position: style.position || 'relative', top: style.top || '50%', left: style.left || '50%' }`，并强制 `transform: translate(calc(-50% + dx), calc(-50% + dy)) scale(...)`、`transition: all .2s`——**传入的 transform/transition 一定被覆盖，但 position/top/left/width/height 会透传**。
+2. **正确集成姿势**：外层 wrapper div（我们自己的定位/尺寸/动画 transform）+ 内层 `LiquidGlass` 用默认定位（relative + 50%/50% + 自带 -50% 平移）自居中在 wrapper 里；给库传 `style={{ width: '100%', height: '100%' }}`。平移动画做在 wrapper 上（合规：transform 200ms）。
+3. **同时传 `globalMousePos={{x:0,y:0}}` 和 `mouseOffset={{x:0,y:0}}`**（两个都要，模块级常量）：库的 mousemove 监听 useEffect 直接 early-return（**零监听、零重渲染**），弹性/缩放恒为 scale(1)，rim 渐变静止（光斑跟随关闭，守则 2.3 合规）。
+4. 参数换算（全走 tokens 推导，禁止写死）：`saturation` 是百分数 → 传 `115`（对应 `--glass-saturate: 1.15`）；`blurAmount` → 库公式 `blur((4 + blurAmount*32)px)`，传 `0.4375` 精确命中 `--glass-blur: 18px`；`padding` 必须显式传 `0`（默认 "24px 32px"）；`displacementScale` 传 0 等于没有折射 → 新增 token `--glass-displace`（建议 8px）。
+5. 库内部 `.glass` div 有 inline `boxShadow: 0 12px 40px rgba(0,0,0,0.25)`（比 `--glass-shadow` 重 4 倍）和内容包裹层 inline `font: 500 20px/1 system-ui` + `textShadow`——**必须用 CSS 压回**：`.glass-a .glass { padding: 0 !important; width: 100% !important; height: 100% !important; box-shadow: var(--glass-shadow) !important; }`，按钮文字显式设 `font-family/font-size/text-shadow: none`（继承打不赢 inline）。
+6. `.glass__warp`（真正出霜的层）只有 backdrop-filter **没有 background** → CSS 补 `background: var(--glass-bg)` 才有附录 §5 的材质白。
+7. `cornerRadius` 是 px 数字 prop；库根 div 拿 ref 测 glassSize，width/height 传 style 可行。
+8. **不要给库传 `onClick`**：会追加 3 个 radial-gradient 悬停/按压发光层 + scale(0.96)。真实按钮作为 child 放进去，按压反馈用自己的 `.btn:active { scale 0.97 }`（白名单允许）。
+9. 项目没装 Tailwind，库的 `text-white`/`bg-black`/`opacity-0` 类名全部失效，只有 inline style 生效（影子 div 因此恰好不可见，是运气不是设计）。
+10. Firefox 跳过 `filter: url(#...)` 但 backdrop-filter 仍生效，可接受。
+
+### 设计裁决（附录内部张力，已按"具体白名单 > 通用禁令"裁定，写进 DELIVERY）
+
+| 张力 | 裁决 |
+| --- | --- |
+| §3.1 白名单同时点名"B 档标签栏整体"和"A 档选中滑块"，但 §3.2 禁玻璃叠玻璃 | 两者都保留（白名单是具体意图，禁令针对意外嵌套）；滑块在栏上呈更白一层的"选中"效果，正是 macOS 观感。DELIVERY 里记录该解释 |
+| §3.1 A 档点名滑块，§8 又要求"A 档尺寸固定" | **滑块改固定尺寸 120×30**，滑动居中对齐选中标签（`x = tab.offsetLeft + tab.offsetWidth/2 - 60`），不再随标签宽度变化——两条同时满足 |
+| 附录 B 档点名"输入框整体（含其上方 Todo 面板的容器）" | **Todo 面板 + Composer 用同一个 B 档玻璃包住**（`dock-inner` 外套一层 `GlassSurface tier=B strength=strong radius=lg`）。只有这样预算才算得平：tabbar(B) + dock(B) + 滑块(A) + 回到底部(A) = A2+B2 = 4 ≤ 4 |
+| 附录 B 档点名"权限确认卡片浮层"，但权限卡现在是消息流内联卡 | **权限卡保持实底不做玻璃**。内联卡属于消息内容区（§3.2 禁区），白名单只覆盖"浮层"形态；改浮层是大重构且会把预算顶到 5。DELIVERY 记录 |
+| 主 spec §8.1 空状态建议卡片 vs 守则 2.5 明确禁止 | 守则赢，维持"一行淡提示"现状 |
+| 主 spec §2 新建/关闭标签宽度动画 vs 守则"动画只用 transform/opacity" | 不做宽度动画（FLIP 复杂度不值），DELIVERY 记账 |
+
+### 文件级改造清单（按此顺序动手）
+
+1. **`src/tokens/tokens.css`**：新增 `--glass-displace: 8px`；删 `--dur-page`（确认无引用）；`--glass-highlight` 保留（附录点名，当前 B 档"边框+阴影"两件套未用它，记账 reserved）。
+2. **`src/store/glass.ts`（新增）**：玻璃状态模块。`{ level: 'full'|'noA'|'off', solid: boolean }` + `useSyncExternalStore`；`setGlassEnabled(v)`（附录 §6.2 全局开关，off = 全实底）；`initGlassMedia()` 给 `prefers-reduced-transparency`/`prefers-contrast: more` 挂 `change` 监听（修"只在 mount 查一次"）。
+3. **`src/lib/glass-perf.ts`（新增）**：rAF 帧率监控单例；刷新率估计 = 观测到的持续 fps 上限；fps 连续 2s < 刷新率×80% → level 步降 `full→noA→off`（单向，面板手动复位）；`A→B` = GlassSurface 里 tier A 在 `level!=='full'` 时走 B 渲染路径。`process.env.NODE_ENV === 'test'` 时是 no-op（happy-dom 会误触发）。
+4. **`src/components/GlassSurface.tsx`（重写）**：`useGlass()` 响应式降级；props 补 `interactive: boolean`（附录 §6.2 点名）；A 档按上面"库事实 2/3/4/5/6"重写集成，外包 `.glass-a` wrapper + `data-tier="A"`；B 档输出加 `glass-surface` 类名（让 `app.css:278` 的死媒体查询活过来）；降级实底路径不变。
+5. **`src/components/tabs/TabBar.tsx`（重写）**：滑块 wrapper（fixed 120×30、`useLayoutEffect` + ResizeObserver 测位、wrapper transform 200ms）；「+」按钮移出 `.tabs` 固定右缘；`onWheel` 把 deltaY 转 scrollLeft（不 preventDefault，React 根上 wheel 是 passive）；左右边缘渐隐（onScroll 维护 canLeft/canRight → `data-fade-*` + CSS mask）；HTML5 拖拽排序（dragstart/dragover/drop + store `reorder(dragId, overId)` 新 action）；roving tabindex + ArrowLeft/Right/Home/End 键盘切标签（selection follows focus）；**删掉标签点的 breathe 动画**（running = 静态 accent 点，守则 2.3"同屏持续动画 ≤1"）。
+6. **`src/app/App.tsx`**：删逐事件 `flushNow()`（测试自己会调，`ingest` 的 delta 本来就走 rAF）；`useEffect` 里 `initGlassMedia()` + `startGlassPerf()`；dock 包玻璃；notice 加「重试」按钮（重发末条用户消息）；处理 `webui:regenerate` / `webui:edit` window 事件（沿用 `webui:approve` 模式：regenerate = 末条用户消息重新 send，edit = setDraft + focus composer）；Ctrl/Cmd+K 最小命令面板（新建/关闭/切换标签）；`<ErrorBoundary>` 包 MessageList；Composer 加 `key={session.id}`；桌面通知：仅当 `Notification.permission === 'granted'` 且 `document.hidden` 时 turn 收尾通知，**绝不主动要权限**（守则 7：拿不准不加）；FpsPanel 用 `import.meta.env.DEV` 门控。
+7. **`src/components/messages/MessageList.tsx`**：滚动恢复 = `useVirtualizer({ initialOffset: session.scrollTop })` + mount effect 设 `el.scrollTop`；流式跟随 = effect 依赖从 `messages.length` 改为内容签名（末条消息 blocks 文本总长），否则同一条消息增长不滚；「回到底部」改 A 档玻璃（fixed 100×32，见库事实 5/8）；消息出现动画 = `prevIds` ref（mount 时初始化为现有 id 集，render 中 diff 出新 id，effect 后补登记——StrictMode 安全），enter 类加在**内层 `.msg-shell` wrapper**（不能加在 vitem 上，会和虚拟列表的 translateY 打架）；`.scroller` 加 `role="log"`。
+8. **`src/lib/md-blocks.ts`（新增）+ `src/components/markdown/Markdown.tsx`（重写）**：`splitMarkdownBlocks()`——围栏感知（``` / ~~~ 开闭配对）顶层块切分 + **列表宽松项合并**（空行后仍是 list item 就并回同块，否则 `<ol>` 断开会重置编号，这是正确性问题不是优化）+ 引用块同理合并；每块 `<MdBlock>` memo，key = `${index}:${djb2hash}`；`StreamingContext` 传给 CodeRenderer。**Shiki 单例**：模块级 `createHighlighter({ langs: [] })` 一个 Promise + `loadLanguage` 按需 + 高亮结果 Map 缓存（上限 200 条）；`streaming` 上下文为 true 时纯文本 `<pre>`，message_end 后才高亮（主 spec §3.2 第 6 条，当前行为正好相反）。
+9. **`src/components/tools/ToolBlock.tsx`**：工具输出 12 行钳制（`.tool-out` max-height + 测量 overflow 才显示「展开全部」按钮，zh.expandAll）；`pending` 权限等待图标从转圈 Loader2 改静态 `Hand`（唯一持续动画让位给 running spinner）；分组头 spinner 只在 body 折叠时转（展开时让位给组内工具行，保住同屏唯一）；hover 操作栏接线：助手消息 = 复制/重新生成，用户消息 = 复制/编辑（CSS `.msg-hover-bar` 已有，只差 JSX）；`toolSummary` 动词改走 i18n。
+10. **`src/components/todo/TodoPanel.tsx`**：两阶段挂载让 0fr→1fr 真正播放（todos 出现 → 内容挂载 → 双 rAF 后 `data-visible=true`；消失 → `data-visible=false` + `onTransitionEnd` 后卸内容）；当前 in_progress 项 `scrollIntoView({block:'nearest'})`；in_progress 图标静态 accent 圆点（去 Loader2 spin）。
+11. **`src/app/App.tsx` 布局 + `src/app.css`**：dock 玻璃（`.dock-glass`，`:focus-within` 边框变 accent）；`.composer` 去自己的背景/边框/阴影（玻璃层承担）；标签文字全部 `var(--text-primary)`（选中 weight 500 / 未选 400，修玻璃上对比度，附录 §5"玻璃上文字用主文字色"）；`.glass-surface` 加 `contain: paint`；reduced-motion 重写：`transition-property: opacity !important`（保淡入淡出）+ `animation-iteration-count: 1` + 媒体查询内**重定义** `msg-in`/`pop-in` 为纯 opacity keyframes（当前 0.01ms 全杀连淡入都没了）；`999px` 胶囊改 radius token；A 档相关新 CSS（`.glass-a .glass` 压库默认样式等）。
+12. **`src/i18n/zh.ts`**：加 `actRun/actRead/actEdit/actSearch`；删 `tabRename`（无触发条件，守则四.7）；`retry/regenerate/edit/expandAll` 全部接上。
+13. **`src/components/composer/Composer.tsx`**：粘贴/拖拽图片缩略卡（onPaste/onDrop files、objectURL 缩略、× 移除、send 带 `attachments`——transport 签名已支持 `attachments?: File[]`，纯 UI 先行）。
+14. **`src/app/ErrorBoundary.tsx`（新增）+ `src/components/CommandPalette.tsx`（新增）**：都是最小实现。
+15. **`src/store/sessions.ts` 拆分**：reducer + VM 类型移到 `store/reducer.ts`（406 行超 300 约束，且本轮还要加 `reorder`）；**记得同步改 `test/reducer.test.ts` 的 import**。
+16. **测试**：`cd webui && bun test` 现状 17 pass 全绿是基线；新增 splitMarkdownBlocks 用例（含 ol 不断号、围栏内空行不切）、glass store 降级用例、reorder reducer 用例；ui.test 里标签结构变化（+ 按钮移位、玻璃类名）需要跟着改。
+17. **`docs/webui/DELIVERY.md` 修正**：3 条不实声明改为实况（或补齐实现后改回）；按附录 §9 补"库核实结果 / 性能实测 / 我加了但附录没写的东西"清单（自加项：`--glass-displace` token、A 档 blur 由 `--glass-blur` 反推库参数、固定尺寸滑块 120×30、回到底部 100×32、玻璃叠玻璃解释、权限卡保持实底的理由）。
+
+### 明确不做（守则 7：拿不准不加，DELIVERY 里向用户交底）
+
+权限卡玻璃化（禁区+预算）、标签宽度动画、空状态建议卡片（守则 2.5 禁止）、IndexedDB 持久化（挂账）、数学公式预留扩展点、主动申请通知权限。
+
+### 验证方式
+
+```bash
+cd webui && bun test          # 基线 17 pass / 0 fail
+cd webui && bun run typecheck
+cd webui && bun run build     # 注意 shiki 单例后 bundle 变化
+bun run src/entry-webui.ts --mock   # 浏览器冒烟：滑块对齐/平移动画、玻璃降级（系统设置）、Ctrl+Shift+P 面板
+```
+
+附录 §8 要求的三个实测场景（流式+滚动穿玻璃、快速切标签、Todo 展开同时流式）下一位在真机上跑 FpsPanel 记录，写回 DELIVERY。
+
+---
+
+## provider 层三件事：messages adapter / wire 字段 / 退避重试（2026-10-09）
+
+本轮在 provider 层做了三件相互衔接的事，全部未提交。
+
+### 1. `anthropic-messages` adapter（已实现）
+
+对接 Anthropic `/v1/messages` 及兼容实现。`registry.ts` 的占位 throw 已替换，
+`config/toml.ts` / `provider-profiles.ts` 校验表此前已接受该 endpoint，配置层零改动。
+
+- **wire 映射**（`toWireRequest`）：`system`/`developer` → 顶层 `system` 数组；
+  `role:"tool"` → user 消息里的 `tool_result` block，**连续多条合并进一条 user 消息**
+  （API 要求 user/assistant 严格交替）；assistant `toolCalls` → `tool_use` block；
+  image → base64 source block；空文本块丢弃（空 content 会被拒）。
+- **请求**：`x-api-key` + `anthropic-version: 2023-06-01`；`max_tokens` 必填，兜底 8192。
+- **SSE**（`mapStreamEvent`）：`message_start`（输入侧 usage + `cache_read_input_tokens`→cached）
+  → `content_block_delta`（`text_delta`/`thinking_delta`→reasoning/`input_json_delta` 按 index 拼 argsDelta）
+  → `message_delta`（输出侧 usage + stop_reason）；流内 `error` 事件直接抛错；
+  stop_reason：`tool_use→tool_calls`、`max_tokens→length`、其余→stop。
+- **reasoning 回放**：默认 `none` 不回放（官方对带 tool use 的 thinking block 校验
+  signature，回放缺签名历史会被 400）；显式开启才以 thinking block 回放，只适合兼容网关。
+- **公共底座抽取**：SSE 行解析 / proxy+tls 请求扩展 / 回环直连处理从 openai-chat
+  上移到 **`src/provider/adapters/http.ts`**，openai-chat 改为复用，导出接口不变
+  （`ProviderProxy`/`ProviderTlsConfig` 仍从 openai-chat re-export）。
+- 待实现：`openai-responses`（含 freeform custom tool 的首次兑现）。
+
+### 2. config 新增 `wire` 字段（中性命名，`endpoint` 兼容）
+
+用户诉求：config 不再以 `openai-chat` 这类厂商前缀命名 wire，以免误导用户。
+
+- `src/provider/registry.ts` 新增 `WIRE_ALIASES` + `parseWire()`：
+  `chat→openai-chat`、`messages→anthropic-messages`、`responses→openai-responses`、`mock→mock`；
+  旧全名写法继续接受。内部 `EndpointKind` 不变（adapter 标识 / session 落库 / `ModelClient.id`）。
+- `config/toml.ts`：`wire = "messages"` 写法生效；`wire` 与 `endpoint` 同时出现**直接报错**
+  （不做静默优先级）；缺省仍 `openai-chat`；首次生成的配置模板已改为 `wire = "chat"`。
+- `provider-profiles.ts`：导入收 `wire` 或 `endpoint`（互斥）；**导出继续写 `endpoint`**
+  （旧二进制读 profile 不破坏）。
+- TUI 新增 provider 对话框改为四选 wire；`bugent.config.example.ts` 加了 Anthropic 示例。
+- TS 配置（`bugent.config.ts`）走带类型检查的 `ProviderConfig`，保持 `endpoint` 全名。
+- 之后的 wire 字段沿用中性命名原则（如 `prompt_cache`、`thinking_budget`），不带厂商前缀。
+
+### 3. provider 退避重试（**临时机制**，标注了"临时"）
+
+schedule：T+5s / T+10s / T+30s / T+60s / T+90s，共 5 次，每次用 loop 重建的**最新上下文**重发。
+
+- **`src/provider/retry.ts`（新增）**：`RETRY_DELAYS_MS`（可变数组，测试临时改写）、
+  `isRetryableProviderError`（429/500/502/503/504/529/限流/过载/retry 关键词，基于错误消息文本）、
+  `parseRetryAfterMs`（错误消息里的 `(retry-after: N)`）、`retryDelayMs` = max(调度值, Retry-After)、
+  `sleepWithSignal`（中止时抛 AbortError，与 fetch 中断一致）。
+- **loop 集成**（`core/loop.ts` catch 分支）：只在**尚未产出任何内容**
+  （text/reasoning/tool_call 全空）时重试 —— 已流出内容再重发会重复；
+  429/过载几乎都发生在请求建立阶段，覆盖主场景。`continue` 回到 for(;;) 顶部走 `buildContext()`。
+  新增可选 hook `onProviderRetry({attempt,total,delayMs,error})`，`combineHooks` 已广播。
+- **两个 adapter** 抛 HTTP 错误时把 `retry-after` 响应头拼进错误消息，供解析。
+- **TUI**：`AgentActivity` 增 `retrying` 态；菊花亮绿/暗绿交替（theme 新增
+  `retrySpinner`/`retrySpinnerDim`），文本 `重试中：N/M`；`onProviderRetry` 把错误滚过
+  思考 tail + 实时区 `pushError`；onText/onReasoning 到达即恢复 working。
+  **webui bridge 不渲染 retry 态**（hook 可选，不影响），重试本身全端生效。
+- 判定基于错误文本是临时的 —— 转正时应把错误结构化（状态码/Retry-After 进错误对象）。
+- mid-stream 已产出内容时的失败仍直接抛错，走既有 disconnected 展示。
+
+### 本轮验证
+
+- `bun run typecheck` 通过。
+- `tests/anthropic-messages.test.ts`（15 例，含 Bun.serve 回放端到端）、
+  `tests/retry.test.ts`（7 例）、config/profiles 的 wire 用例全过。
+- 相关 14 个测试文件 152 pass / 0 fail。全量 `bun test` 的 129 个失败
+  （沙箱/PTY/symlink）与 store 审计、runtime 隔离两例均已在**干净树上复现**，属
+  Windows 环境限制与存量问题，与本轮改动无关。
+
+### 涉及模块
+
+```text
+src/provider/retry.ts                      退避重试判定/延时/sleep（新增，临时机制）
+src/provider/adapters/http.ts              SSE/代理/TLS 公共底座（从 openai-chat 上移）
+src/provider/adapters/anthropic-messages.ts  Anthropic /v1/messages adapter（新增）
+src/provider/adapters/openai-chat.ts       复用 http.ts；错误消息附 retry-after
+src/provider/registry.ts                   anthropic-messages factory；WIRE_ALIASES/parseWire
+src/core/loop.ts                           退避重试接入；onProviderRetry hook
+src/core/provider-profiles.ts              profile 导入兼容 wire
+src/config/toml.ts                         wire 字段 + 生成模板更新
+src/tui/thinking.ts                        retrying 活动态 + 绿色 shimmer
+src/tui/theme.ts                           retrySpinner / retrySpinnerDim
+src/tui/app.ts                             onProviderRetry 接线；对话框 wire 四选
+tests/anthropic-messages.test.ts           15 例（新增）
+tests/retry.test.ts                        7 例（新增）
+tests/config.test.ts / provider-profiles.test.ts  wire 用例
+```
+
 
 ## 权限授权统一（2026-09-26）
 

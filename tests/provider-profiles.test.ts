@@ -203,4 +203,53 @@ describe("provider profile export/import", () => {
       ),
     ).toThrow("不支持的 provider profile version");
   });
+
+  test("导入接受 wire 简称；与 endpoint 互斥；非法值报错", () => {
+    const store = makeStore();
+    importProviderProfiles(
+      store,
+      "s1",
+      document([{ id: "local", endpoint: "mock" }]),
+      { conflict: "overwrite" },
+    );
+
+    // wire 简称导入后落库为内部全名
+    importProviderProfiles(
+      store,
+      "s1",
+      parseProviderProfiles(
+        JSON.stringify({
+          schema: PROVIDER_PROFILE_SCHEMA,
+          version: 1,
+          exportedAt: "x",
+          providers: [{ id: "p1", wire: "messages" }, { id: "p2", wire: "chat" }],
+        }),
+      ),
+      { conflict: "overwrite" },
+    );
+    expect(store.getProviderConfig("s1", "p1")?.endpoint).toBe("anthropic-messages");
+    expect(store.getProviderConfig("s1", "p2")?.endpoint).toBe("openai-chat");
+
+    expect(() =>
+      parseProviderProfiles(
+        JSON.stringify({
+          schema: PROVIDER_PROFILE_SCHEMA,
+          version: 1,
+          exportedAt: "x",
+          providers: [{ id: "x", wire: "chat", endpoint: "openai-chat" }],
+        }),
+      ),
+    ).toThrow("二选一");
+
+    expect(() =>
+      parseProviderProfiles(
+        JSON.stringify({
+          schema: PROVIDER_PROFILE_SCHEMA,
+          version: 1,
+          exportedAt: "x",
+          providers: [{ id: "x", wire: "grpc" }],
+        }),
+      ),
+    ).toThrow("不合法");
+  });
 });

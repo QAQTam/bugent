@@ -54,12 +54,18 @@ export const THINKING_FRAMES = ["✻", "✽", "✶", "✳", "✢"] as const;
 export type AgentActivity =
   | { state: "idle" }
   | { state: "working" }
+  | {
+      /** provider 退避重试中（临时机制）：绿色 shimmer + 重试进度。 */
+      state: "retrying";
+      attempt: number;
+      total: number;
+    }
   | { state: "disconnected"; detail?: string }
   | { state: "aborted" };
 
 /** 菊花是否需要继续转动。 */
 export function isSpinningActivity(activity: AgentActivity): boolean {
-  return activity.state === "working";
+  return activity.state === "working" || activity.state === "retrying";
 }
 
 export class ThinkingBuffer {
@@ -121,8 +127,8 @@ export function tailToWidth(text: string, width: number): { text: string; trunca
   return { text: chars.slice(start).join(""), truncated: start > 0 };
 }
 
-/** 菊花配色：转起来是青色，静止是灰色。 */
-type SpinnerTone = "working" | "idle" | "warn" | "error";
+/** 菊花配色：转起来是青色，重试是绿色 shimmer，静止是灰色。 */
+type SpinnerTone = "working" | "idle" | "warn" | "error" | "retry";
 
 /**
  * 生成预留区。
@@ -169,6 +175,17 @@ export function composeThinkingBlock(
     return lines;
   }
 
+  if (activity.state === "retrying") {
+    lines[lineIndex] = renderSpinnerLine({
+      width,
+      frame,
+      frameIndex,
+      text: `重试中：${activity.attempt}/${activity.total}`,
+      tone: "retry",
+    });
+    return lines;
+  }
+
   lines[lineIndex] = renderSpinnerLine({
     width,
     frame,
@@ -191,11 +208,16 @@ function renderSpinnerLine(options: {
       ? COLOR.error
       : options.tone === "warn"
         ? COLOR.warn
-        : options.tone === "idle"
-          ? COLOR.spinnerIdle
-          : options.frameIndex % 2 === 0
-            ? COLOR.reasoningSpinner
-            : COLOR.reasoningSpinnerDim;
+        : options.tone === "retry"
+          ? // 重试的绿色 shimmer：亮绿 / 暗绿交替（复用 working 的帧节奏）
+            options.frameIndex % 2 === 0
+            ? COLOR.retrySpinner
+            : COLOR.retrySpinnerDim
+          : options.tone === "idle"
+            ? COLOR.spinnerIdle
+            : options.frameIndex % 2 === 0
+              ? COLOR.reasoningSpinner
+              : COLOR.reasoningSpinnerDim;
   // 空闲是安静的状态：只有灰，不加粗。
   const bold = options.tone === "idle" ? "" : BOLD;
   const spinner = `${bold}${fg(spinnerColor)}${options.frame}${RESET}`;
@@ -212,6 +234,8 @@ function renderSpinnerLine(options: {
       ? COLOR.error
       : options.tone === "warn"
         ? COLOR.warn
-        : COLOR.reasoning;
+        : options.tone === "retry"
+          ? COLOR.retrySpinner
+          : COLOR.reasoning;
   return `${spinner} ${fg(bodyColor)}${prefix}${text}${RESET}`;
 }

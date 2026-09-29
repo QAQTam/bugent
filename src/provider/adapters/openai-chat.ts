@@ -15,24 +15,18 @@ import type {
 } from "../types.ts";
 import { messageText } from "../types.ts";
 import { stripAnsi } from "../../util/sanitize.ts";
-import { readFileSync } from "node:fs";
+import {
+  ensureLoopbackNoProxy,
+  isLoopbackHost,
+  readLines,
+  resolveTlsConfig,
+  type FetchInit,
+  type ProviderProxy,
+  type ProviderTlsConfig,
+} from "./http.ts";
 
-export type ProviderProxy = string | false;
-
-export interface ProviderTlsConfig {
-  rejectUnauthorized?: boolean;
-  ca?: string;
-  cert?: string;
-  key?: string;
-  passphrase?: string;
-  serverName?: string;
-  /** 从文件读取 CA；用于 session profile 的可导出配置。 */
-  caFile?: string;
-  /** 从文件读取客户端证书。 */
-  certFile?: string;
-  /** 从文件读取客户端私钥。 */
-  keyFile?: string;
-}
+// 历史导出：registry 与 session profile 仍从这里 import 这两个类型。
+export type { ProviderProxy, ProviderTlsConfig } from "./http.ts";
 
 export type ReasoningReplay = "none" | "reasoning" | "reasoning_content" | "both";
 
@@ -59,32 +53,6 @@ export interface OpenAIChatOptions {
  * Bun.fetch 支持 `proxy` / `tls` 扩展，但当前安装的 @types/bun 1.4.2
  * 还没把 `proxy: false` 写进 RequestInit；用交叉类型保留类型检查。
  */
-type FetchInit = RequestInit & {
-  proxy?: ProviderProxy;
-  tls?: ProviderTlsConfig;
-};
-
-function isLoopbackHost(hostname: string): boolean {
-  const host = hostname.toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-}
-
-/**
- * Bun 1.4.2 实测：即使 fetch 传了 `proxy: false`，HTTP_PROXY 仍可能生效；
- * `NO_PROXY` 才是可靠的绕过方式。对本地 endpoint 自动补齐回环地址，
- * 避免开发机上的全局代理把 127.0.0.1:8787 也劫走。
- */
-function ensureLoopbackNoProxy(): void {
-  const current = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
-  const entries = current
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-  for (const host of ["127.0.0.1", "localhost", "::1"]) {
-    if (!entries.includes(host)) entries.push(host);
-  }
-  process.env.NO_PROXY = entries.join(",");
-}
 
 /* ------------------------------------------------------------------ */
 /* 归一化 -> wire                                                      */
@@ -160,29 +128,7 @@ export function toWireTools(tools: ToolSchema[]): unknown[] {
 /* ------------------------------------------------------------------ */
 /* SSE 解析                                                            */
 /* ------------------------------------------------------------------ */
-
-async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        yield buffer.slice(0, newline).replace(/\r$/, "");
-        buffer = buffer.slice(newline + 1);
-        newline = buffer.indexOf("\n");
-      }
-    }
-    buffer += decoder.decode();
-    if (buffer.length > 0) yield buffer.replace(/\r$/, "");
-  } finally {
-    reader.releaseLock();
-  }
-}
+// readLines 已上移到 ./http.ts，由各家 adapter 共享。
 
 function mapFinishReason(raw: string | null | undefined): FinishReason {
   switch (raw) {
@@ -327,21 +273,6 @@ export function mapStreamEvent(
 /* ModelClient 实现                                                    */
 /* ------------------------------------------------------------------ */
 
-/**
- * 把可导出的 *File 字段解析成 Bun.fetch 需要的 PEM 字符串。
- * 私钥/CA 内容不会进入 session profile，只保留文件路径。
- */
-function resolveTlsConfig(tls: ProviderTlsConfig | undefined): ProviderTlsConfig | undefined {
-  if (tls === undefined) return undefined;
-  const { caFile, certFile, keyFile, ...rest } = tls;
-  return {
-    ...rest,
-    ...(caFile !== undefined ? { ca: readFileSync(caFile, "utf8") } : {}),
-    ...(certFile !== undefined ? { cert: readFileSync(certFile, "utf8") } : {}),
-    ...(keyFile !== undefined ? { key: readFileSync(keyFile, "utf8") } : {}),
-  };
-}
-
 export function createOpenAIChatClient(model: string, options: OpenAIChatOptions = {}): ModelClient {
   const baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
   const url = `${baseUrl}/chat/completions`;
@@ -388,8 +319,11 @@ export function createOpenAIChatClient(model: string, options: OpenAIChatOptions
       if (!res.ok || res.body === null) {
         const detail = await res.text().catch(() => "");
         // 错误体来自远端服务器，进终端/转写前剥掉转义序列（BUG-027）
+        const retryAfter = res.headers.get("retry-after");
         throw new Error(
-          `openai-chat ${res.status} ${res.statusText}: ${stripAnsi(detail.slice(0, 500))}`,
+          `openai-chat ${res.status} ${res.statusText}: ${stripAnsi(detail.slice(0, 500))}${
+            retryAfter !== null ? ` (retry-after: ${retryAfter})` : ""
+          }`,
         );
       }
 

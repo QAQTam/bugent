@@ -1,0 +1,50 @@
+/* Design tokens —— 全站唯一的变量来源（主 spec §1.1 + Liquid Glass 附加件 §5）。
+   颜色/间距/圆角/阴影/动画全部走变量；首版浅色主题。 */
+:root {
+  /* 颜色 */
+  --bg: #ffffff;
+  --bg-secondary: #f7f7f8;
+  --border: #e8e8eb;
+  --text-primary: #1a1a1c;
+  --text-secondary: #6b6b76;
+  --text-muted: #a0a0ab;
+  --accent: #3b82f6;
+  --success: #16a34a;
+  --warning: #ea580c;
+  --error: #dc2626;
+
+  /* 圆角：全站仅 3 档 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+
+  /* 阴影：仅 2 档，极淡 */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  /* 字体 */
+  --font-sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", monospace;
+  --fs-body: 14px;
+  --fs-secondary: 12.5px;
+  --fs-title: 16px;
+
+  /* 动画（守则：统一曲线，禁止各处自写贝塞尔） */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-micro: 140ms;
+  --dur-expand: 240ms;
+  --dur-page: 320ms;
+
+  /* Liquid Glass 材质（附加件 §5，玻璃样式一律走这些变量） */
+  --glass-bg: rgba(255, 255, 255, 0.62);
+  --glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-highlight: rgba(255, 255, 255, 0.7);
+  --glass-blur: 18px;
+  --glass-saturate: 1.15;
+  --glass-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+
+  /* 布局 */
+  --content-max: 760px;
+  --tabbar-h: 44px;
+}

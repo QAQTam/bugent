@@ -13,6 +13,7 @@ import {
   type ProviderTlsConfig,
   type ReasoningReplay,
 } from "./adapters/openai-chat.ts";
+import { createAnthropicMessagesClient, type AnthropicMessagesOptions } from "./adapters/anthropic-messages.ts";
 import { createMockClient, type MockTurn } from "./adapters/mock.ts";
 
 /** 读一个"正整数"环境变量；缺失 / 非数字 / ≤0 一律当没配。 */
@@ -111,6 +112,34 @@ export type EndpointKind =
   | "anthropic-messages"
   | "mock";
 
+/**
+ * 用户面 wire 简称 -> 内部 adapter 标识。
+ *
+ * config 里用户写的是中性简称（`wire = "messages"`），不带厂商前缀，
+ * 以免误导用户以为只能配 OpenAI / Anthropic 官方端点；内部 adapter 标识
+ * （EndpointKind）保持不变，registry / session 记录 / ModelClient.id 仍用全名。
+ */
+export const WIRE_ALIASES: Readonly<Record<string, EndpointKind>> = {
+  chat: "openai-chat",
+  messages: "anthropic-messages",
+  responses: "openai-responses",
+  mock: "mock",
+};
+
+const ALL_ENDPOINT_KINDS: readonly string[] = Object.values(WIRE_ALIASES);
+
+/**
+ * 解析 wire 配置值：接受中性简称（chat / messages / responses / mock），
+ * 也兼容旧的全名写法（openai-chat / openai-responses / anthropic-messages）。
+ * 不合法时返回 undefined，由调用方报错。
+ */
+export function parseWire(raw: string): EndpointKind | undefined {
+  const wire = raw.trim().toLowerCase();
+  if (wire in WIRE_ALIASES) return WIRE_ALIASES[wire];
+  if (ALL_ENDPOINT_KINDS.includes(wire)) return wire as EndpointKind;
+  return undefined;
+}
+
 export interface ProviderConfig {
   id: string;
   endpoint: EndpointKind;
@@ -174,8 +203,16 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
     throw new Error(`endpoint "openai-responses" 尚未实现（model=${model}）`);
   },
 
-  "anthropic-messages": (_config, model) => {
-    throw new Error(`endpoint "anthropic-messages" 尚未实现（model=${model}）`);
+  "anthropic-messages": (config, model) => {
+    const options: AnthropicMessagesOptions = {};
+    if (config.baseUrl !== undefined) options.baseUrl = config.baseUrl;
+    if (config.apiKey !== undefined) options.apiKey = config.apiKey;
+    if (config.headers !== undefined) options.headers = config.headers;
+    if (config.extraBody !== undefined) options.extraBody = config.extraBody;
+    if (config.proxy !== undefined) options.proxy = config.proxy;
+    if (config.tls !== undefined) options.tls = config.tls;
+    if (config.reasoningReplay !== undefined) options.reasoningReplay = config.reasoningReplay;
+    return createAnthropicMessagesClient(model, options);
   },
 };
 

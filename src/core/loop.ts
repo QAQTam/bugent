@@ -12,6 +12,12 @@ import type {
   Usage,
 } from "../provider/types.ts";
 import { mergeUsage } from "../provider/types.ts";
+import {
+  RETRY_DELAYS_MS,
+  isRetryableProviderError,
+  retryDelayMs,
+  sleepWithSignal,
+} from "../provider/retry.ts";
 import { safeToolCallId } from "../util/id.ts";
 import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
@@ -40,6 +46,13 @@ export interface LoopHooks {
    * 这是有意的：思考内容动辄上万字，留着只会撑爆上下文、拖慢渲染。
    */
   onReasoning?(delta: string): void;
+  /**
+   * provider 请求失败且即将退避重试（临时机制，见 src/provider/retry.ts）。
+   *
+   * `attempt` 从 1 计（1/5..5/5）；`delayMs` 是本次实际等待时长（已含
+   * Retry-After 修正）。错误全文在 `error` 里，由 UI 决定展示位置。
+   */
+  onProviderRetry?(info: { attempt: number; total: number; delayMs: number; error: string }): void;
   onAssistant?(message: StoredMessage): void;
   /**
    * 工具参数流式增量。工具真正开始执行前即可用于临时卡片和进度预览。
@@ -158,6 +171,9 @@ export function combineHooks(...groups: (LoopHooks | undefined)[]): LoopHooks {
     onReasoning: (delta) => {
       for (const group of active) group.onReasoning?.(delta);
     },
+    onProviderRetry: (info) => {
+      for (const group of active) group.onProviderRetry?.(info);
+    },
     onAssistant: (message) => {
       for (const group of active) group.onAssistant?.(message);
     },
@@ -259,6 +275,8 @@ export async function runTurn(
       let reason: FinishReason = "stop";
 
       let fallbackTried = false;
+      /** 已执行的退避重试次数（临时机制，见 src/provider/retry.ts）。 */
+      let retryCount = 0;
       for (;;) {
         session.noteContextSent();
         const request: ChatRequest = {
@@ -334,7 +352,26 @@ export async function runTurn(
             session.extensionRole === "developer" &&
             isDeveloperRoleError(error) &&
             fallbackHandler !== undefined;
-          if (!canFallback || fallbackHandler === undefined) throw error;
+          if (!canFallback || fallbackHandler === undefined) {
+            // 临时退避重试（src/provider/retry.ts）：只在**尚未产出任何内容**
+            // 时进行 —— 一旦已有 text/reasoning/tool_call 流出去，重发会造成
+            // 重复内容。429/过载类错误几乎都发生在请求建立阶段，覆盖主场景。
+            // `continue` 回到 for(;;) 顶部，buildContext() 拿到的是最新上下文。
+            const contentEmitted = text.length > 0 || reasoning.length > 0 || pending.size > 0;
+            if (!contentEmitted && retryCount < RETRY_DELAYS_MS.length && isRetryableProviderError(error)) {
+              const delayMs = retryDelayMs(error, RETRY_DELAYS_MS[retryCount]!);
+              retryCount += 1;
+              hooks.onProviderRetry?.({
+                attempt: retryCount,
+                total: RETRY_DELAYS_MS.length,
+                delayMs,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              await sleepWithSignal(delayMs, signal);
+              continue;
+            }
+            throw error;
+          }
           const approved = await fallbackHandler(error);
           if (!approved) throw error;
           session.setExtensionRole("system");

@@ -1,6 +1,6 @@
 {
   "name": "bugent",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "module": "src/index.ts",
   "devDependencies": {
     "@types/bun": "^1.4.2",
@@ -15,6 +15,9 @@
     "start": "bun run src/index.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit",
+    "bugent:webui": "bun run src/entry-webui.ts",
+    "webui:build": "cd webui && bun run build",
+    "webui:dev": "cd webui && bun run dev",
     "butui": "cd src/butui && bun --conditions=browser run main.tsx",
     "butui:typecheck": "cd ../buTUI && bun --conditions=browser x tsc --noEmit -p ../bugent/src/butui/tsconfig.typecheck.json",
     "build:sandbox": "bun run scripts/build-sandbox.ts",

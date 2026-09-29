@@ -3,7 +3,8 @@ import { parseConfigToml } from "../src/config/toml.ts";
 
 function base(body: string): string {
   return `
-default_model = "openai/test"
+model = "test"
+provider = "openai"
 
 [[providers]]
 id = "openai"

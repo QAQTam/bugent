@@ -46,6 +46,9 @@ export interface Theme {
   reasoningSpinnerDim: string;
   /** 空闲时静止的菊花：只求"在场"，不抢注意力。 */
   spinnerIdle: string;
+  /** 退避重试的绿色 shimmer：亮绿 / 暗绿交替。 */
+  retrySpinner: string;
+  retrySpinnerDim: string;
 
   // diff
   diffAdd: string;
@@ -116,6 +119,8 @@ export const darkTheme: Theme = {
   reasoningSpinner: "#22d3ee",
   reasoningSpinnerDim: "#0891b2",
   spinnerIdle: "#64748b",
+  retrySpinner: "#4ade80",
+  retrySpinnerDim: "#2f9e5b",
 
   diffAdd: "#37b227",
   diffRemove: "#b2274a",

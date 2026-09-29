@@ -7,7 +7,7 @@ import { parseConfigToml } from "../src/config/toml.ts";
 import { stripAnsi } from "../src/util/sanitize.ts";
 
 describe("BUG-026: config.toml 类型收窄", () => {
-  const base = `default_model = "mock/m"\n`;
+  const base = `model = "mock/m"\n`;
 
   test("extra_body 写成字符串/数组时拒绝，不再展开成索引垃圾", () => {
     expect(() =>

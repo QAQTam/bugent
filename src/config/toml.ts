@@ -15,7 +15,8 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 import type { PermissionDecision, PermissionRule } from "../permission/policy.ts";
 import { isSandboxMode } from "../permission/mode.ts";
-import type { EndpointKind, ProviderConfig } from "../provider/registry.ts";
+import type { ProviderConfig } from "../provider/registry.ts";
+import { parseWire } from "../provider/registry.ts";
 import type { McpStdioServerConfig } from "../mcp/stdio.ts";
 import type { AlertChannel, AlertConfig } from "../permission/alert.ts";
 import type { BugentConfig, GoalsConfig, McpConfig, SandboxConfig, SkillsConfig } from "./schema.ts";
@@ -157,7 +158,21 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
   const id = asString(pick(table, "id", "name"), `${at}.id`);
   if (id === undefined) throw new Error(`config.toml: ${at}.id 必填`);
 
-  const endpoint = (asString(table.endpoint, `${at}.endpoint`) ?? "openai-chat") as EndpointKind;
+  // wire 是用户面的中性简称（chat / messages / responses / mock）；
+  // endpoint 是旧写法（openai-chat / … 全名），继续接受但不再推荐。
+  const wire = asString(table.wire, `${at}.wire`);
+  const legacyEndpoint = asString(table.endpoint, `${at}.endpoint`);
+  if (wire !== undefined && legacyEndpoint !== undefined) {
+    throw new Error(`config.toml: ${at}.wire 与 ${at}.endpoint 只能二选一（endpoint 已由 wire 取代）`);
+  }
+  const rawWire = wire ?? legacyEndpoint;
+  const wireSource = wire !== undefined ? "wire" : "endpoint";
+  const endpoint = rawWire === undefined ? "openai-chat" : parseWire(rawWire);
+  if (endpoint === undefined) {
+    throw new Error(
+      `config.toml: ${at}.${wireSource} 不合法，必须是 chat / messages / responses / mock（兼容旧写法 openai-chat / openai-responses / anthropic-messages）`,
+    );
+  }
   const baseUrl = asString(pick(table, "base_url", "baseUrl"), `${at}.base_url`);
   const apiKey = asString(pick(table, "api_key", "apiKey"), `${at}.api_key`);
   const proxy = asProxy(table.proxy, `${at}.proxy`);
@@ -482,9 +497,26 @@ function parseAlert(raw: unknown): AlertConfig | undefined {
 export function parseConfigToml(text: string): BugentConfig {
   const root = Bun.TOML.parse(text) as Raw;
 
-  const defaultModel = asString(pick(root, "default_model", "defaultModel"), "default_model");
-  if (defaultModel === undefined) {
-    throw new Error("config.toml: default_model 必填（形如 \"openai/deepseek-v4.1-flash\"）");
+  // 主键 model / provider；旧键 default_model / default_provider 作为别名继续接受
+  // （default_model 还兼容旧 "provider/model" 前缀写法：前缀作为隐式 provider）。
+  let model = asString(pick(root, "model", "default_model", "defaultModel"), "model");
+  let provider = asString(pick(root, "provider", "default_provider", "defaultProvider"), "provider");
+  if (model === undefined) {
+    throw new Error('config.toml: model 必填（形如 "deepseek-v4.1-flash"）');
+  }
+  const slash = model.indexOf("/");
+  if (slash > 0) {
+    const legacyProvider = model.slice(0, slash);
+    if (provider !== undefined && provider !== legacyProvider) {
+      throw new Error(
+        `config.toml: model 里的 provider 前缀 "${legacyProvider}" 与 provider "${provider}" 冲突`,
+      );
+    }
+    model = model.slice(slash + 1);
+    provider ??= legacyProvider;
+  }
+  if (model.length === 0) {
+    throw new Error("config.toml: model 不能以 \"/\" 结尾");
   }
 
   const rawProviders = pick(root, "providers", "provider");
@@ -548,7 +580,8 @@ export function parseConfigToml(text: string): BugentConfig {
   }
 
   return {
-    defaultModel,
+    model,
+    ...(provider !== undefined ? { provider } : {}),
     providers: rawProviders.map(parseProvider),
     agent: {
       ...(systemPromptFile !== undefined ? { systemPromptFile } : {}),
@@ -573,8 +606,10 @@ export function parseConfigToml(text: string): BugentConfig {
 export const DEFAULT_CONFIG_TOML = `# bugent 配置
 # 位置：~/.bugent/config.toml
 
-# 默认模型，格式 "provider/model"
-default_model = "openai/deepseek-v4.1-flash"
+# 默认模型（纯模型名，不带 provider 前缀；用哪个 provider 由 provider 决定）
+model = "deepseek-v4.1-flash"
+# 省略时用第一个 [[providers]]
+# provider = "openai"
 
 [agent]
 # system_prompt_file = "~/.bugent/SYSTEM.md"
@@ -639,7 +674,7 @@ max_goal_token_budget = 200000
 context_refresh = "checkpoint"
 handoff_inline_bytes = 32768
 review_policy = "medium"
-# review_model = "openai/deepseek-v4.1-flash"
+# review_model = "deepseek-v4.1-flash"
 
 # ---- MCP ----
 # MCP stdio server 默认：工作区只读、私有 state 可写、断网、独立进程沙箱。
@@ -666,11 +701,12 @@ review_policy = "medium"
 # disabled = ["legacy-skill"]
 
 # ---- provider ----
-# 任何 OpenAI 兼容端点都能这样接
+# wire 选 wire 协议：chat（OpenAI 兼容）/ messages（Anthropic 兼容）/ responses / mock
+# 旧写法 endpoint = "openai-chat" 仍然接受，但推荐用 wire。
 
 [[providers]]
 id = "openai"
-endpoint = "openai-chat"
+wire = "chat"
 base_url = "http://127.0.0.1:8787/v1"
 api_key = ""
 # 代理：不写时遵循 HTTP_PROXY/HTTPS_PROXY；本地 127.0.0.1 会自动绕过。

@@ -135,6 +135,26 @@ export class PermissionPolicy {
     return this.#default;
   }
 
+  /** 运行时追加规则（ui-protocol-spec §6.1 "总是允许"）。
+   *  只活在当前进程内，不写盘、不跨 session。**插入到规则表最前**：
+   *  "第一条命中生效"的顺序语义下，用户运行时显式授权必须压过构造期的 ask/deny
+   *  兜底规则，否则永远轮不到。`bash` → `exec` 别名规则同样复刻。 */
+  addRule(rule: PermissionRule): void {
+    const compiled = {
+      tool: globToRegExp(rule.tool),
+      resource: rule.resource === undefined ? undefined : globToRegExp(rule.resource),
+      decision: rule.decision,
+    };
+    this.#rules.unshift(compiled);
+    if (rule.tool === "bash") {
+      this.#rules.splice(1, 0, {
+        tool: globToRegExp("exec"),
+        resource: compiled.resource,
+        decision: rule.decision,
+      });
+    }
+  }
+
   get ruleCount(): number {
     return this.#rules.length;
   }

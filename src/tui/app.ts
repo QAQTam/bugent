@@ -39,7 +39,7 @@ import {
 import type { AuthorizationAlert } from "../permission/alert.ts";
 import { PatchStreamProgress } from "../patch/streaming-progress.ts";
 import { parseModelRef } from "../provider/registry.ts";
-import type { PersistedProviderConfig } from "../provider/registry.ts";
+import type { EndpointKind, PersistedProviderConfig } from "../provider/registry.ts";
 import { defaultContextWindow, probeContextWindow } from "../provider/model-window.ts";
 import { loadTokenizer, resolveTokenizerPath } from "../util/tokenizer.ts";
 import {
@@ -2832,13 +2832,14 @@ export class TuiApp implements TuiInteraction {
 
     const endpointAnswers = await this.askUser([
       {
-        question: "选择 provider endpoint",
-        options: ["openai-chat", "mock"],
+        question: "选择 provider wire",
+        options: ["chat", "messages", "responses", "mock"],
       },
     ]);
     const endpointIndex = endpointAnswers?.[0]?.selected[0];
     if (endpointIndex === undefined) return;
-    const endpoint = endpointIndex === 0 ? "openai-chat" : "mock";
+    const WIRE_CHOICES = ["openai-chat", "anthropic-messages", "openai-responses", "mock"] as const;
+    const endpoint: EndpointKind = WIRE_CHOICES[endpointIndex] ?? "openai-chat";
 
     const baseUrl = await this.#promptText("输入 base URL（mock 可留空）");
 
@@ -3495,16 +3496,30 @@ export class TuiApp implements TuiInteraction {
         // 理论上 onText 只属于当前消息；若上一条的 onAssistant 已到但仍在排空，
         // 新正文必须先切断旧块，绝不能因为 streamingIndex 还在而串到上一段。
         if (this.#pendingAssistantEnd !== undefined) this.#flushStreamPacers();
+        if (this.#activity.state === "retrying") this.#setActivity({ state: "working" });
         this.#textPacer.push(delta);
         this.#noteOutput(delta);
         this.#requestFrame();
       },
       // 思考链路：底部 tail 保持原体验；chatview 只插一个顺序占位。
       onReasoning: (delta) => {
+        if (this.#activity.state === "retrying") this.#setActivity({ state: "working" });
         this.#ensureLiveReasoningItem();
         this.#reasoningPacer.push(delta);
         this.#noteOutput(delta);
         this.#requestFrame();
+      },
+      // 退避重试（临时机制）：错误滚动过思考 tail；实时区落一条错误条目；
+      // 菊花切到绿色 shimmer 的"重试中：N/M"，下一段流式输出到达时恢复 working。
+      onProviderRetry: (info) => {
+        const seconds = Math.round(info.delayMs / 1000);
+        this.#thinking.push(`${info.error}\n`);
+        this.#transcript.pushError(`${info.error}（${seconds}s 后重试 ${info.attempt}/${info.total}）`);
+        this.#setActivity({
+          state: "retrying",
+          attempt: info.attempt,
+          total: info.total,
+        });
       },
       // 一条 assistant 消息结束：断开流式块，下一条消息另起一块。
       // 漏掉这一步会把"工具调用前的说明"和"最终答复"拼进同一行。

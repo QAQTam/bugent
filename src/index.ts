@@ -86,7 +86,7 @@ const HELP = `bugent — 终端里的 AI agent
 选项：
   -v, --version              显示版本
   -p, --prompt <text>        一次性执行给定提示词
-  -m, --model <ref>          指定模型，格式 provider/model
+  -m, --model <ref>          指定模型（纯 model 名，或旧写法 provider/model）
       --mock                 使用内置 mock provider（无需网络与密钥）
       --plain                不使用 TUI，退回纯文本 REPL
       --yes                  跳过权限确认（危险）
@@ -219,17 +219,26 @@ export function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-async function buildRegistry(
+/**
+ * 解析启动时用的模型引用。
+ *
+ * CLI `--model` 继续接受旧写法 `provider/model`（一次指定两者）；
+ * 省略时用 `model`（纯 model 名）+ `provider`（缺省 providers[0]）。
+ */
+function buildRegistry(
   options: CliOptions,
   config: BugentConfig,
-): Promise<{ registry: ProviderRegistry; model: string }> {
+): { registry: ProviderRegistry; providerId: string; model: string } {
   const registry = new ProviderRegistry();
   for (const provider of config.providers) registry.register(provider);
   if (options.mock) registry.register({ id: "mock", endpoint: "mock" });
 
-  const model = options.model ?? (options.mock ? "mock/echo" : config.defaultModel);
-  parseModelRef(model); // 提前校验格式，报错更友好
-  return { registry, model };
+  const providerId =
+    options.mock ? "mock" : config.provider ?? config.providers[0]?.id ?? "openai";
+  const model = (options.model ?? (options.mock ? "echo" : config.model)).trim();
+  // --model 兼容旧写法 provider/model：带前缀时拆开，provider 以 CLI 为准
+  const parsed = model.includes("/") ? parseModelRef(model) : undefined;
+  return { registry, providerId: parsed?.provider ?? providerId, model: parsed?.model ?? model };
 }
 
 /**
@@ -340,8 +349,8 @@ async function main(): Promise<void> {
   });
   const config = loaded.config;
 
-  const { registry, model } = await buildRegistry(options, config);
-  const ref = parseModelRef(model);
+  const { registry, providerId, model } = buildRegistry(options, config);
+  const ref = { provider: providerId, model };
   const loadedSystemPrompt = await loadSystemPrompt({
     cwd: options.cwd,
     ...(config.agent?.systemPromptFile !== undefined
@@ -392,20 +401,24 @@ async function main(): Promise<void> {
       ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
     },
   );
+  // review_model 写纯 model 名（旧 provider/model 写法兼容）；provider 跟随主 provider
   const reviewRef = config.goals?.reviewModel
-    ? parseModelRef(config.goals.reviewModel)
+    ? {
+        provider: effectiveProviderId,
+        model: config.goals.reviewModel.includes("/")
+          ? parseModelRef(config.goals.reviewModel).model
+          : config.goals.reviewModel,
+      }
     : undefined;
   const reviewClient =
     reviewRef === undefined
       ? client
       : registry.resolve(
           reviewRef,
-          reviewRef.provider === effectiveProviderId
-            ? {
-                ...(effectiveProviderConfig ?? {}),
-                ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
-              }
-            : {},
+          {
+            ...(effectiveProviderConfig ?? {}),
+            ...(storedApiKey !== undefined ? { apiKey: storedApiKey } : {}),
+          },
         );
   const reviewModel = reviewRef?.model ?? effectiveModel;
 
@@ -780,23 +793,25 @@ async function main(): Promise<void> {
                     ...(request?.apiKey !== undefined ? { apiKey: request.apiKey } : {}),
                   },
                 );
+                // review_model 写纯 model 名（旧 provider/model 写法兼容）；provider 跟随主 provider
                 const runtimeReviewRef =
                   config.goals?.reviewModel === undefined
                     ? undefined
-                    : parseModelRef(config.goals.reviewModel);
+                    : {
+                        provider: providerId,
+                        model: config.goals.reviewModel.includes("/")
+                          ? parseModelRef(config.goals.reviewModel).model
+                          : config.goals.reviewModel,
+                      };
                 const runtimeReviewClient =
                   runtimeReviewRef === undefined
                     ? client
                     : registry.resolve(
                         runtimeReviewRef,
-                        runtimeReviewRef.provider === providerId
-                          ? {
-                              ...(providerConfig ?? {}),
-                              ...(request?.apiKey !== undefined
-                                ? { apiKey: request.apiKey }
-                                : {}),
-                            }
-                          : {},
+                        {
+                          ...(providerConfig ?? {}),
+                          ...(request?.apiKey !== undefined ? { apiKey: request.apiKey } : {}),
+                        },
                       );
                 const runtime = createSessionRuntime({
                   sessionId: targetSessionId,

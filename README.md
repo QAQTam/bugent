@@ -88,11 +88,12 @@ TUI 内可用 `/new` 开一个全新对话（原会话仍在库里，之后可�
 最小配置：
 
 ```toml
-default_model = "openai/deepseek-v4.1-flash"
+model = "deepseek-v4.1-flash"
+# provider = "openai"   # 省略时用第一个 [[providers]]
 
 [[providers]]
 id = "openai"
-endpoint = "openai-chat"
+wire = "chat"           # chat（OpenAI 兼容）/ messages（Anthropic 兼容）/ responses / mock
 base_url = "http://127.0.0.1:8787/v1"
 # 开启思考链路：实测该模型必须显式打开才会返回 reasoning_content
 extra_body = { reasoning_effort = "high" }
@@ -272,8 +273,10 @@ bun run scripts/prompt-lab.ts --task study --trials 24
 | P9 多 session | ✅ | `SessionRegistry` + 并发锁：不同会话真并行，同一会话重复进入抛 `SessionBusyError`；TUI `/new` 开新对话；多进程共写同一库已回归测试 |
 | P10 落盘与审计 | ✅ | bun:sqlite + WAL；消息即时落盘、`--resume` 恢复；审计流水含工具调用与权限决策 |
 
-已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`mock` adapter、MCP stdio、Skills、Linux 原生 sandbox provider。
-待实现：`openai-responses`、`anthropic-messages`。
+已实现：`openai-chat` adapter（覆盖 OpenAI 及所有兼容端点）、`anthropic-messages` adapter（Anthropic `/v1/messages` 及兼容实现）、`mock` adapter、MCP stdio、Skills、Linux 原生 sandbox provider。
+待实现：`openai-responses`。
+
+config.toml 里 provider 的 wire 用中性简称配置：`wire = "chat" / "messages" / "responses" / "mock"`（不带厂商前缀，接兼容网关时不误导）；旧写法 `endpoint = "openai-chat"` 继续接受。
 
 ## 权限模型：档位 = 默认批准范围
 

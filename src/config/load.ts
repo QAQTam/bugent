@@ -69,7 +69,7 @@ function configFromEnv(): BugentConfig {
   const model = Bun.env.BUGENT_MODEL ?? "gpt-4o-mini";
 
   return {
-    defaultModel: `openai/${model}`,
+    model,
     providers: [
       {
         id: "openai",

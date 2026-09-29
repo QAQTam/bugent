@@ -146,7 +146,7 @@ env = []
   if (plan.verify.mcpSandboxProbe) await writeFakeMcpServer(fakeServer);
   await writeFile(
     join(configDir, "config.toml"),
-    `default_model = "mock/echo"
+    `model = "echo"
 
 [[providers]]
 id = "mock"

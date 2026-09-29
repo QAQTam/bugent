@@ -11,6 +11,7 @@ import type {
   EndpointKind,
   PersistedProviderConfig,
 } from "../provider/registry.ts";
+import { parseWire } from "../provider/registry.ts";
 import type { ReasoningReplay } from "../provider/adapters/openai-chat.ts";
 import type { SessionStore } from "../store/repository.ts";
 
@@ -183,13 +184,6 @@ function validateStringRecord(value: unknown, label: string): Record<string, str
   return out;
 }
 
-const ENDPOINTS: readonly EndpointKind[] = [
-  "openai-chat",
-  "openai-responses",
-  "anthropic-messages",
-  "mock",
-];
-
 const REASONING_REPLAY: readonly ReasoningReplay[] = [
   "none",
   "reasoning",
@@ -206,14 +200,26 @@ function validateProvider(raw: unknown, index: number): ProviderProfileExport {
   if (typeof id !== "string" || id.trim().length === 0) {
     throw new Error(`${label}.id 必须是非空字符串`);
   }
-  const endpoint = raw.endpoint;
-  if (typeof endpoint !== "string" || !ENDPOINTS.includes(endpoint as EndpointKind)) {
-    throw new Error(`${label}.endpoint 不合法`);
+  // 导入接受两种写法：wire（中性简称）与 endpoint（旧全名）。互斥。
+  const wire = raw.wire;
+  const legacyEndpoint = raw.endpoint;
+  if (wire !== undefined && legacyEndpoint !== undefined) {
+    throw new Error(`${label}.wire 与 ${label}.endpoint 只能二选一（endpoint 已由 wire 取代）`);
+  }
+  const rawKind = wire ?? legacyEndpoint;
+  if (typeof rawKind !== "string") {
+    throw new Error(`${label}.${legacyEndpoint === undefined ? "wire" : "endpoint"} 必须是字符串`);
+  }
+  const endpoint = parseWire(rawKind);
+  if (endpoint === undefined) {
+    throw new Error(
+      `${label}.${wire !== undefined ? "wire" : "endpoint"} 不合法，必须是 chat / messages / responses / mock（兼容旧写法 openai-chat / openai-responses / anthropic-messages）`,
+    );
   }
 
   const out: ProviderProfileExport = {
     id: id.trim(),
-    endpoint: endpoint as EndpointKind,
+    endpoint,
   };
 
   if (raw.baseUrl !== undefined) {

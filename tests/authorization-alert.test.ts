@@ -180,7 +180,8 @@ describe("授权提醒 · 声卡 PCM", () => {
 
 describe("授权提醒 · 配置解析", () => {
   const base = `
-default_model = "openai/test-model"
+model = "test-model"
+provider = "openai"
 
 [[providers]]
 id = "openai"

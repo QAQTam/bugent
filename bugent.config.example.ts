@@ -8,8 +8,9 @@
 import { defineConfig } from "./src/config/schema.ts";
 
 export default defineConfig({
-  /** 默认模型，格式 "provider/model"。 */
-  defaultModel: "openai/gpt-4o-mini",
+  /** 纯模型名（不带 provider/ 前缀）；provider 由 provider 字段指定。 */
+  model: "gpt-4o-mini",
+  provider: "openai",
 
   providers: [
     {
@@ -17,6 +18,14 @@ export default defineConfig({
       endpoint: "openai-chat",
       baseUrl: "https://api.openai.com/v1",
       apiKey: process.env.OPENAI_API_KEY,
+    },
+    {
+      // Anthropic 兼容端点（官方或网关）。TS 配置里用带类型的 endpoint 全名；
+      // config.toml 里推荐用中性简称：wire = "messages"
+      id: "anthropic",
+      endpoint: "anthropic-messages",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: process.env.ANTHROPIC_API_KEY,
     },
     {
       // 任何 OpenAI 兼容端点都能这样接（DeepSeek / Moonshot / Ollama / vLLM …）

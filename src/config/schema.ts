@@ -73,8 +73,17 @@ export interface GoalsConfig {
 }
 
 export interface BugentConfig {
-  /** 形如 "openai/gpt-4o-mini"。 */
-  defaultModel: string;
+  /**
+   * 纯模型名（不带 provider/ 前缀），如 "gpt-4o-mini"、"deepseek-v4.1-flash"。
+   * 用哪个 provider 由 {@link provider} 决定。TOML 键 `model`；
+   * 旧键 `default_model`（含 "provider/model" 前缀写法）继续接受。
+   */
+  model: string;
+  /**
+   * {@link model} 使用的 provider id。TOML 键 `provider`；
+   * 旧键 `default_provider` 继续接受。缺省取 providers[0]。
+   */
+  provider?: string;
   providers: ProviderConfig[];
   agent?: AgentConfig;
   permissions?: PermissionsConfig;

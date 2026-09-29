@@ -53,8 +53,11 @@ export async function createBugentButuiRuntime(
   for (const provider of config.providers) registry.register(provider);
   if (options.mock) registry.register({ id: "mock", endpoint: "mock" });
 
-  const model = options.mock ? "mock/butui" : config.defaultModel;
-  const ref = parseModelRef(model);
+  // config.model 写纯 model 名；provider 用 config.provider（缺省 providers[0]）
+  const providerId =
+    options.mock ? "mock" : config.provider ?? config.providers[0]?.id ?? "openai";
+  const model = options.mock ? "butui" : config.model;
+  const ref = model.includes("/") ? parseModelRef(model) : { provider: providerId, model };
   const client = registry.resolve(ref);
   const systemPrompt = await loadSystemPrompt({
     cwd: options.cwd,

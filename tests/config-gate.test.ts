@@ -26,7 +26,7 @@ async function project(): Promise<string> {
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "bugent.config.ts"),
-    `export default { defaultModel: "mock/m", providers: [] };\n`,
+    `export default { model: "mock/m", providers: [] };\n`,
     "utf8",
   );
   return dir;
@@ -72,11 +72,11 @@ describe("项目配置确认门（BUG-014）", () => {
     // 内容变化：哈希失配，重新确认
     await writeFile(
       join(dir, "bugent.config.ts"),
-      `export default { defaultModel: "mock/m2", providers: [] };\n`,
+      `export default { model: "mock/m2", providers: [] };\n`,
       "utf8",
     );
     const third = await loadConfig({ cwd: dir, home, noCreate: true, confirmProjectConfig: confirm });
-    expect(third.config.defaultModel).toBe("mock/m2");
+    expect(third.config.model).toBe("mock/m2");
     expect(asks).toBe(2);
   });
 
