@@ -16,7 +16,7 @@
 
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface CommandScan {
   /** 能静态解析出的写目标（绝对路径，已去重）。 */
@@ -84,7 +84,13 @@ function lex(command: string): Lexeme[] {
       if (word.length === 0) startedWithQuote = true;
       index += 1;
       while (index < command.length && command[index] !== '"') {
-        if (command[index] === "\\" && index + 1 < command.length) {
+        // bash 双引号语义：反斜杠只在 `" \ $ ` ` 前是转义符，`"D:\bugent"`
+        // 里的 `\b` 原样保留（之前一律吃掉，Windows 路径在引号里被静默改写）。
+        if (
+          command[index] === "\\" &&
+          index + 1 < command.length &&
+          ['"', "\\", "$", "`"].includes(command[index + 1]!)
+        ) {
           word += command[index + 1];
           index += 2;
           continue;
@@ -96,8 +102,16 @@ function lex(command: string): Lexeme[] {
       continue;
     }
     if (char === "\\") {
-      if (index + 1 < command.length) word += command[index + 1];
-      index += 2;
+      // 未引用的反斜杠：POSIX shell 当转义符；win32 的实际执行层是
+      // pwsh/cmd，`\` 是路径分隔符不是转义符 —— `echo hi > D:\bugent\x`
+      // 必须能把 D:\bugent\x 认成写目标。
+      if (process.platform !== "win32" && index + 1 < command.length) {
+        word += command[index + 1];
+        index += 2;
+        continue;
+      }
+      word += char;
+      index += 1;
       continue;
     }
     if (char === " " || char === "\t") {
@@ -415,7 +429,98 @@ function looksLikeWrite(code: string): boolean {
 
 /** 沙箱里 `/tmp` 是私有 tmpfs，写它不留下任何东西 —— 不算越界。 */
 function isEphemeral(path: string): boolean {
-  return path === "/tmp" || path.startsWith("/tmp/");
+  const unified = process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+  return unified === "/tmp" || unified.startsWith("/tmp/");
+}
+
+/**
+ * 路径比较键：win32 上统一反斜杠为正斜杠并折叠大小写（NTFS 不区分大小写、
+ * 两种分隔符等价）；POSIX 上路径按字面比较（反斜杠是合法文件名字符，不能转换）。
+ */
+function compareKey(path: string): string {
+  if (process.platform !== "win32") return path;
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+/** win32 上把反斜杠统一成正斜杠（仅 win32；POSIX 反斜杠是文件名字符）。 */
+function unify(path: string): string {
+  return process.platform === "win32" ? path.replace(/\\/g, "/") : path;
+}
+
+const WIN_DRIVE_RE = /^([A-Za-z]:)(\/|$)/;
+
+/**
+ * 词法解析出绝对路径，输出统一为"可选盘符 + 正斜杠"形态。
+ *
+ * 为什么不用平台 `path.resolve`：win32 会给 "/x" 注入**当前盘符**并产出反斜杠
+ * —— 与 POSIX 形态的工作区（测试、文档）永远对不上，P1-2 的根因就在这里。
+ * 这里按字面语义解析（不碰 fs）：目标带盘符从该盘根起步，"/x" 从工作区
+ * 盘（若有）的根起步，其余相对工作区拼接；"."、".." 正常折叠。
+ */
+function expandAbsolute(target: string, cwd: string): string {
+  const t = unify(target);
+  const base = unify(cwd);
+  const driveOf = (p: string): string | undefined => {
+    const m = WIN_DRIVE_RE.exec(p);
+    // 保留原样大小写：输出要还原成平台原生路径，比较由 compareKey 归一
+    return m === null ? undefined : m[1]!;
+  };
+
+  const tDrive = driveOf(t);
+  const absolute = t.startsWith("/") || tDrive !== undefined;
+  const baseDrive = driveOf(base);
+  const drive = tDrive ?? baseDrive;
+
+  const segments: string[] = [];
+  if (!absolute) {
+    // base 的盘符段（"C:"）不是路径段，不能进 segments
+    const baseBody = baseDrive !== undefined ? base.slice(2) : base;
+    for (const segment of baseBody.split("/")) {
+      if (segment === "" || segment === ".") continue;
+      segments.push(segment);
+    }
+  }
+  const body = tDrive !== undefined ? t.slice(2) : t;
+  for (const segment of body.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  const joined = segments.join("/");
+  if (drive !== undefined) return joined === "" ? `${drive}/` : `${drive}/${joined}`;
+  return `/${joined}`;
+}
+
+function expandTarget(target: string, cwd: string, home: string): string | undefined {
+  if (isDynamic(target)) return undefined;
+  let path = target;
+  if (path === "~") path = home;
+  else if (path.startsWith("~/")) path = join(home, path.slice(2));
+  else if (path.startsWith("~")) {
+    // `~user/...`（shell 会展开成其它用户的 home）不能按字面拼进 cwd ——
+    // 那会把工作区外的目标误判成工作区内。保守按"判不出来"处理。
+    return undefined;
+  }
+  const absolute = expandAbsolute(path, cwd);
+  const trimmed = absolute.length > 1 && absolute.endsWith("/") ? absolute.slice(0, -1) : absolute;
+  // 盘符结果在 win32 上还原成原生反斜杠形态：下游（弹窗展示、statSync、
+  // 测试断言、--bind 参数）都按平台原生路径消费；无盘符的 POSIX 形态
+  // （"/x/y"）保持原样。比较一律走 compareKey，不受形态影响。
+  if (process.platform === "win32" && WIN_DRIVE_RE.test(trimmed)) {
+    return trimmed.replace(/\//g, "\\");
+  }
+  return trimmed;
+}
+
+function insideWorkspace(cwd: string, path: string): boolean {
+  const cwdKey = compareKey(cwd);
+  const pathKey = compareKey(path);
+  if (pathKey === cwdKey) return true;
+  return pathKey.startsWith(cwdKey.endsWith("/") ? cwdKey : `${cwdKey}/`);
 }
 
 function isDevicePath(path: string): boolean {
@@ -438,25 +543,6 @@ function isDevicePath(path: string): boolean {
 /** 目标里含变量 / 通配 / 命令替换 —— 静态判不出来。 */
 function isDynamic(target: string): boolean {
   return /[$`*?]/.test(target) || target.includes("$(") || target.includes("${");
-}
-
-function expandTarget(target: string, cwd: string, home: string): string | undefined {
-  if (isDynamic(target)) return undefined;
-  let path = target;
-  if (path === "~") path = home;
-  else if (path.startsWith("~/")) path = join(home, path.slice(2));
-  else if (path.startsWith("~")) {
-    // `~user/...`（shell 会展开成其它用户的 home）不能按字面拼进 cwd ——
-    // 那会把工作区外的目标误判成工作区内。保守按"判不出来"处理。
-    return undefined;
-  }
-  const absolute = isAbsolute(path) ? path : resolve(cwd, path);
-  return absolute.length > 1 && absolute.endsWith("/") ? absolute.slice(0, -1) : absolute;
-}
-
-function insideWorkspace(cwd: string, path: string): boolean {
-  if (path === cwd) return true;
-  return path.startsWith(cwd.endsWith("/") ? cwd : `${cwd}/`);
 }
 
 function baseName(word: string): string {
@@ -547,7 +633,9 @@ function isNetworkCommand(name: string, args: readonly string[]): boolean {
  * 三个字段的含义互相独立：一条命令可以既写工作区外又联网（`curl -o /x ...`）。
  */
 export function scanCommand(command: string, options: ScanOptions): CommandScan {
-  const cwd = options.cwd.length > 1 && options.cwd.endsWith("/") ? options.cwd.slice(0, -1) : options.cwd;
+  // cwd 统一成正斜杠形态（win32 传入反斜杠路径时），尾部分隔符去掉
+  const unifiedCwd = unify(options.cwd);
+  const cwd = unifiedCwd.length > 1 && unifiedCwd.endsWith("/") ? unifiedCwd.slice(0, -1) : unifiedCwd;
   const home = options.home ?? homedir();
 
   const targets: string[] = [];
@@ -736,11 +824,16 @@ function mentionsHome(command: string, home: string): boolean {
     }
     if (inComment) continue;
 
-    // 独立词的 ~ 家族（~, ~/x, ~user/x）与 $HOME / home 前缀
+    // 独立词的 ~ 家族（~, ~/x, ~user/x）与 $HOME / home 前缀。
+    // home 与词都先归一（win32 反斜杠/大小写），否则 C:\Users\... 的
+    // 命令写法永远匹配不上 "C:\Users\me" 的 home。
+    const homeKey = compareKey(unify(home));
+    const wordKey = compareKey(unify(word));
     if (word.startsWith("~") || word === "$HOME" || word.startsWith("$HOME/")) return true;
-    if (word === home || word.startsWith(`${home}/`)) return true;
+    if (wordKey === homeKey || wordKey.startsWith(`${homeKey}/`)) return true;
     // 引号内的引用（`open("~/x")` 整体是一个词）
-    if (word.includes("~/") || word.includes("$HOME/") || word.includes(`${home}/`)) return true;
+    if (word.includes("~/") || word.includes("$HOME/")) return true;
+    if (wordKey.includes(`${homeKey}/`)) return true;
   }
   return false;
 }
@@ -786,6 +879,7 @@ export function planWriteApproval(
 
   // 敏感目录过滤（BUG-010）：writableAncestors 会爬到最近的已存在祖先，
   // `> ~/.ssh/authorized_keys` 由此得到 ~/.ssh 的可写 bind —— 必须拦下。
-  const safeBinds = binds.filter((bind) => !SENSITIVE_BIND_RE.test(bind));
+  // bind 可能是 win32 原生反斜杠形态，先统一再比对。
+  const safeBinds = binds.filter((bind) => !SENSITIVE_BIND_RE.test(unify(bind)));
   return { paths, binds: dedupe(safeBinds), undecidable: scan.writeIntent };
 }

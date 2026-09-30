@@ -445,6 +445,9 @@ export async function runTurn(
             signal,
             callId: call.id,
             sessionId: session.id,
+            // 工具内部的"嵌入动作"（apply_subagent_patch 的验证命令等）用它
+            // 走与顶层调用同一套闸门（deny/ask 规则 + 询问链）。
+            authorizeAs: (request) => tools.check(request),
             ...(progress !== undefined
               ? { onProgress: (chunk: string, stream: "stdout" | "stderr") => progress(call, chunk, stream) }
               : {}),

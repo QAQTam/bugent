@@ -230,7 +230,7 @@ describe("P10 · 会话与消息持久化", () => {
     expect(store.isMcpServerEnabled("s1", "git")).toBe(true);
   });
 
-  test("session 级 provider profiles 持久化，并强制剔除 apiKey", async () => {
+  test("session 级 provider profiles 持久化，并强制剔除 apiKey/headers/tls 私钥", async () => {
     const store = await makeStore();
     store.createSession(makeSessionRecord("s1"));
     store.setProviderConfig("s1", {
@@ -241,7 +241,10 @@ describe("P10 · 会话与消息持久化", () => {
       extraBody: { reasoning_effort: "high" },
       reasoningReplay: "both",
       proxy: false,
-    });
+      // 凭据卫生：headers 是传 Authorization 的常见方式，tls.key/passphrase
+      // 是客户端私钥与口令 —— 持久化时一律剥离，绝不落 SQLite。
+      tls: { rejectUnauthorized: true, key: "PRIVATE-KEY", passphrase: "secret" },
+    } as never);
     store.setProviderConfig("s1", {
       id: "backup",
       endpoint: "mock",
@@ -251,10 +254,10 @@ describe("P10 · 会话与消息持久化", () => {
       id: "local",
       endpoint: "openai-chat",
       baseUrl: "http://127.0.0.1:8787/v1",
-      headers: { "x-test": "1" },
       extraBody: { reasoning_effort: "high" },
       reasoningReplay: "both",
       proxy: false,
+      tls: { rejectUnauthorized: true },
     });
     expect(store.listProviderConfigs("s1").map((config) => config.id)).toEqual(["backup", "local"]);
 

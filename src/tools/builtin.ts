@@ -168,6 +168,14 @@ export function createDefaultTools(options: DefaultToolsOptions = {}): ToolsSetu
     const created = createAgentTools({
       ...options.agentTools,
       verificationRunner: options.agentTools.verificationRunner ?? runner,
+      // 验证命令与 exec 过同一条授权链：沙箱语义（工作区可写、断网、无内核
+      // 沙箱时逐条确认）必须与 exec 工具完全同源，否则换个入口就绕开了。
+      verificationExecOptions: {
+        workspaceWritable: workspaceWrite,
+        authorizeBeforeRun: !approvesAll,
+        requireApprovalEveryRun: bashNeedsPerRunApproval,
+        networkBlocked,
+      },
     });
     for (const tool of created) registry.register(tool);
     agentTools = created.map((tool) => tool.name);

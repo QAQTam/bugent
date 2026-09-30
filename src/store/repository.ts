@@ -294,9 +294,28 @@ export class SessionStore {
       .run(model, providerId, id);
   }
 
-  /** 保存 session 级非敏感 provider 配置；apiKey 会被强制剔除。 */
+  /**
+   * 保存 session 级非敏感 provider 配置。
+   *
+   * 凭据卫生：SQLite 里绝不落任何可携带凭据的字段 —— 不只 `apiKey`，
+   * `headers`（自定义头是传 Authorization 的常见方式）与 `tls.key` /
+   * `tls.passphrase`（客户端证书私钥及口令）一律剥离。敏感信息要么放全局
+   * 配置（用户自己的文件），要么走 keychain；被剥掉的 session 级覆盖在
+   * 重启后回退到全局配置的对应字段。
+   */
   setProviderConfig(sessionId: string, config: PersistedProviderConfig): void {
-    const { apiKey: _apiKey, ...safe } = config as PersistedProviderConfig & { apiKey?: string };
+    const {
+      apiKey: _apiKey,
+      headers: _headers,
+      ...safe
+    } = config as PersistedProviderConfig & {
+      apiKey?: string;
+      headers?: Record<string, string>;
+    };
+    if (safe.tls !== undefined) {
+      const { key: _key, passphrase: _passphrase, ...safeTls } = safe.tls;
+      safe.tls = safeTls;
+    }
     this.#db
       .query(
         `INSERT INTO session_providers (session_id, provider_id, config, updated_at)

@@ -31,13 +31,26 @@ export class PathEscapeError extends Error {
  * 表示"整个文件系统"。
  *
  * 作为 `resolveReadable` 的 extraRoots 元素时代表"允许任意路径"。用它在调用点
- * 显式写出意图，比传一个裸 `sep` 更容易看出来这里放宽了边界。
+ * 显式写出意图，比传一个裸路径更容易看出来这里放宽了边界。
+ *
+ * 刻意不用 `sep`：Windows 下 `resolve(sep)` 会得到**当前盘符的根**（`D:\`），
+ * "任意路径"就退化成了"当前盘任意" —— 跨盘布局（D: 工作区 + C: home）下
+ * 自由读直接失效。这里用文件系统不可能出现的字符做哨兵，平台无关。
  */
-export const ANYWHERE = sep;
+export const ANYWHERE = "\u0000anywhere";
+
+/** win32 上路径比较的归一键：NTFS 大小写不敏感，分隔符两种写法等价。 */
+function compareKey(path: string): string {
+  if (process.platform !== "win32") return path;
+  return path.replace(/\//g, "\\").toLowerCase();
+}
 
 /** target 是否落在 root 内（含 root 本身）。 */
 function isInside(root: string, target: string): boolean {
-  return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
+  if (root === ANYWHERE) return true;
+  const key = compareKey(target);
+  const rootKey = compareKey(root);
+  return key === rootKey || key.startsWith(rootKey.endsWith(sep) ? rootKey : rootKey + sep);
 }
 
 function assertInsideAny(roots: readonly string[], target: string, input: string): void {
@@ -89,7 +102,12 @@ export function resolveReadable(
   input: string,
   extraRoots: readonly string[] = [],
 ): string {
-  const roots = [realpathSync(resolve(cwd)), ...extraRoots.map(canonicalRoot)];
+  // ANYWHERE 哨兵不进 canonicalRoot（resolve 会把无根字符串拼成相对路径），
+  // 原样放进 roots，由 isInside 识别。
+  const roots = [
+    realpathSync(resolve(cwd)),
+    ...extraRoots.map((root) => (root === ANYWHERE ? root : canonicalRoot(root))),
+  ];
   const target = resolve(roots[0]!, input);
 
   assertInsideAny(roots, target, input);

@@ -9,8 +9,15 @@
 
 import { randomUUID } from "node:crypto";
 import type { JSONSchema } from "../provider/types.ts";
-import type { ShellRunner } from "./bash.ts";
+import {
+  authorizeExecRun,
+  EXEC_TOOL_NAME,
+  type ExecAuthorizationOptions,
+  type RunGrant,
+  type ShellRunner,
+} from "./bash.ts";
 import type { Tool, ToolCtx } from "./types.ts";
+import { describeOutcome } from "../permission/authorization.ts";
 import {
   attenuateCapabilities,
   defaultCapabilitiesForKind,
@@ -58,6 +65,12 @@ export interface AgentToolsOptions {
   readonly notifications?: AgentNotificationSink;
   /** Same sandboxed runner as the parent bash tool, used for post-apply checks. */
   readonly verificationRunner?: ShellRunner;
+  /**
+   * 验证命令执行层的沙箱语义（与 exec 工具同源装配）。
+   * 决定 authorizeExecRun 授权链的形态：工作区是否可写、无沙箱时是否逐条
+   * 确认、断网沙箱下是否走联网按次授权。缺省按"宽松"处理（兼容旧装配）。
+   */
+  readonly verificationExecOptions?: ExecAuthorizationOptions;
   /** Persist integration outcomes to audit and optional Goal Evidence. */
   readonly onIntegration?: (
     record: AgentIntegrationRecord,
@@ -576,6 +589,31 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         throw new Error("a single verify_commands entry must not exceed 2000 characters");
       }
 
+      // verify_commands 是任意命令执行 —— 与 exec 工具过**同一条授权链**
+      // （用户显式规则 + 扫描 + 逐条授权）。在应用 patch 之前逐条预检：
+      // 任何一条被拒，patch 根本不应用（验证还没开始，无需回滚）。
+      const verifyGrants = new Map<string, RunGrant>();
+      if (options.verificationRunner !== undefined) {
+        for (const command of verificationCommands) {
+          if (ctx.authorizeAs !== undefined) {
+            const verdict = await ctx.authorizeAs({
+              tool: EXEC_TOOL_NAME,
+              resource: command,
+              summary: `验证命令：${command}`,
+            });
+            if (!verdict.allowed) {
+              throw new Error(`验证命令被拒绝，patch 未应用 —— ${verdict.reason ?? "策略禁止"}：${command}`);
+            }
+          }
+          const auth = await authorizeExecRun(command, ctx, options.verificationExecOptions ?? {});
+          if (auth.refused !== undefined) {
+            const head = describeOutcome(auth.refused) ?? "用户拒绝操作";
+            throw new Error(`验证命令未获授权，patch 未应用 —— ${head}：${command}`);
+          }
+          verifyGrants.set(command, auth.grant);
+        }
+      }
+
       const applied = await applyWorkerPatch({
         cwd: options.cwd,
         baseRevision: workerOutput.baseRevision,
@@ -586,12 +624,15 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         ...(options.verificationRunner !== undefined
           ? {
               verificationRunner: async (command: string, signal: AbortSignal) => {
+                const grant = verifyGrants.get(command) ?? {};
                 const result = await options.verificationRunner!.run({
                   command,
                   cwd: options.cwd,
                   timeoutMs: 120_000,
                   maxOutputBytes: 64 * 1024,
                   signal,
+                  ...(grant.allowNetwork === true ? { allowNetwork: true } : {}),
+                  ...(grant.writablePaths !== undefined ? { writablePaths: grant.writablePaths } : {}),
                 });
                 return {
                   command,

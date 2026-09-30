@@ -15,6 +15,17 @@
 /** 授权窗口长度。改这个数字等于改产品语义，别在调用点随手覆盖。 */
 export const AUTHORIZATION_TIMEOUT_MS = 60_000;
 
+/**
+ * 测试覆盖：`BUGENT_AUTHORIZATION_TIMEOUT_MS`。
+ *
+ * 生产路径不读它：60 秒是产品语义，不该被环境变量悄悄改掉。
+ * 但 PTY / bridge 用例必须验证"到点自动拒绝"，等满一分钟不现实。
+ */
+export function authorizationTimeoutFromEnv(): number | undefined {
+  const raw = Number(Bun.env.BUGENT_AUTHORIZATION_TIMEOUT_MS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
+}
+
 /** 一次授权请求的结论。 */
 export type AuthorizationOutcome = "approved" | "denied" | "timeout";
 

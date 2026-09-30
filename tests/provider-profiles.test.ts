@@ -104,10 +104,10 @@ describe("provider profile export/import", () => {
     const exported = exportProviderProfiles(store, "s1");
     const provider = exported.providers[0]!;
 
-    expect(provider.headers?.Authorization).toBe("__REDACTED__");
-    expect(provider.headers?.Cookie).toBe("__REDACTED__");
-    // 非敏感 header 原样保留
-    expect(provider.headers?.["X-Custom-Trace"]).toBe("trace-42");
+    // 凭据卫生升级：headers 整体不落 SQLite（自定义头是传 Authorization 的
+    // 常见方式，无法可靠区分哪个头带凭据），导出物里连 header 都不该有 ——
+    // 比"逐个脱敏"更强的保证。
+    expect(provider.headers).toBeUndefined();
     expect(provider.extraBody?.api_key).toBe("__REDACTED__");
     expect(provider.extraBody?.note).toBe("just a normal note");
     expect((provider.extraBody?.nested as Record<string, unknown>).token).toBe("__REDACTED__");
@@ -115,6 +115,8 @@ describe("provider profile export/import", () => {
 
     const text = serializeProviderProfiles(exported);
     expect(text).not.toContain("sk-gateway-secret-123");
+    expect(text).not.toContain("trace-42");
+    expect(text).not.toContain("session=abc");
     expect(text).not.toContain("hunter2");
     expect(text).not.toContain("sk-inline-extra-body-key");
   });

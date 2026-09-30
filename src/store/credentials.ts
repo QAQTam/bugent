@@ -30,10 +30,13 @@ interface CommandResult {
   stderr: string;
 }
 
-async function runCommand(
+/** 注入点：测试用 mock 断言 argv（如 darwin delete 必须带 -a account）。 */
+export type CredentialCommandRunner = (
   argv: string[],
   stdin?: string,
-): Promise<CommandResult> {
+) => Promise<CommandResult>;
+
+async function defaultRunCommand(argv: string[], stdin?: string): Promise<CommandResult> {
   const proc = Bun.spawn(argv, {
     stdin: stdin === undefined ? "ignore" : "pipe",
     stdout: "pipe",
@@ -68,13 +71,15 @@ export class MemoryCredentialStore implements CredentialStore {
   }
 }
 
-class KeychainCredentialStore implements CredentialStore {
+export class KeychainCredentialStore implements CredentialStore {
   readonly kind = "keychain" as const;
   #fallback = new MemoryCredentialStore();
   #platform: "linux" | "darwin";
+  #runCommand: CredentialCommandRunner;
 
-  constructor(platform: "linux" | "darwin") {
+  constructor(platform: "linux" | "darwin", runCommand: CredentialCommandRunner = defaultRunCommand) {
     this.#platform = platform;
+    this.#runCommand = runCommand;
   }
 
   async get(sessionId: string, providerId: string): Promise<string | undefined> {
@@ -82,8 +87,8 @@ class KeychainCredentialStore implements CredentialStore {
       const key = account(sessionId, providerId);
       const result =
         this.#platform === "linux"
-          ? await runCommand(["secret-tool", "lookup", "service", SERVICE, "account", key])
-          : await runCommand(["security", "find-generic-password", "-s", SERVICE, "-a", key, "-w"]);
+          ? await this.#runCommand(["secret-tool", "lookup", "service", SERVICE, "account", key])
+          : await this.#runCommand(["security", "find-generic-password", "-s", SERVICE, "-a", key, "-w"]);
       if (result.exitCode === 0 && result.stdout.trim().length > 0) {
         return result.stdout.replace(/\r?\n$/, "");
       }
@@ -98,11 +103,11 @@ class KeychainCredentialStore implements CredentialStore {
       const key = account(sessionId, providerId);
       const result =
         this.#platform === "linux"
-          ? await runCommand(
+          ? await this.#runCommand(
               ["secret-tool", "store", "--label", SERVICE, "service", SERVICE, "account", key],
               secret,
             )
-          : await runCommand([
+          : await this.#runCommand([
               "security",
               "add-generic-password",
               "-U",
@@ -124,8 +129,8 @@ class KeychainCredentialStore implements CredentialStore {
     try {
       const key = account(sessionId, providerId);
       await (this.#platform === "linux"
-        ? runCommand(["secret-tool", "clear", "service", SERVICE, "account", key])
-        : runCommand(["security", "delete-generic-password", "-s", SERVICE, "-a", key]));
+        ? this.#runCommand(["secret-tool", "clear", "service", SERVICE, "account", key])
+        : this.#runCommand(["security", "delete-generic-password", "-s", SERVICE, "-a", key]));
     } catch {
       // ignore: delete is best-effort
     }

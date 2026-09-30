@@ -695,12 +695,20 @@ function isReadOnlySegment(segment: string): boolean {
   if (head === undefined) return true;
 
   if (head === "sed") {
-    return !rest.some(
+    const inPlace = rest.some(
       (word) =>
         word === "--in-place" ||
         word.startsWith("--in-place=") ||
         (word.startsWith("-") && !word.startsWith("--") && word.includes("i")),
     );
+    if (inPlace) return false;
+    // sed 脚本体内的 w/W（把模式空间写入文件）/r/R（读文件并入输出）是命令体
+    // 内的写原语：`sed 's/a/b/w out.txt' f` 不带 -i 也确实落盘，持读锁会和
+    // 并发 edit_file 丢更新。引号已被上面的空格切分打散，松散匹配整个片段；
+    // 刻意不要求词首边界（`5w out` 是合法的 sed 写法）。宁可误判成写
+    // （串行化），也不漏判。
+    const scriptWrites = rest.some((word) => /(^|[^\\])[wWrR](\s|$)/.test(word));
+    return !scriptWrites;
   }
   if (head === "find") {
     const mutatingFlags = ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf"];
@@ -777,7 +785,7 @@ function firstLines(text: string, count: number): string {
 }
 
 /** 本次调用获准的越界能力（执行前按次授权的结果）。 */
-interface RunGrant {
+export interface RunGrant {
   allowNetwork?: boolean;
   writablePaths?: readonly string[];
 }
@@ -918,6 +926,90 @@ async function clampForModel(
   ].join("\n");
 }
 
+/** authorizeExecRun 的选项：与 BashToolOptions 中"执行前授权"相关的字段同名。 */
+export interface ExecAuthorizationOptions {
+  workspaceWritable?: boolean | undefined;
+  authorizeBeforeRun?: boolean | undefined;
+  requireApprovalEveryRun?: boolean | undefined;
+  networkBlocked?: boolean | undefined;
+}
+
+export interface ExecAuthorization {
+  /** 拒绝/超时的结论；undefined = 放行。 */
+  refused?: AuthorizationOutcome;
+  /** 本次获准的越界能力（联网 / 可写目录），执行时必须原样带上。 */
+  grant: RunGrant;
+}
+
+/**
+ * exec 的执行前授权链（无沙箱逐条确认 → 静态扫描越界/联网 → 按次授权）。
+ *
+ * 从 createBashTool.run 抽出来，供"换了个工具入口、危险程度相同"的命令执行
+ * 复用 —— apply_subagent_patch 的 verify_commands 走这里，保证同一条授权链
+ * 不会因为入口不同而被绕开。
+ *
+ * **不含**用户显式规则（deny/ask）那层：它由闸门在 registry.execute 里对
+ * `exec` 工具判定。需要同款规则判定的调用方（工具内部想以 exec 语义再过一道）
+ * 应通过 `ToolCtx.authorizeAs` 走闸门，不要在这里复制规则匹配。
+ */
+export async function authorizeExecRun(
+  command: string,
+  ctx: ToolCtx,
+  options: ExecAuthorizationOptions,
+): Promise<ExecAuthorization> {
+  // 先静态扫描，再决定问什么：无沙箱逐条确认与越界/联网升权合并成
+  // **一次**询问 —— 同一条命令先弹"无隔离"再弹"越界"两次，只会把用户
+  // 训练成无脑点允许。合并后一次说清两件事。
+  const scan = scanCommand(command, { cwd: ctx.cwd });
+  const plan = planWriteApproval(scan, {
+    cwd: ctx.cwd,
+    home: homedir(),
+    workspaceWritable: options.workspaceWritable !== false,
+    command,
+  });
+  const needsNetwork = scan.network && options.networkBlocked === true;
+  const needsEscalation = plan !== undefined || needsNetwork;
+
+  const perRunConfirmation =
+    options.requireApprovalEveryRun === true && options.authorizeBeforeRun !== false;
+
+  if (ctx.onRequestCapability === undefined) return { grant: {} };
+
+  if (perRunConfirmation && !needsEscalation) {
+    const outcome = await ctx.onRequestCapability({
+      capability: {},
+      reason: "当前没有可用的内核级沙箱（未找到 bwrap），这条命令将在无隔离的情况下直接执行。",
+      details: [`命令：${command}`],
+    });
+    if (outcome !== "approved") return { refused: outcome, grant: {} };
+    return { grant: {} };
+  }
+
+  if (needsEscalation && options.authorizeBeforeRun !== false) {
+    const noSandboxNote = perRunConfirmation
+      ? "当前没有可用的内核级沙箱（未找到 bwrap），这条命令将在无隔离的情况下直接执行。"
+      : undefined;
+    const reason = escalationReasonFor(plan, needsNetwork);
+    const outcome = await ctx.onRequestCapability({
+      capability: {
+        ...(plan !== undefined ? { writeOutside: true } : {}),
+        ...(needsNetwork ? { network: true } : {}),
+      },
+      reason: noSandboxNote === undefined ? reason : `${noSandboxNote}${reason}`,
+      details: escalationDetailsFor(command, plan),
+    });
+    if (outcome !== "approved") return { refused: outcome, grant: {} };
+    return {
+      grant: {
+        ...(needsNetwork ? { allowNetwork: true } : {}),
+        ...(plan !== undefined && plan.binds.length > 0 ? { writablePaths: plan.binds } : {}),
+      },
+    };
+  }
+
+  return { grant: {} };
+}
+
 export function createBashTool(
   runner: ShellRunner,
   options: BashToolOptions = {},
@@ -1001,71 +1093,27 @@ export function createBashTool(
         }
       };
 
-      // ── 无内核沙箱时的兜底闸门 ─────────────────────────────────────
-      //
-      // 沙箱在，漏判有内核挡着；沙箱不在，漏判就是放行。所以执行层退化成
-      // 裸子进程时，每条命令都必须先过用户这一关（除非用户明确选了
-      // no-sandbox 档）。
-      if (
-        options.requireApprovalEveryRun === true &&
-        options.authorizeBeforeRun !== false &&
-        ctx.onRequestCapability !== undefined
-      ) {
-        const outcome = await ctx.onRequestCapability({
-          capability: {},
-          reason: "当前没有可用的内核级沙箱（未找到 bwrap），这条命令将在无隔离的情况下直接执行。",
-          details: [`命令：${command}`],
-        });
-        if (outcome !== "approved") return refusalText(outcome, command);
-      }
-
-      // ── 执行前判定：越界就不跑，先问 ────────────────────────────────
-      //
-      // 与下面"联网先跑失败再问"不同：写越界是**静态判得出来**的，所以命令
-      // 根本不跑。拒绝/超时都要如实回传 —— 模型必须能区分"用户拒绝了"和
-      // "没人应答"，否则只会反复重试同一条命令。
-      //
-      // 判不出来（`writeIntent`）也问，但文案如实说明"放开范围是什么"。
-      // 静态漏判不等于放行：内核仍然挡着，安全上没有退步。
-      const scan = scanCommand(command, { cwd: ctx.cwd });
-      const home = homedir();
-      const plan = planWriteApproval(scan, {
-        cwd: ctx.cwd,
-        home,
-        workspaceWritable: options.workspaceWritable !== false,
-        command,
+      // 执行前授权链与 apply_subagent_patch 的验证命令共用（见 authorizeExecRun）。
+      const auth = await authorizeExecRun(command, ctx, {
+        workspaceWritable: options.workspaceWritable,
+        authorizeBeforeRun: options.authorizeBeforeRun,
+        requireApprovalEveryRun: options.requireApprovalEveryRun,
+        networkBlocked: options.networkBlocked,
       });
-      const needsNetwork = scan.network && options.networkBlocked === true;
-
-      let grant: RunGrant = {};
-      if (
-        options.authorizeBeforeRun !== false &&
-        (plan !== undefined || needsNetwork) &&
-        ctx.onRequestCapability !== undefined
-      ) {
-        const outcome = await ctx.onRequestCapability({
-          capability: {
-            ...(plan !== undefined ? { writeOutside: true } : {}),
-            ...(needsNetwork ? { network: true } : {}),
-          },
-          reason: escalationReasonFor(plan, needsNetwork),
-          details: escalationDetailsFor(command, plan),
-        });
-        if (outcome !== "approved") return refusalText(outcome, command);
-        grant = {
-          ...(needsNetwork ? { allowNetwork: true } : {}),
-          ...(plan !== undefined && plan.binds.length > 0 ? { writablePaths: plan.binds } : {}),
-        };
-      }
+      if (auth.refused !== undefined) return refusalText(auth.refused, command);
+      let grant: RunGrant = auth.grant;
 
       let attempt = await runOnce(grant);
       let result = attempt.result;
 
       // 联网兜底：静态没识别出来、跑起来才被沙箱断网挡住时，**带着真实报错**
       // 去要授权。刻意不做"先行拦截"的那部分由上面的 scan 覆盖；这里保底。
+      // grant.allowNetwork 已置位（静态识别出联网获批，或本次兜底已批准过）
+      // 时跳过 —— 重跑仍失败就如实回传，不再弹第二次同语义的网络授权。
       if (
         result.exitCode !== 0 &&
         options.networkBlocked === true &&
+        grant.allowNetwork !== true &&
         ctx.onRequestCapability !== undefined &&
         looksLikeNetworkFailure(`${result.stdout}\n${result.stderr}`)
       ) {
@@ -1094,9 +1142,11 @@ export function createBashTool(
           return refusalText(outcome, command);
         }
 
-        // 最终给模型的应是重跑结果，不是那次失败的。
+        // 最终给模型的应是重跑结果，不是那次失败的。grant 记下"网络本次已放行"，
+        // 重跑再失败直接回传，不再触发第二次网络授权（幂等）。
         await attempt.spool.discard();
-        attempt = await runOnce({ ...grant, allowNetwork: true });
+        grant = { ...grant, allowNetwork: true };
+        attempt = await runOnce(grant);
         result = attempt.result;
       }
 

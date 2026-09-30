@@ -31,7 +31,10 @@ import { PermissionGate, type GateDecision } from "./permission/gate.ts";
 import { StdinPrompter } from "./permission/prompt.ts";
 import { createAuthorizationAlert } from "./permission/alert.ts";
 import { isSandboxMode, type SandboxMode } from "./permission/mode.ts";
-import type { AuthorizationOutcome } from "./permission/authorization.ts";
+import {
+  authorizationTimeoutFromEnv,
+  type AuthorizationOutcome,
+} from "./permission/authorization.ts";
 import type { CapabilityEscalation } from "./tools/types.ts";
 import type { AskUserAnswer, AskUserQuestion } from "./tui/ask-user.ts";
 import {
@@ -247,11 +250,6 @@ function buildRegistry(
  * 生产路径不读它：60 秒是产品语义，不该被环境变量悄悄改掉。
  * 但 PTY 用例必须验证"到点自动拒绝"，等满一分钟不现实。
  */
-function authorizationTimeoutFromEnv(): number | undefined {
-  const raw = Number(Bun.env.BUGENT_AUTHORIZATION_TIMEOUT_MS ?? "");
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
-}
-
 function createHooks(
   requestCapability?: (escalation: CapabilityEscalation) => Promise<AuthorizationOutcome>,
 ): LoopHooks {

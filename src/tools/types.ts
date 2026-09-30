@@ -63,6 +63,17 @@ export interface ToolCtx {
    */
   onRequestCapability?: (escalation: CapabilityEscalation) => Promise<AuthorizationOutcome>;
   /**
+   * 以一条请求走**当前闸门**（与 registry.execute 顶层判定同一套策略与询问链）。
+   *
+   * 供"一个工具入口内嵌另一个危险动作"的场景复用：apply_subagent_patch 的
+   * verify_commands 是任意命令执行，按 exec 工具的语义逐条过闸门，用户配置
+   * 的 `{tool:"exec", resource:...}` deny/ask 规则必须管得住它。未提供说明
+   * 当前环境没有闸门（视为放行，与老调用点兼容）。
+   */
+  authorizeAs?: (
+    request: PermissionRequest,
+  ) => Promise<{ allowed: boolean; reason?: string }>;
+  /**
    * 向用户提问（ask_user 工具用）。
    * 返回 undefined 表示用户中止了回答。
    * 未提供说明当前环境没有交互界面。
@@ -268,6 +279,19 @@ export class ToolRegistry {
         ? []
         : [{ tool: tool.name, decision: tool.defaultPermission }],
     );
+  }
+
+  /**
+   * 用当前闸门判一次权限请求；没有闸门视为放行。
+   *
+   * 工具内部的"嵌入动作"（如 apply_subagent_patch 的验证命令）通过
+   * `ToolCtx.authorizeAs` 调到这里，保证与顶层工具调用走同一套策略。
+   */
+  async check(
+    request: PermissionRequest,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    if (this.#gate === undefined) return { allowed: true };
+    return this.#gate.check(request);
   }
 
   /** 工具未声明资源时的保守兜底：写工具 / 沙箱工具独占整个 workspace。 */

@@ -27,3 +27,15 @@
 1. **下一轮开工前通读本表**，每条探针都是必配项；#14 的基线红分类是"哪些失败可以忽略"的唯一依据。
 2. 修复合入后，对应行就是最快冒烟单：探针 FAIL = 同类 bug 复发。
 3. 新一轮发现的新问题按「症状 → 最小探针 → 规则」追加成行，不要改旧行。
+
+## 修复记录
+
+- **2026-09-30**（工作区，基于 `95dbaef`）：#1-#13 全部修复/确认，探针固化为 `tests/regression-calibration.test.ts`（21 断言全绿，随套件常跑）。
+  - #1/#2：`paths.ts` ANYWHERE 改平台无关哨兵 + win32 比较归一；`command-scan.ts` 改词法解析（不再用平台 `path.resolve`），输出还原原生形态、比较统一归一键；win32 词法器把 `\` 当路径分隔符（pwsh/cmd 语义）。无沙箱逐条确认与扫描升权**合并为一次询问**（修掉 P1-2 报告里"同一条命令两次询问"）。
+  - #3/#5：`policy.ts` 构造期 deny 单列硬禁令层（运行时 allow 压不过）、addRule 按字面量编译（`*` 不再放大）、globToRegExp 加 `s`（dotAll）。
+  - #4：`ToolCtx.authorizeAs` 接线到闸门；apply_subagent_patch 的 verify_commands 在 apply 之前按 exec 语义逐条过「用户规则 + authorizeExecRun（扫描/能力/逐条确认）」，拒绝则 patch 不应用。
+  - #6-#9：bridge——capability 往返与 permission 分离（always 用在 capability 上回 `always_not_supported`，不再存死规则）、会话命令与弹窗裁决校验 attach 归属（`not_attached`）、静态伺服补 sep 尾缀、四类往返全走 withAuthorizationWindow（60s fail closed，`BUGENT_AUTHORIZATION_TIMEOUT_MS` 仅供测试覆盖）。
+  - #10：复核发现 `delete-generic-password` 的 `-a` **已在位**（报告与 commit 状态的偏差）；加命令 runner 注入点并固化 argv 探针。
+  - #11：`setProviderConfig` 剥离清单扩为 apiKey + headers + tls.key + tls.passphrase；#13（BUG-013）导出脱敏测试同步更新为"headers 不落库"新契约。
+  - #12/#13：`isReadOnlySegment` 识别 sed 脚本体内 w/W/r/R（持写锁）；网络批准按 grant.allowNetwork 幂等去重（静态识别与兜底两条路径都覆盖）。
+  - 测试基线：win32 全量 131 红 → 110 红（净 -21，全部为路径分隔符类转绿），无新增非平台性失败；仍红的均为平台类（PTY 冒烟、bwrap 真沙箱、pwsh 编码/别名、symlink EPERM、审计流水基线项）。

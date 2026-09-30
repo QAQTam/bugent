@@ -3,8 +3,10 @@
  *
  * 在**档位模型**里，规则是"覆盖层"，不是主判定：
  *
- *   1. 显式规则命中（按顺序，第一条生效）→ 用规则的决策
- *   2. 没命中 → 交给**档位**判断（见 mode.ts）
+ *   1. 构造期显式 **deny** 命中 → 硬性禁令（运行期授权不得越过）
+ *   2. 运行期规则（"总是允许"）命中 → 用它的决策
+ *   3. 构造期其余规则命中（按顺序，第一条生效）→ 用规则的决策
+ *   4. 都没命中 → 交给**档位**判断（见 mode.ts）
  *
  * 也就是说规则主要用来做两件事：
  *   - 加硬性禁令：`{tool:"bash", resource:"rm -rf /*", decision:"deny"}`
@@ -64,6 +66,10 @@ export interface PermissionPolicyOptions {
  * 极简 glob -> RegExp。
  *   `*` 匹配任意字符（含 `/`），`?` 匹配单个字符，其余按字面量。
  *
+ * 编译带 `s`（dotAll）标志：命令文本是多行的（`git push\n--force origin main`
+ * 与 `git push --force origin main` 是同一条命令的两种书写），规则匹配必须
+ * 与实际形态对齐，否则硬性禁令连换行变体都拦不住。
+ *
  * 注意：`*` 是"贪婪任意"，所以 `{tool:"bash", resource:"ls*", decision:"allow"}`
  * 会连 `ls; rm -rf /` 一起放行。给 bash 配 allow 规则要非常小心，
  * 默认策略里因此**不预置任何 bash 白名单**。
@@ -80,9 +86,26 @@ export function globToRegExp(pattern: string): RegExp {
       source += ".";
       continue;
     }
-    source += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    source += escapeGlobChar(char);
   }
-  return new RegExp(`${source}$`);
+  return new RegExp(`${source}$`, "s");
+}
+
+function escapeGlobChar(char: string): string {
+  return char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 字面量 -> RegExp（**不**解释 glob）。
+ *
+ * 运行时"总是允许"的对象是用户刚看到的那条具体命令；命令文本里自带的
+ * `*`/`?`（如 `chmod 644 *.log`）是字面量，按 glob 编译会把授权范围放大到
+ * 用户没见过的命令上。
+ */
+function literalToRegExp(text: string): RegExp {
+  let source = "^";
+  for (const char of text) source += escapeGlobChar(char);
+  return new RegExp(`${source}$`, "s");
 }
 
 interface CompiledRule {
@@ -99,11 +122,15 @@ export interface PolicyEvaluation {
 
 export class PermissionPolicy {
   #default: PermissionDecision;
+  /** 构造期规则（用户配置 + 工具自报），顺序即优先级。 */
   #rules: CompiledRule[];
+  /** 运行期规则（"总是允许"等），独立成层 —— 见 evaluate 的判定顺序。 */
+  #runtimeRules: CompiledRule[];
 
   constructor(options: PermissionPolicyOptions) {
     this.#default = options.default ?? "allow";
     this.#rules = [];
+    this.#runtimeRules = [];
     for (const rule of options.rules ?? []) {
       this.#rules.push({
         tool: globToRegExp(rule.tool),
@@ -122,12 +149,31 @@ export class PermissionPolicy {
     }
   }
 
-  evaluate(request: PermissionRequest): PolicyEvaluation {
-    for (const rule of this.#rules) {
+  #firstMatch(rules: readonly CompiledRule[], request: PermissionRequest): PolicyEvaluation | undefined {
+    for (const rule of rules) {
       if (!rule.tool.test(request.tool)) continue;
       if (rule.resource !== undefined && !rule.resource.test(request.resource)) continue;
       return { decision: rule.decision, matched: true };
     }
+    return undefined;
+  }
+
+  /**
+   * 判定顺序（优先级从高到低）：
+   *   1. 构造期显式 **deny** —— 用户的硬性禁令，运行期"总是允许"不得越过；
+   *   2. 运行期规则 —— 用户在弹窗里点的"总是允许"必须能压过构造期的 ask
+   *      规则与工具自报默认，否则永远轮不到；
+   *   3. 构造期其余规则（按声明顺序，第一条命中生效）；
+   *   4. 兜底 default。
+   */
+  evaluate(request: PermissionRequest): PolicyEvaluation {
+    const fromStatic = this.#firstMatch(this.#rules, request);
+    if (fromStatic !== undefined && fromStatic.decision === "deny") {
+      return { decision: "deny", matched: true };
+    }
+    const fromRuntime = this.#firstMatch(this.#runtimeRules, request);
+    if (fromRuntime !== undefined) return fromRuntime;
+    if (fromStatic !== undefined) return fromStatic;
     return { decision: this.#default, matched: false };
   }
 
@@ -136,19 +182,21 @@ export class PermissionPolicy {
   }
 
   /** 运行时追加规则（ui-protocol-spec §6.1 "总是允许"）。
-   *  只活在当前进程内，不写盘、不跨 session。**插入到规则表最前**：
-   *  "第一条命中生效"的顺序语义下，用户运行时显式授权必须压过构造期的 ask/deny
-   *  兜底规则，否则永远轮不到。`bash` → `exec` 别名规则同样复刻。 */
+   *  只活在当前进程内，不写盘、不跨 session。**不进构造期规则表**：
+   *  运行期授权压得过 ask/兜底，压不过用户显式写的 deny（见 evaluate）。
+   *  tool 与 resource 都按**字面量**匹配 —— 用户批准的是眼前那条具体命令，
+   *  文本里的 `*`/`?` 不能被当成通配符放大授权范围。`bash` → `exec`
+   *  别名规则同样复刻。 */
   addRule(rule: PermissionRule): void {
     const compiled = {
-      tool: globToRegExp(rule.tool),
-      resource: rule.resource === undefined ? undefined : globToRegExp(rule.resource),
+      tool: literalToRegExp(rule.tool),
+      resource: rule.resource === undefined ? undefined : literalToRegExp(rule.resource),
       decision: rule.decision,
     };
-    this.#rules.unshift(compiled);
+    this.#runtimeRules.unshift(compiled);
     if (rule.tool === "bash") {
-      this.#rules.splice(1, 0, {
-        tool: globToRegExp("exec"),
+      this.#runtimeRules.splice(1, 0, {
+        tool: literalToRegExp("exec"),
         resource: compiled.resource,
         decision: rule.decision,
       });
@@ -156,7 +204,7 @@ export class PermissionPolicy {
   }
 
   get ruleCount(): number {
-    return this.#rules.length;
+    return this.#rules.length + this.#runtimeRules.length;
   }
 }
 

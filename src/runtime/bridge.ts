@@ -21,9 +21,14 @@ import { PermissionGate } from "../permission/gate";
 import { PermissionPolicy } from "../permission/policy";
 import type { PermissionRequest } from "../permission/policy";
 import type { AskUserAnswer } from "../tui/ask-user";
-import type { AuthorizationOutcome } from "../permission/authorization";
+import {
+  authorizationTimeoutFromEnv,
+  withAuthorizationWindow,
+  type AuthorizationOutcome,
+} from "../permission/authorization";
 import type { SandboxMode } from "../permission/mode";
-import { join } from "node:path";
+import type { CapabilityEscalation } from "../tools/types";
+import { join, sep } from "node:path";
 import { UI_PROTOCOL_VERSION, type UiEnvelope, type UiReplyPayload } from "../protocol/types";
 
 // ---------- 会话工厂（协议侧接入点） ----------
@@ -72,6 +77,19 @@ interface PendingPermission {
   request: PermissionRequest;
 }
 
+/**
+ * 能力授权（联网 / 越界）的挂起往返。
+ *
+ * 与 permission 往返**分开存**：两类请求的 requestId 都叫 r-*，但语义不同 ——
+ * capability 没有"总是允许"的持久化语义（resource 无法表达"以后都放行联网"，
+ * 硬存规则只会得到一条永不命中的死规则）。
+ */
+interface PendingCapability {
+  resolve: (outcome: AuthorizationOutcome) => void;
+  call: ToolCall;
+  escalation: CapabilityEscalation;
+}
+
 interface BridgeSession {
   id: string;
   cwd: string;
@@ -85,6 +103,7 @@ interface BridgeSession {
   turnId?: string | undefined;
   abort?: AbortController | undefined;
   pendingPermission: Map<string, PendingPermission>;
+  pendingCapability: Map<string, PendingCapability>;
   pendingAsk: Map<string, (answers: AskUserAnswer[] | undefined) => void>;
   pendingFallback: Map<string, (allow: boolean) => void>;
   /** 已 attach 的连接序号集合（每个 session 同时只允许一个连接 attach，§7）。 */
@@ -110,6 +129,8 @@ export class Bridge {
   readonly #factory: SessionFactory;
   readonly #staticDir: string | undefined;
   readonly #port: number;
+  /** 授权窗口长度；生产恒为 60s，env 覆盖只为测试（见 authorization.ts）。 */
+  readonly #authorizationTimeoutMs: number | undefined = authorizationTimeoutFromEnv();
 
   constructor(options: BridgeOptions = {}) {
     this.token = options.token ?? crypto.randomUUID().replaceAll("-", "");
@@ -175,7 +196,10 @@ export class Bridge {
     const root = this.#staticDir!;
     const candidate = rel === "" ? "index.html" : rel;
     const resolved = join(root, candidate);
-    if (resolved.startsWith(root) && (await Bun.file(resolved).exists())) {
+    // 前缀比对必须带尾分隔符：`root=/x/dist` 时 `../dist-backup/y` 解析出
+    // `/x/dist-backup/y`，裸 startsWith(root) 会命中同名前缀的兄弟目录。
+    const rootPrefix = root.endsWith(sep) ? root : root + sep;
+    if (resolved.startsWith(rootPrefix) && (await Bun.file(resolved).exists())) {
       return new Response(Bun.file(resolved));
     }
     const index = join(root, "index.html");
@@ -189,14 +213,20 @@ export class Bridge {
     for (const sessionId of conn.attached) {
       this.#sessions.get(sessionId)?.attachedTo.delete(conn.serial);
     }
-    // 断连：挂起的 permission/ask_user Promise 以 denied 处理（§6），比永久挂起安全
-    for (const session of this.#sessions.values()) {
-      for (const pending of session.pendingPermission.values()) pending.resolve("denied");
-      session.pendingPermission.clear();
-      for (const resolve of session.pendingAsk.values()) resolve(undefined);
-      session.pendingAsk.clear();
-      for (const resolve of session.pendingFallback.values()) resolve(false);
-      session.pendingFallback.clear();
+    // 断连：**本连接 attach 的** session 里挂起的 permission/ask_user Promise
+    // 按 denied 处理（§6），比永久挂起安全。别的连接的会话不受影响 ——
+    // 会话操作只归 attach 它的连接管。
+    for (const sessionId of conn.attached) {
+      const bs = this.#sessions.get(sessionId);
+      if (bs === undefined) continue;
+      for (const pending of bs.pendingPermission.values()) pending.resolve("denied");
+      bs.pendingPermission.clear();
+      for (const pending of bs.pendingCapability.values()) pending.resolve("denied");
+      bs.pendingCapability.clear();
+      for (const resolve of bs.pendingAsk.values()) resolve(undefined);
+      bs.pendingAsk.clear();
+      for (const resolve of bs.pendingFallback.values()) resolve(false);
+      bs.pendingFallback.clear();
     }
     this.#conns.delete(conn.serial);
   }
@@ -316,6 +346,7 @@ export class Bridge {
       policy,
       activeTurn: false,
       pendingPermission: new Map(),
+      pendingCapability: new Map(),
       pendingAsk: new Map(),
       pendingFallback: new Map(),
       attachedTo: new Set(),
@@ -335,14 +366,27 @@ export class Bridge {
     return bs;
   }
 
-  /** 权限往返（§6）：发 permission.request，挂起 Promise；超时结论 v0 不做。 */
+  /**
+   * 权限往返（§6）：发 permission.request，挂起 Promise 等答复。
+   *
+   * 带授权窗口（60s，fail closed）：UI 挂着不答时按 timeout 收口并回传模型，
+   * turn 不会永久挂起。断连仍由 #dropConn 按 denied 立即收口。
+   */
   #askPermission(bs: BridgeSession, request: PermissionRequest): Promise<AuthorizationOutcome> {
     const requestId = `r-${crypto.randomUUID()}`;
-    return new Promise<AuthorizationOutcome>((resolve) => {
-      bs.pendingPermission.set(requestId, { resolve, request });
-      this.#evt(bs, "permission.request", { requestId, request });
-    }).finally(() => {
-      bs.pendingPermission.delete(requestId);
+    return withAuthorizationWindow({
+      ...(this.#authorizationTimeoutMs !== undefined ? { timeoutMs: this.#authorizationTimeoutMs } : {}),
+      request: (signal) =>
+        new Promise<boolean>((resolve) => {
+          bs.pendingPermission.set(requestId, {
+            resolve: (outcome) => resolve(outcome === "approved"),
+            request,
+          });
+          this.#evt(bs, "permission.request", { requestId, request });
+          signal.addEventListener("abort", () => bs.pendingPermission.delete(requestId), { once: true });
+        }).finally(() => {
+          bs.pendingPermission.delete(requestId);
+        }),
     });
   }
 
@@ -366,11 +410,22 @@ export class Bridge {
 
   #cmdSessionClose(conn: BridgeConn, env: UiEnvelope, payload: Record<string, unknown>): void {
     const sessionId = String(payload.sessionId ?? "");
+    // 关闭也只归 attach 它的连接管（§7）：未 attach 的连接只能看着。
+    if (!conn.attached.has(sessionId)) {
+      this.#reply(conn, env, { ok: false, code: "not_attached", message: `连接未 attach 该 session: ${sessionId}` });
+      return;
+    }
     const bs = this.#sessions.get(sessionId);
     if (bs) {
       if (bs.activeTurn) bs.abort?.abort(); // 活跃 turn 先 cancel 再释放（§4）
       for (const pending of bs.pendingPermission.values()) pending.resolve("denied");
       bs.pendingPermission.clear();
+      for (const pending of bs.pendingCapability.values()) pending.resolve("denied");
+      bs.pendingCapability.clear();
+      for (const resolve of bs.pendingAsk.values()) resolve(undefined);
+      bs.pendingAsk.clear();
+      for (const resolve of bs.pendingFallback.values()) resolve(false);
+      bs.pendingFallback.clear();
       bs.attachedTo.clear();
       this.#sessions.delete(sessionId);
     }
@@ -432,14 +487,23 @@ export class Bridge {
   #cmdPermissionResolve(conn: BridgeConn, env: UiEnvelope, payload: Record<string, unknown>): void {
     const requestId = String(payload.requestId ?? "");
     const outcome = payload.outcome === "approved" ? "approved" : "denied";
-    for (const bs of this.#sessions.values()) {
+    // 只能裁决**自己 attach 的** session 的挂起请求（§7）：跨连接驱动别人的
+    // 会话（替它点弹窗、关会话）必须在协议层就拒绝。
+    for (const sessionId of conn.attached) {
+      const bs = this.#sessions.get(sessionId);
+      if (bs === undefined) continue;
       const pending = bs.pendingPermission.get(requestId);
       if (pending) {
         pending.resolve(outcome);
         this.#reply(conn, env, { ok: true });
         return;
       }
-      // capability / ask_user 的往返复用 permission.resolve（§6：同一模式）
+      const capability = bs.pendingCapability.get(requestId);
+      if (capability) {
+        capability.resolve(outcome);
+        this.#reply(conn, env, { ok: true });
+        return;
+      }
       if (bs.pendingAsk.has(requestId)) {
         bs.pendingAsk.get(requestId)!(undefined);
         bs.pendingAsk.delete(requestId);
@@ -457,10 +521,14 @@ export class Bridge {
   }
 
   /** "总是允许"（§6.1）：把该 request 的 tool(+resource) 追加为 session 级 allow 规则，
-   *  然后按 approved 继续本次调用。规则只活在当前 session 进程内。 */
+   *  然后按 approved 继续本次调用。规则只活在当前 session 进程内。
+   *  只对 permission 往返有效 —— capability.request（联网/越界）没有可持久化的
+   *  规则语义，硬存只会得到一条永不命中的死规则。 */
   #cmdPermissionAlways(conn: BridgeConn, env: UiEnvelope, payload: Record<string, unknown>): void {
     const requestId = String(payload.requestId ?? "");
-    for (const bs of this.#sessions.values()) {
+    for (const sessionId of conn.attached) {
+      const bs = this.#sessions.get(sessionId);
+      if (bs === undefined) continue;
       const pending = bs.pendingPermission.get(requestId);
       if (pending) {
         bs.policy.addRule({
@@ -472,13 +540,23 @@ export class Bridge {
         this.#reply(conn, env, { ok: true });
         return;
       }
+      if (bs.pendingCapability.has(requestId)) {
+        this.#reply(conn, env, {
+          ok: false,
+          code: "always_not_supported",
+          message: "capability.request（联网/越界）不支持\"总是允许\"：能力是按次授权的，请用 permission.resolve 答复",
+        });
+        return;
+      }
     }
     this.#reply(conn, env, { ok: false, code: "no_request", message: `requestId 不存在: ${requestId}` });
   }
 
   #cmdAskUserAnswer(conn: BridgeConn, env: UiEnvelope, payload: Record<string, unknown>): void {
     const requestId = String(payload.requestId ?? "");
-    for (const bs of this.#sessions.values()) {
+    for (const sessionId of conn.attached) {
+      const bs = this.#sessions.get(sessionId);
+      if (bs === undefined) continue;
       const resolve = bs.pendingAsk.get(requestId);
       if (resolve) {
         bs.pendingAsk.delete(requestId);
@@ -492,7 +570,9 @@ export class Bridge {
 
   #cmdExtensionRoleFallback(conn: BridgeConn, env: UiEnvelope, payload: Record<string, unknown>): void {
     const requestId = String(payload.requestId ?? "");
-    for (const bs of this.#sessions.values()) {
+    for (const sessionId of conn.attached) {
+      const bs = this.#sessions.get(sessionId);
+      if (bs === undefined) continue;
       const resolve = bs.pendingFallback.get(requestId);
       if (resolve) {
         bs.pendingFallback.delete(requestId);
@@ -534,34 +614,57 @@ export class Bridge {
       },
       onRequestCapability: (call, escalation) => {
         const requestId = `r-${crypto.randomUUID()}`;
-        return new Promise<AuthorizationOutcome>((resolve) => {
-          bs.pendingPermission.set(requestId, {
-            resolve,
-            request: { tool: call.name, resource: "", summary: escalation.reason },
-          });
-          this.#evt(bs, "capability.request", { requestId, call, escalation });
-        }).finally(() => {
-          bs.pendingPermission.delete(requestId);
+        // 能力授权（联网/越界）与 permission 往返分开存（见 PendingCapability）：
+        // permission.always 用在 capability 上只会存出一条死规则。同样带 60s
+        // 授权窗口，UI 不答按 timeout 收口。
+        return withAuthorizationWindow({
+          ...(this.#authorizationTimeoutMs !== undefined ? { timeoutMs: this.#authorizationTimeoutMs } : {}),
+          request: (signal) =>
+            new Promise<boolean>((resolve) => {
+              bs.pendingCapability.set(requestId, {
+                resolve: (outcome) => resolve(outcome === "approved"),
+                call,
+                escalation,
+              });
+              this.#evt(bs, "capability.request", { requestId, call, escalation });
+              signal.addEventListener("abort", () => bs.pendingCapability.delete(requestId), { once: true });
+            }).finally(() => {
+              bs.pendingCapability.delete(requestId);
+            }),
         });
       },
       onAskUser: (call, questions) => {
         const requestId = `r-${crypto.randomUUID()}`;
-        return new Promise<AskUserAnswer[] | undefined>((resolve) => {
-          bs.pendingAsk.set(requestId, resolve);
-          this.#evt(bs, "ask_user.request", { requestId, call, questions });
-        }).finally(() => {
-          bs.pendingAsk.delete(requestId);
-        });
+        let answers: AskUserAnswer[] | undefined;
+        return withAuthorizationWindow({
+          ...(this.#authorizationTimeoutMs !== undefined ? { timeoutMs: this.#authorizationTimeoutMs } : {}),
+          request: (signal) =>
+            new Promise<boolean>((resolve) => {
+              bs.pendingAsk.set(requestId, (value) => {
+                answers = value;
+                resolve(value !== undefined);
+              });
+              this.#evt(bs, "ask_user.request", { requestId, call, questions });
+              signal.addEventListener("abort", () => bs.pendingAsk.delete(requestId), { once: true });
+            }).finally(() => {
+              bs.pendingAsk.delete(requestId);
+            }),
+        }).then((outcome) => (outcome === "approved" ? answers : undefined));
       },
       onUsage: (usage) => this.#evt(bs, "usage", { usage }),
       onExtensionRoleFallback: (error) => {
         const requestId = `r-${crypto.randomUUID()}`;
-        return new Promise<boolean>((resolve) => {
-          bs.pendingFallback.set(requestId, resolve);
-          this.#evt(bs, "extension_role.fallback_request", { requestId, error: error instanceof Error ? error.message : String(error) });
-        }).finally(() => {
-          bs.pendingFallback.delete(requestId);
-        });
+        return withAuthorizationWindow({
+          ...(this.#authorizationTimeoutMs !== undefined ? { timeoutMs: this.#authorizationTimeoutMs } : {}),
+          request: (signal) =>
+            new Promise<boolean>((resolve) => {
+              bs.pendingFallback.set(requestId, resolve);
+              this.#evt(bs, "extension_role.fallback_request", { requestId, error: error instanceof Error ? error.message : String(error) });
+              signal.addEventListener("abort", () => bs.pendingFallback.delete(requestId), { once: true });
+            }).finally(() => {
+              bs.pendingFallback.delete(requestId);
+            }),
+        }).then((outcome) => outcome === "approved");
       },
       ...(managed ?? {}),
     };
@@ -588,6 +691,13 @@ export class Bridge {
     const bs = this.#sessions.get(sessionId);
     if (!bs) {
       this.#reply(conn, env, { ok: false, code: "no_session", message: `session 不存在: ${sessionId}` });
+      return undefined;
+    }
+    // 会话操作（turn.send / turn.cancel / session.close）只对 attach 了该
+    // session 的连接生效（§7）：否则任何持 token 连接都能驱动/取消/关闭
+    // 别的连接正在用的会话。
+    if (!conn.attached.has(sessionId)) {
+      this.#reply(conn, env, { ok: false, code: "not_attached", message: `连接未 attach 该 session: ${sessionId}` });
       return undefined;
     }
     return bs;
