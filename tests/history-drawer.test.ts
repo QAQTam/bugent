@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { composeHistoryDrawer, historyPaneHeights } from "../src/tui/history-drawer.ts";
+import { composeHistoryDrawer, historyPaneHeights } from "../src/tui/widgets/history-drawer.ts";
 
 describe("历史抽屉布局", () => {
   test("上下半屏比例稳定，小高度也能降级", () => {

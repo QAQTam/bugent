@@ -14,7 +14,7 @@ import {
   padAnsi,
   truncateAnsi,
   visibleWidth,
-} from "../src/tui/ansi.ts";
+} from "../src/tui/core/ansi.ts";
 
 /** 终端实际渲染宽度：TAB 前进到下一个 8 的倍数（模拟真实终端）。 */
 function terminalWidth(line: string): number {

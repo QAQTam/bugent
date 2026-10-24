@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { renderMarkdown } from "../src/tui/markdown.ts";
-import { LezerMarkdownBoundaryTracker } from "../src/tui/lezer-markdown-boundary.ts";
+import { renderMarkdown } from "../src/tui/markdown/markdown.ts";
+import { LezerMarkdownBoundaryTracker } from "../src/tui/markdown/lezer-markdown-boundary.ts";
 import {
   findStableMarkdownBoundary,
   StreamingMarkdownCache,
-} from "../src/tui/streaming-markdown.ts";
+} from "../src/tui/markdown/streaming-markdown.ts";
 
 describe("StreamingMarkdownCache", () => {
   test("顶层段落边界会被冻结，后续只重渲染 tail", () => {

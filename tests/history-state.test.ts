@@ -9,7 +9,7 @@ import {
   shouldShowMoreButton,
   shouldShowReturnButton,
   syncHistoryView,
-} from "../src/tui/history-state.ts";
+} from "../src/tui/widgets/history-state.ts";
 
 describe("HistoryViewState", () => {
   test("向上滚动退出钉底，滚回底部恢复 followTail", () => {

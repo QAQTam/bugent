@@ -11,9 +11,9 @@
  * ASCII 没有这个问题，而且三态等宽能保证内容左对齐不跳。
  */
 
-import { BOLD, DIM, RESET, fg } from "./markdown.ts";
-import { truncateAnsi, visibleWidth } from "./ansi.ts";
-import { COLOR } from "./theme.ts";
+import { BOLD, DIM, RESET, fg } from "./markdown/markdown.ts";
+import { truncateAnsi, visibleWidth } from "./core/ansi.ts";
+import { COLOR } from "./core/theme.ts";
 import { toolDisplayName, type ToolItem } from "./renderers.ts";
 import { countTodos, tryParseTodos, type Todo, type TodoStatus } from "../tools/todo.ts";
 

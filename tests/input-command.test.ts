@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { looksLikeSlashCommand } from "../src/tui/input-command.ts";
+import { looksLikeSlashCommand } from "../src/tui/widgets/input-command.ts";
 
 describe("输入框 slash command 判定", () => {
   test("命令名与带参数命令仍被识别", () => {

@@ -8,11 +8,11 @@ import {
   THINKING_FRAMES,
   THINKING_LINE_INDEX,
   type AgentActivity,
-} from "../src/tui/thinking.ts";
+} from "../src/tui/markdown/thinking.ts";
 import { mapStreamEvent } from "../src/provider/adapters/openai-chat.ts";
 import type { ChatChunk } from "../src/provider/types.ts";
-import { BOLD, fg } from "../src/tui/markdown.ts";
-import { COLOR } from "../src/tui/theme.ts";
+import { BOLD, fg } from "../src/tui/markdown/markdown.ts";
+import { COLOR } from "../src/tui/core/theme.ts";
 
 describe("思考链路 · 缓冲", () => {
   test("累积增量", () => {

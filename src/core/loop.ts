@@ -23,7 +23,7 @@ import type { AgentSession } from "./session.ts";
 import type { StoredMessage } from "./message.ts";
 import type { CapabilityEscalation, ToolExecution, ToolRegistry } from "../tools/types.ts";
 import type { AuthorizationOutcome } from "../permission/authorization.ts";
-import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
+import type { AskUserAnswer, AskUserQuestion } from "./ask-user.ts";
 
 export interface ToolCallDelta {
   id: string;

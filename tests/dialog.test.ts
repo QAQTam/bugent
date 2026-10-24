@@ -7,10 +7,10 @@ import {
   hitDialogAction,
   hitDialogActionAtLine,
   type DialogAction,
-} from "../src/tui/dialog.ts";
-import { visibleWidth } from "../src/tui/ansi.ts";
-import { bg } from "../src/tui/markdown.ts";
-import { COLOR } from "../src/tui/theme.ts";
+} from "../src/tui/widgets/dialog.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
+import { bg } from "../src/tui/markdown/markdown.ts";
+import { COLOR } from "../src/tui/core/theme.ts";
 
 describe("授权弹窗按钮", () => {
   const actions: DialogAction[] = [

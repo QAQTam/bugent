@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { sliceViewport, type ViewportSpan } from "../src/tui/viewport.ts";
+import { sliceViewport, type ViewportSpan } from "../src/tui/core/viewport.ts";
 
 /** 造一个 20 行的条目，头部是 `HEADER`。 */
 function longItem(start: number, length: number, header: string): { lines: string[]; span: ViewportSpan } {

@@ -23,7 +23,7 @@ import {
 import { renderBashTool, renderDiffTool, renderReadFileTool, parseReadHeader } from "../src/tui/render-tools.ts";
 import { registerBuiltinToolRenderers } from "../src/tui/renderers-builtin.ts";
 import { renderGenericTool, renderToolItem, type ToolItem } from "../src/tui/renderers.ts";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
 import type { ToolPresentation } from "../src/core/presentation.ts";
 import type { ToolCtx } from "../src/tools/types.ts";
 

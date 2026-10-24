@@ -11,9 +11,9 @@
  */
 
 import type { DisplayItem } from "./transcript.ts";
-import { BOLD, DIM, RESET, fg, renderPlain } from "./markdown.ts";
-import { truncateAnsi, visibleWidth } from "./ansi.ts";
-import { COLOR } from "./theme.ts";
+import { BOLD, DIM, RESET, fg, renderPlain } from "./markdown/markdown.ts";
+import { truncateAnsi, visibleWidth } from "./core/ansi.ts";
+import { COLOR } from "./core/theme.ts";
 
 export type ToolItem = Extract<DisplayItem, { kind: "tool" }>;
 

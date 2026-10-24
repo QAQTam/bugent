@@ -1,14 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { AskUserFlow, ESC_WINDOW_MS } from "../src/tui/widgets/ask-user.ts";
 import {
-  AskUserFlow,
-  ESC_WINDOW_MS,
-  formatAnswers,
   MAX_OPTIONS,
   MAX_QUESTIONS,
+  formatAnswers,
   type AskUserQuestion,
-} from "../src/tui/ask-user.ts";
+} from "../src/core/ask-user.ts";
 import { createAskUserTool, parseQuestions } from "../src/tools/ask_user.ts";
-import type { Key } from "../src/tui/keys.ts";
+import type { Key } from "../src/tui/core/keys.ts";
 
 const text = (value: string): Key => ({ type: "text", value });
 const key = (type: Key["type"]): Key => ({ type } as Key);

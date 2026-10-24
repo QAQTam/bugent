@@ -7,7 +7,7 @@ import {
   parseBashPresentation,
   renderBashTool,
 } from "../src/tui/render-tools.ts";
-import { clearHighlightCache, highlightCode } from "../src/tui/highlight.ts";
+import { clearHighlightCache, highlightCode } from "../src/tui/markdown/highlight.ts";
 
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, "");
 

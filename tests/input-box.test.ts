@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "../src/tui/ansi.ts";
-import { layoutInput } from "../src/tui/input-view.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
+import { layoutInput } from "../src/tui/widgets/input-view.ts";
 import {
   composeInputBox,
   inputBoxGeometry,
@@ -8,7 +8,7 @@ import {
   inputCursorFromClick,
   INPUT_MAX_CONTENT_ROWS,
   type InputBoxRect,
-} from "../src/tui/input-box.ts";
+} from "../src/tui/widgets/input-box.ts";
 
 const plain = (text: string): string => Bun.stripANSI(text);
 

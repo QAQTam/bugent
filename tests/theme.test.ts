@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { renderMarkdown } from "../src/tui/markdown.ts";
-import { applyTheme, COLOR, currentBackground, darkTheme } from "../src/tui/theme.ts";
+import { renderMarkdown } from "../src/tui/markdown/markdown.ts";
+import { applyTheme, COLOR, currentBackground, darkTheme } from "../src/tui/core/theme.ts";
 
 afterEach(() => applyTheme("dark"));
 

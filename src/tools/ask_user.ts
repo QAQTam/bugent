@@ -9,9 +9,9 @@
  */
 
 import type { JSONSchema } from "../provider/types.ts";
-import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
-import { MAX_OPTIONS, MAX_QUESTIONS } from "../tui/ask-user.ts";
-import { formatAnswers } from "../tui/ask-user.ts";
+import type { AskUserAnswer, AskUserQuestion } from "../core/ask-user.ts";
+import { MAX_OPTIONS, MAX_QUESTIONS } from "../core/ask-user.ts";
+import { formatAnswers } from "../core/ask-user.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 
 export const ASK_USER_TOOL_NAME = "ask_user";

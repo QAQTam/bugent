@@ -11,16 +11,16 @@
  * Transcript.TOOL_PROGRESS_LINES），让用户看到"现在跑到哪了"。
  */
 
-import { BOLD, bg, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown.ts";
-import { truncateAnsi, visibleWidth } from "./ansi.ts";
-import { COLOR } from "./theme.ts";
+import { BOLD, bg, DIM, RESET, fg, renderPlain, wrapToLines } from "./markdown/markdown.ts";
+import { truncateAnsi, visibleWidth } from "./core/ansi.ts";
+import { COLOR } from "./core/theme.ts";
 import { toolDisplayName, type ToolItem } from "./renderers.ts";
 import type { BashPresentation, ToolOutputSegment } from "../core/presentation.ts";
 import { parseDiffLine, parseDiffStat, type DiffStat } from "../tools/diff.ts";
 import { jsonStringField } from "../core/partial-json.ts";
 import { parsePatch } from "../patch/parser.ts";
 import { patchProgress } from "../patch/streaming-progress.ts";
-import { highlightCode } from "./highlight.ts";
+import { highlightCode } from "./markdown/highlight.ts";
 
 /** 折叠规格：头几行 + 尾几行。 */
 export const FOLD_SPEC = {

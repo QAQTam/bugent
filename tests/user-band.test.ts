@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "../src/tui/ansi.ts";
-import { bg } from "../src/tui/markdown.ts";
-import { COLOR } from "../src/tui/theme.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
+import { bg } from "../src/tui/markdown/markdown.ts";
+import { COLOR } from "../src/tui/core/theme.ts";
 import {
   USER_BAND_MARK,
   bandText,
   composeUserBand,
   shouldPinUserMessage,
-} from "../src/tui/user-band.ts";
+} from "../src/tui/widgets/user-band.ts";
 
 describe("吸顶用户消息行", () => {
   test("整行铺底色，宽度正好等于终端宽度", () => {

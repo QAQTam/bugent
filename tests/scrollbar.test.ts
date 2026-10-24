@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
 import {
   composeScrollbar,
   createScrollbarMetrics,
   hitScrollbar,
   scrollbarThumbAt,
   scrollOffsetFromDrag,
-} from "../src/tui/scrollbar.ts";
+} from "../src/tui/core/scrollbar.ts";
 
 function metrics(scrollOffset: number) {
   return createScrollbarMetrics({

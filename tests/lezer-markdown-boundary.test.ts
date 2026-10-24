@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { LezerMarkdownBoundaryTracker } from "../src/tui/lezer-markdown-boundary.ts";
+import { LezerMarkdownBoundaryTracker } from "../src/tui/markdown/lezer-markdown-boundary.ts";
 
 describe("LezerMarkdownBoundaryTracker", () => {
   test("只冻结最后一个顶层 block 之前的 block", () => {

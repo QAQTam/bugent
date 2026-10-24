@@ -26,8 +26,8 @@
 import type { Usage } from "../provider/types.ts";
 import type { TokenCounter } from "../util/tokenizer.ts";
 import { HeuristicCounter } from "../util/tokenizer.ts";
-import { fg, RESET } from "./markdown.ts";
-import { COLOR } from "./theme.ts";
+import { fg, RESET } from "./markdown/markdown.ts";
+import { COLOR } from "./core/theme.ts";
 
 /** 滑动窗口长度：太短读数跳，太长反应迟钝。3s 是"一眼能看出快慢"的折中。 */
 export const SPEED_WINDOW_MS = 3000;

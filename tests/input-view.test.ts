@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { inputIndexAt, inputViewport, layoutInput } from "../src/tui/input-view.ts";
+import { inputIndexAt, inputViewport, layoutInput } from "../src/tui/widgets/input-view.ts";
 
 describe("TUI input viewport", () => {
   test("光标列包含左侧边框和提示符", () => {

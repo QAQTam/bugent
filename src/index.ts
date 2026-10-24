@@ -36,7 +36,7 @@ import {
   type AuthorizationOutcome,
 } from "./permission/authorization.ts";
 import type { CapabilityEscalation } from "./tools/types.ts";
-import type { AskUserAnswer, AskUserQuestion } from "./tui/ask-user.ts";
+import type { AskUserAnswer, AskUserQuestion } from "./core/ask-user.ts";
 import {
   ALLOW_ALL_POLICY,
   composePolicy,

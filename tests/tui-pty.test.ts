@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bg } from "../src/tui/markdown.ts";
-import { visibleWidth } from "../src/tui/ansi.ts";
-import { COLOR } from "../src/tui/theme.ts";
-import { USER_BAND_MARK } from "../src/tui/user-band.ts";
+import { bg } from "../src/tui/markdown/markdown.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
+import { COLOR } from "../src/tui/core/theme.ts";
+import { USER_BAND_MARK } from "../src/tui/widgets/user-band.ts";
 
 const strip = (text: string): string => Bun.stripANSI(text);
 const HOVER_BG = bg(COLOR.buttonHoverBg);

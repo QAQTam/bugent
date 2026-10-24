@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { Screen } from "../src/tui/screen.ts";
-import { KeyDecoder } from "../src/tui/keys.ts";
-import { truncateAnsi, visibleWidth } from "../src/tui/ansi.ts";
-import { renderMarkdown, wrapToLines } from "../src/tui/markdown.ts";
-import { copyNotice } from "../src/tui/message-actions.ts";
+import { Screen } from "../src/tui/core/screen.ts";
+import { KeyDecoder } from "../src/tui/core/keys.ts";
+import { truncateAnsi, visibleWidth } from "../src/tui/core/ansi.ts";
+import { renderMarkdown, wrapToLines } from "../src/tui/markdown/markdown.ts";
+import { copyNotice } from "../src/tui/widgets/message-actions.ts";
 
 describe("P5 · 差分渲染器", () => {
   test("首帧全量重绘，第二帧无变化则不输出", () => {

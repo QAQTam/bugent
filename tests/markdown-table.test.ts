@@ -5,7 +5,7 @@ import {
   renderMarkdown,
   resetMarkdownCacheStats,
   splitMarkdown,
-} from "../src/tui/markdown.ts";
+} from "../src/tui/markdown/markdown.ts";
 
 describe("Markdown 表格渲染", () => {
   test("每个物理行都保留竖线，不因超宽丢边框", () => {

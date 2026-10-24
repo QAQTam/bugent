@@ -7,8 +7,8 @@
  */
 
 import type { MsgId } from "../core/message.ts";
-import type { HitRect } from "./hit.ts";
-import type { MessageAction } from "./message-actions.ts";
+import type { HitRect } from "./core/hit.ts";
+import type { MessageAction } from "./widgets/message-actions.ts";
 
 /** 用哪个键点。同一个矩形在左右键下可能命中不同目标（工具卡片就是如此）。 */
 export type ProbeButton = "left" | "right";

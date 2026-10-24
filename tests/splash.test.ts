@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
 import {
   composeSplash,
   mixHex,
@@ -7,7 +7,7 @@ import {
   wordmarkWidth,
   type SplashInfo,
   type SplashInput,
-} from "../src/tui/splash.ts";
+} from "../src/tui/widgets/splash.ts";
 
 const plain = (text: string): string => Bun.stripANSI(text);
 

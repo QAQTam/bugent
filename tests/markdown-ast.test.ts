@@ -3,7 +3,7 @@ import {
   parseMarkdownTree,
   readClosedFencedCode,
   readTableModel,
-} from "../src/tui/markdown-ast.ts";
+} from "../src/tui/markdown/markdown-ast.ts";
 
 describe("markdown AST", () => {
   test("GFM 表格由 Lezer 识别", () => {

@@ -11,7 +11,7 @@ import type { CapabilityGrant, ModeRequirement } from "../permission/mode.ts";
 import type { AuthorizationOutcome } from "../permission/authorization.ts";
 import type { WorkspaceFileEdit } from "../core/workspace.ts";
 import type { ToolPresentation } from "../core/presentation.ts";
-import type { AskUserAnswer, AskUserQuestion } from "../tui/ask-user.ts";
+import type { AskUserAnswer, AskUserQuestion } from "../core/ask-user.ts";
 import type { ResourceClaim } from "./locks.ts";
 import { ResourceLockManager } from "./locks.ts";
 import {

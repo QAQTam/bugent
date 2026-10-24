@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatReasoningDuration, renderReasoningItem } from "../src/tui/render-reasoning.ts";
+import { formatReasoningDuration, renderReasoningItem } from "../src/tui/markdown/render-reasoning.ts";
 import type { DisplayItem } from "../src/tui/transcript.ts";
 
 type ReasoningItem = Extract<DisplayItem, { kind: "reasoning" }>;

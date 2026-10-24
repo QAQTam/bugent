@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
 import {
   BUTTON_LEFT,
   BUTTON_TOP_LEFT,
@@ -8,10 +8,10 @@ import {
   buttonWidth,
   composeButton,
   paintButtonLines,
-} from "../src/tui/button.ts";
-import { perceivedLuminance } from "../src/tui/background.ts";
-import { bg } from "../src/tui/markdown.ts";
-import { COLOR } from "../src/tui/theme.ts";
+} from "../src/tui/widgets/button.ts";
+import { perceivedLuminance } from "../src/tui/widgets/background.ts";
+import { bg } from "../src/tui/markdown/markdown.ts";
+import { COLOR } from "../src/tui/core/theme.ts";
 
 /** 取按钮行里某一列的字形（1-based），用来核对命中区真的落在画出来的边框上。 */
 const cellAt = (line: string, column: number): string =>

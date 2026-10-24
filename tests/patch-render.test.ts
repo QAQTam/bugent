@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToolItem, type ToolItem } from "../src/tui/renderers.ts";
 import { registerBuiltinToolRenderers } from "../src/tui/renderers-builtin.ts";
-import { visibleWidth } from "../src/tui/ansi.ts";
+import { visibleWidth } from "../src/tui/core/ansi.ts";
 
 // 走真实出口 renderToolItem（应用就是这么调的）：它带一层"任何一行都不许超过
 // width"的兜底，用来收住固定文案（"… 还有 N 行（点击展开）"）在极窄终端上的溢出。

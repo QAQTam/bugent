@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FRAME_INTERVAL_MS,
   FrameScheduler,
-} from "../src/tui/frame-scheduler.ts";
+} from "../src/tui/core/frame-scheduler.ts";
 
 /** 可手动推进的假定时器 + 单调时钟：不依赖真实时间，用例是确定的。 */
 function makeClock() {

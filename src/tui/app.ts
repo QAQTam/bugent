@@ -18,10 +18,7 @@ import { BUGENT_VERSION } from "../version.ts";
 import { combineHooks, runTurn, runUserTurn, type LoopHooks } from "../core/loop.ts";
 import type { AgentSession } from "../core/session.ts";
 import type { SessionRuntime } from "../core/runtime.ts";
-import {
-  GOAL_INITIALIZATION_INSTRUCTION,
-  type GoalController,
-} from "../goal/controller.ts";
+import type { GoalController } from "../goal/controller.ts";
 import type { McpStatus } from "../mcp/manager.ts";
 import type { SkillStatus } from "../skills/manager.ts";
 import { BranchService } from "../core/branch-service.ts";
@@ -32,7 +29,6 @@ import type { ToolRegistry } from "../tools/types.ts";
 import { APPLY_PATCH_TOOL_NAME } from "../tools/apply-patch.ts";
 import {
   AUTHORIZATION_TIMEOUT_MS,
-  formatCountdown,
   withAuthorizationWindow,
   type AuthorizationOutcome,
 } from "../permission/authorization.ts";
@@ -52,23 +48,19 @@ import {
   StreamMeter,
   type MetricsStyle,
 } from "./metrics.ts";
-import { Screen } from "./screen.ts";
-import { Terminal } from "./term.ts";
-import { KeyDecoder, type Key } from "./keys.ts";
-import { FrameScheduler } from "./frame-scheduler.ts";
+import { Screen } from "./core/screen.ts";
+import { Terminal } from "./core/term.ts";
+import { KeyDecoder, type Key } from "./core/keys.ts";
+import { FrameScheduler } from "./core/frame-scheduler.ts";
 import { StreamPacer } from "./stream-pacer.ts";
-import { StreamingMarkdownCache } from "./streaming-markdown.ts";
-import { LezerMarkdownBoundaryTracker } from "./lezer-markdown-boundary.ts";
-import {
-  composeSplash,
-  SPLASH_EXIT_MS,
-  SPLASH_FRAME_MS,
-  type SplashInfo,
-} from "./splash.ts";
-import { bg, BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown.ts";
-import { truncateAnsi, padAnsi, visibleWidth } from "./ansi.ts";
-import { inputIndexAt, layoutInput, type InputLayout } from "./input-view.ts";
-import { looksLikeSlashCommand } from "./input-command.ts";
+import { StreamingMarkdownCache } from "./markdown/streaming-markdown.ts";
+import { LezerMarkdownBoundaryTracker } from "./markdown/lezer-markdown-boundary.ts";
+import { SplashController } from "./widgets/splash.ts";
+import { GoalFlows, type GoalFlowHost } from "./goal-flows.ts";
+import { BOLD, DIM, RESET, fg, renderMarkdown, renderPlain } from "./markdown/markdown.ts";
+import { truncateAnsi, visibleWidth } from "./core/ansi.ts";
+import { inputIndexAt, layoutInput, type InputLayout } from "./widgets/input-view.ts";
+import { looksLikeSlashCommand } from "./widgets/input-command.ts";
 import {
   composeInputBox,
   inputBoxGeometry,
@@ -76,7 +68,7 @@ import {
   inputCursorFromClick,
   INPUT_PLACEHOLDER,
   type InputBoxRect,
-} from "./input-box.ts";
+} from "./widgets/input-box.ts";
 import {
   composeScrollbar,
   createScrollbarMetrics,
@@ -85,12 +77,12 @@ import {
   scrollbarThumbAt,
   scrollOffsetFromDrag,
   type ScrollbarMetrics,
-} from "./scrollbar.ts";
+} from "./core/scrollbar.ts";
 import { Transcript, displayActionMsgId, displayMsgId, type DisplayItem } from "./transcript.ts";
-import { applyTheme, COLOR } from "./theme.ts";
-import { detectTerminalBackground } from "./background.ts";
+import { applyTheme, COLOR } from "./core/theme.ts";
+import { detectTerminalBackground } from "./widgets/background.ts";
 import { renderToolItem } from "./renderers.ts";
-import { renderReasoningItem } from "./render-reasoning.ts";
+import { renderReasoningItem } from "./markdown/render-reasoning.ts";
 import { registerBuiltinToolRenderers } from "./renderers-builtin.ts";
 import { composeTodoPanel, TODO_COLLAPSED_LINES } from "./render-todo.ts";
 import {
@@ -100,7 +92,7 @@ import {
   THINKING_BLOCK_ROWS,
   THINKING_SPINNER_ROWS,
   type AgentActivity,
-} from "./thinking.ts";
+} from "./markdown/thinking.ts";
 import {
   TranscriptLayout,
   assistantScrollFloor,
@@ -108,33 +100,25 @@ import {
   toFoldableBlocks,
   type FoldableBlock,
 } from "./transcript-layout.ts";
-import { composeHistoryDrawer, historyPaneHeights } from "./history-drawer.ts";
+import { composeHistoryDrawer, historyPaneHeights } from "./widgets/history-drawer.ts";
 import {
   BUTTON_BOX_ROWS,
   buttonRows,
   buttonShapeFor,
   composeButton,
   type ButtonShape,
-} from "./button.ts";
-import { composeUserBand, shouldPinUserMessage } from "./user-band.ts";
-import { hitRect, rectCenter, rectOfRow, type HitRect } from "./hit.ts";
+} from "./widgets/button.ts";
+import { composeUserBand, shouldPinUserMessage } from "./widgets/user-band.ts";
+import { hitRect, rectCenter, rectOfRow, type HitRect } from "./core/hit.ts";
 import {
-  hitTargetName,
-  messageRegions,
-  type HitRegionEntry,
-  type HitTarget,
-  type ProbeButton,
-} from "./hit-target.ts";
-import {
-  checkHitProbes,
-  checkVisualAnchors,
-  contentLineToScreenRow,
-  formatAnchorFailures,
-  formatHitProbeFailures,
-  visibleRangeOf,
-  type HitProbe,
-  type VisualAnchor,
-} from "./hit-probe.ts";
+  paintDialog,
+  renderDialogView,
+  type PendingDialog,
+  type PendingMessageMenu,
+  type RenderedDialog,
+} from "./dialog-view.ts";
+import { HitRegionModel, type ButtonTarget, type PlacedButton } from "./hit-regions.ts";
+import { contentLineToScreenRow, visibleRangeOf } from "./core/hit-probe.ts";
 import {
   closeHistoryView,
   initialHistoryView,
@@ -146,19 +130,19 @@ import {
   shouldShowReturnButton,
   syncHistoryView,
   type HistoryViewState,
-} from "./history-state.ts";
-import { setHighlightReadyHandler } from "./highlight.ts";
+} from "./widgets/history-state.ts";
+import { setHighlightReadyHandler } from "./markdown/highlight.ts";
 import {
   AskUserFlow,
   type AskUserAnswer,
   type AskUserQuestion,
-} from "./ask-user.ts";
+} from "./widgets/ask-user.ts";
 import {
   SettingsPanel,
   centeredPanelTop,
   panelRowBudget,
   type SettingsRow,
-} from "./settings-panel.ts";
+} from "./widgets/settings-panel.ts";
 import { currentTodoList, TODO_TOOL_NAME, type TodoList } from "../tools/todo.ts";
 import { createWorkspaceFs } from "../tools/workspace-fs.ts";
 import { FileStreamProgress, isFileToolName } from "../tools/file-progress.ts";
@@ -166,37 +150,13 @@ import type { PermissionRequest } from "../permission/policy.ts";
 import { describeCapability, isSandboxMode, MODES, type SandboxMode } from "../permission/mode.ts";
 import type { CapabilityEscalation } from "../tools/types.ts";
 import type { AuditTrail } from "../store/audit.ts";
-import {
-  composeDialogActions,
-  dialogInnerWidth,
-  dialogLeftPadding,
-  dialogPointAt,
-  type DialogAction,
-} from "./dialog.ts";
+import { dialogInnerWidth, dialogLeftPadding } from "./widgets/dialog.ts";
 import {
   MESSAGE_ACTIONS,
   copyNotice,
   messageActionFromKey,
   type MessageAction,
-} from "./message-actions.ts";
-
-/** 弹窗渲染结果：行 + 按钮（弹窗局部坐标）。 */
-interface RenderedDialog {
-  lines: string[];
-  buttons: {
-    target: HitTarget;
-    /** 按钮首行（弹窗局部 0-based 行号）。 */
-    line: number;
-    /** 按钮占几行：框形态 3 行，紧凑形态 1 行。 */
-    lineSpan: number;
-    left: number;
-    right: number;
-    /** 左上角字形，自检锚点用它比对画面。 */
-    glyph: string;
-  }[];
-  /** 设置面板的可点行（弹窗局部 0-based 行号 -> 行下标）。 */
-  settingsRows?: { line: number; index: number }[];
-}
+} from "./widgets/message-actions.ts";
 
 /** 消息区左侧留白 —— 让文字不贴着终端边缘。 */
 export const BODY_INDENT = 3;
@@ -217,96 +177,6 @@ export const BODY_INDENT = 3;
  * 1 列正文宽度 —— 从 76 降到 68（-11%）。
  */
 export const SCROLLBAR_GUTTER = 5;
-
-/** 画在正文/思考区里的按钮：命中矩形 + 左上角字形。 */
-interface PlacedButton {
-  rect: HitRect;
-  glyph: string;
-}
-
-/**
- * 命中区间自检开关（`BUGENT_HIT_PROBE`）。
- *
- *   off（默认）  不跑
- *   1            每帧自检，发现点不到的区域就写 stderr（前缀 `[hit-probe]`）
- *   strict       额外直接抛错，fail fast
- *
- * 默认关闭：它是开发期工具，价值在测试与排查，不在线上。
- */
-const hitProbeMode = ((): "off" | "on" | "strict" => {
-  const raw = process.env.BUGENT_HIT_PROBE;
-  if (raw === "strict") return "strict";
-  return raw === undefined || raw === "" || raw === "0" ? "off" : "on";
-})();
-
-/**
- * 通用对话框。
- *
- * 权限确认、能力授权都用它；将来 `ask_user` 也接这里 ——
- * 区别只是 body 的行数与是否需要文本输入。
- */
-interface PendingDialog {
-  title: string;
-  body: string[];
-  /** 按键提示。 */
-  hint: string;
-  /** 可鼠标点击的按钮。键盘路径仍然保留。 */
-  actions: readonly DialogAction[];
-  /**
-   * 授权窗口剩余毫秒。有值时标题右侧画倒计时（`需要授权 · 访问网络 · 还剩 47s`）。
-   *
-   * 存成取值函数而不是数字：窗口每秒回调一次，渲染时现取，免得再同步一份状态。
-   */
-  countdown?: () => number;
-  resolve: (value: boolean) => void;
-}
-
-/** 点击消息后弹出的操作菜单；动作不是布尔值，所以与授权弹窗分开存。 */
-interface PendingMessageMenu {
-  /** 用于复制 / 检查 / 分叉 / 重试的实际消息。 */
-  msgid: MsgId;
-  /** 用于撤回的分支锚点；工具卡片通常指向 assistant tool-call。 */
-  undoMsgid: MsgId;
-  title: string;
-  body: string[];
-  hint: string;
-  actions: readonly DialogAction<MessageAction>[];
-}
-
-/**
- * 当前鼠标悬停 / 按下的按钮。
- *
- * 所有矩形按钮都在这里 —— 悬停高亮只需要"重绘时按目标查一次状态"，
- * 各渲染点不必各存一份 hover 布尔值。
- */
-type ButtonTarget =
-  | { kind: "dialog"; value: boolean }
-  | { kind: "message"; value: MessageAction }
-  | { kind: "moreHistory" }
-  | { kind: "returnToLatest" }
-  | { kind: "todoToggle" }
-  /** 设置面板的一行：悬停/按下高亮与点击激活都按行号走。 */
-  | { kind: "settingsRow"; index: number };
-
-/** 按钮的稳定身份；比较悬停/按下目标时只认它。 */
-function buttonKey(target: ButtonTarget | undefined): string | undefined {
-  switch (target?.kind) {
-    case undefined:
-      return undefined;
-    case "dialog":
-      return `dialog:${String(target.value)}`;
-    case "message":
-      return `message:${target.value}`;
-    case "moreHistory":
-      return "moreHistory";
-    case "returnToLatest":
-      return "returnToLatest";
-    case "todoToggle":
-      return "todoToggle";
-    case "settingsRow":
-      return `settings:${target.index}`;
-  }
-}
 
 /** 请求 TUI 宿主创建/切换 runtime。 */
 export interface RuntimeRequest {
@@ -354,19 +224,6 @@ export interface TuiInteraction {
   confirmModeChange(request: PermissionRequest, needed: SandboxMode): Promise<AuthorizationOutcome>;
   requestCapability(escalation: CapabilityEscalation): Promise<AuthorizationOutcome>;
   askUser(questions: readonly AskUserQuestion[]): Promise<AskUserAnswer[] | undefined>;
-}
-
-/**
- * 开屏的运行态。
- *
- * 时间戳（而不是"第几帧"）才是驱动源：帧调度会因为流式输出、窗口缩放而
- * 抖动，动画不能跟着抖。退场同样按时间推进，与开屏共用一套。
- */
-interface SplashState {
-  startedAt: number;
-  /** 用户敲下第一个字符的时刻；undefined = 还没开始退场。 */
-  exitStartedAt: number | undefined;
-  info: SplashInfo;
 }
 
 export interface TuiOptions {
@@ -601,20 +458,15 @@ export class TuiApp implements TuiInteraction {
    */
   #exitRequested = false;
   #mode: SandboxMode = "workspace-write";
-  #goalController: GoalController | undefined;
-  #goalStatusLine: string | undefined;
-  #goalAutoContinue = false;
-  #maxGoalContinuationTurns = 50;
-  #goalContinuationStreak = 0;
+  #goals: GoalFlows;
 
   /** 待处理的对话框；存在时按键全部路由给它。 */
   #pendingDialog: PendingDialog | undefined;
   /**
-   * 开屏状态。undefined = 没有开屏（会话非空、传了 `splash: false`、或已经退场完）。
+   * 开屏控制器。undefined = 没有开屏（会话非空、传了 `splash: false`、或已经退场完）。
+   * 状态机与动画定时器都在控制器里；这里只存引用和收回调。
    */
-  #splash: SplashState | undefined;
-  /** 开屏动画定时器。只在开屏可见期间运行。 */
-  #splashTimer: ReturnType<typeof setInterval> | undefined;
+  #splash: SplashController | undefined;
   /** 授权窗口长度。生产固定 60 秒；测试传小值，免得 PTY 用例等满一分钟。 */
   #authorizationTimeoutMs = AUTHORIZATION_TIMEOUT_MS;
   /**
@@ -655,10 +507,7 @@ export class TuiApp implements TuiInteraction {
    * 鼠标处理与命中自检都只遍历它，优先级只有一处定义。输入框不在其中：
    * 它还需要按列算出字符索引，在 #hitTargetAt 里单独处理。
    */
-  #regions: HitRegionEntry[] = [];
-  /** 当前鼠标悬停/按下的按钮。 */
-  #hoveredButton: ButtonTarget | undefined;
-  #pressedButton: ButtonTarget | undefined;
+  #hits = new HitRegionModel();
 
   /** 待办派生的缓存（键 = 会话 id + 消息条数）。 */
   #todoCache: { lastMsgid: MsgId; length: number; list: TodoList } | undefined;
@@ -675,6 +524,33 @@ export class TuiApp implements TuiInteraction {
   #messageHits: { msgid: MsgId; undoMsgid: MsgId; rect: HitRect }[] = [];
   /** body 视窗在完整内容里的起始下标。 */
   #bodyWindowStart = 0;
+
+  /** Goal 流程看到的宿主能力子集（见 goal-flows.ts 的接口注释）。 */
+  #goalFlowHost(): GoalFlowHost {
+    const app = this;
+    return {
+      session: this.#session,
+      pushError: (message) => this.#transcript.pushError(message),
+      pushNotice: (message) => this.#transcript.pushNotice(message),
+      requestFrame: (force) => this.#requestFrame(force),
+      openDialog: (dialog) => this.#openDialog(dialog),
+      promptText: (question) => this.#promptText(question),
+      runTurn: (input, options) => this.#runTurn(input, options),
+      switchRuntime: (branchId, notice) => this.#switchRuntime(branchId, notice),
+      beginWork: () => {
+        this.#busy = true;
+        this.#setActivity({ state: "working" });
+        this.#requestFrame(true);
+      },
+      endWork: () => {
+        this.#busy = false;
+        this.#setActivity({ state: "idle" });
+      },
+      get busy() {
+        return app.#busy || app.#session.hasOpenToolBatch();
+      },
+    };
+  }
 
   constructor(options: TuiOptions) {
     // 注册内置工具的自定义外观（幂等）。放在构造函数里，
@@ -732,10 +608,13 @@ export class TuiApp implements TuiInteraction {
       this.#authorizationTimeoutMs = options.authorizationTimeoutMs;
     }
     this.#alert = options.alert;
-    this.#goalController = options.goalController;
-    this.#goalAutoContinue = options.goalAutoContinue ?? false;
-    this.#maxGoalContinuationTurns = options.maxGoalContinuationTurns ?? 50;
-    this.#refreshGoalStatus();
+    this.#goals = new GoalFlows(this.#goalFlowHost(), {
+      ...(options.goalController !== undefined ? { controller: options.goalController } : {}),
+      autoContinue: options.goalAutoContinue ?? false,
+      ...(options.maxGoalContinuationTurns !== undefined
+        ? { maxContinuationTurns: options.maxGoalContinuationTurns }
+        : {}),
+    });
     const { width, height } = this.#terminal.size;
     this.#screen = new Screen(width, height);
     if (options.banner !== undefined) {
@@ -747,9 +626,7 @@ export class TuiApp implements TuiInteraction {
     // system / MCP / skills 三条 msgid 前缀，长度永远不为 0。
     const hasConversation = this.#session.messages.some((message) => message.role !== "system");
     if (options.splash !== false && !hasConversation) {
-      this.#splash = {
-        startedAt: performance.now(),
-        exitStartedAt: undefined,
+      this.#splash = new SplashController({
         info: {
           version: BUGENT_VERSION,
           clientId: this.#session.client.id,
@@ -757,84 +634,16 @@ export class TuiApp implements TuiInteraction {
           cwd: this.#cwd,
           sessionId: this.#session.id,
         },
-      };
+        requestFrame: (force) => this.#requestFrame(force),
+        onFinished: () => {
+          this.#splash = undefined;
+          // 正文从开屏换回消息列表，整块都变了 —— 全量重绘。
+          this.#requestFrame(true);
+        },
+      });
     }
     this.#loadTokenizerInBackground();
     this.#probeContextWindowInBackground();
-  }
-
-  /* ---------------------------- 开屏动画 ---------------------------- */
-
-  /**
-   * 开屏期间常驻的动画定时器。
-   *
-   * 只有开屏可见时才有这个定时器：用户一敲字就退场，退场动画跑完自己停掉 ——
-   * 不会在空闲的 TUI 里留一个 20fps 的空转。
-   */
-  #startSplashAnimation(): void {
-    if (this.#splashTimer !== undefined) return;
-    this.#splashTimer = setInterval(() => {
-      const splash = this.#splash;
-      if (splash === undefined) {
-        this.#stopSplashAnimation();
-        return;
-      }
-      if (
-        splash.exitStartedAt !== undefined &&
-        performance.now() - splash.exitStartedAt >= SPLASH_EXIT_MS
-      ) {
-        this.#finishSplash();
-        return;
-      }
-      this.#requestFrame();
-    }, SPLASH_FRAME_MS);
-  }
-
-  #stopSplashAnimation(): void {
-    if (this.#splashTimer === undefined) return;
-    clearInterval(this.#splashTimer);
-    this.#splashTimer = undefined;
-  }
-
-  /**
-   * 开始退场。
-   *
-   * 由**第一个字符**触发，不是回车：用户要的是"打字就进去"，不是"再确认一次"。
-   * 重复调用无效，所以粘贴一整段也只退场一次。
-   */
-  #beginSplashExit(): void {
-    const splash = this.#splash;
-    if (splash === undefined || splash.exitStartedAt !== undefined) return;
-    splash.exitStartedAt = performance.now();
-    this.#startSplashAnimation();
-    this.#requestFrame(true);
-  }
-
-  /** 立刻收掉开屏，不等退场动画。 */
-  #finishSplash(): void {
-    if (this.#splash === undefined) return;
-    this.#splash = undefined;
-    this.#stopSplashAnimation();
-    // 正文从开屏换回消息列表，整块都变了 —— 全量重绘。
-    this.#requestFrame(true);
-  }
-
-  /** 当前该显示的开屏行；没有开屏时返回 undefined。 */
-  #composeSplash(width: number, rows: number): string[] | undefined {
-    const splash = this.#splash;
-    if (splash === undefined) return undefined;
-    const now = performance.now();
-    const exit =
-      splash.exitStartedAt === undefined
-        ? 0
-        : Math.min(1, (now - splash.exitStartedAt) / SPLASH_EXIT_MS);
-    return composeSplash({
-      width,
-      rows,
-      elapsedMs: now - splash.startedAt,
-      exit,
-      info: splash.info,
-    });
   }
 
   /**
@@ -1045,14 +854,14 @@ export class TuiApp implements TuiInteraction {
       this.#frames.flush();
       this.#syncTodoShimmer();
       // 开屏动画的定时器挂在 `run()` 的生命周期里，而不是构造函数里：
-      // 构造 TuiApp 但不跑 TUI 的入口（测试、将来的 WebUI）不该留一个
-      // 20fps 的常驻定时器，那会把测试进程吊住。
-      this.#startSplashAnimation();
+      // 构造 TuiApp 但不跑 TUI 的入口（测试）不该留一个 20fps 的常驻
+      // 定时器，那会把测试进程吊住。
+      this.#splash?.start();
       await exited;
     } finally {
       clearInterval(escapeTimer);
       this.#stopTodoShimmer();
-      this.#stopSplashAnimation();
+      this.#splash?.stop();
       this.#stopSpeedTicker();
       // 取消挂起的合流帧，否则定时器会把进程多吊住一个窗口期。
       this.#frames.dispose();
@@ -1077,7 +886,7 @@ export class TuiApp implements TuiInteraction {
   #handleKey(key: Key): void {
     // 退场动画只是过场：用户在退场期间继续操作（再敲一下、点一下），立刻收尾。
     // 让动画去等输入是本末倒置 —— 还会把后面几帧的流式揭示挤成一帧。
-    if (this.#splash?.exitStartedAt !== undefined) this.#finishSplash();
+    if (this.#splash?.exiting) this.#splash.finish();
 
     // 设置面板是模态浮层：打开期间按键全部归它。
     // 鼠标仍要放行给统一路由，否则点行永远收不到事件。
@@ -1290,9 +1099,7 @@ export class TuiApp implements TuiInteraction {
     }
     // 鼠标移动：只更新悬停按钮，不触发点击。
     if (key.motion === true) {
-      const target = this.#buttonTargetAt(key.x, key.y);
-      if (!this.#sameButtonTarget(this.#hoveredButton, target)) {
-        this.#hoveredButton = target;
+      if (this.#hits.processButtonMouse(key.x, key.y, false, true, () => {}) === "changed") {
         this.#syncSettingsHighlight();
         this.#requestFrame(true);
       }
@@ -1301,38 +1108,25 @@ export class TuiApp implements TuiInteraction {
 
     // 按钮统一按下-抬起：按下先显示按下态，抬起时还停在同一个按钮上才生效。
     // 拖到一半松手不会误触发，正文区的按钮和弹窗按钮手感一致。
+    // 按钮层消费掉的事件（changed/invoked）不再走下面的通用分发。
     if (key.button === "left") {
-      const target = this.#buttonTargetAt(key.x, key.y);
-      if (key.pressed) {
-        if (target !== undefined) {
-          this.#pressedButton = target;
-          this.#syncSettingsHighlight();
-          this.#requestFrame(true);
-          return;
-        }
-        // 按在按钮之外：清掉上一次残留的按下态（按住按钮拖出去就是这种）
-        if (this.#pressedButton !== undefined) {
-          this.#pressedButton = undefined;
-          this.#syncSettingsHighlight();
-          this.#requestFrame(true);
-        }
-      } else {
-        const pressed = this.#pressedButton;
-        if (pressed !== undefined) {
-          this.#pressedButton = undefined;
-          this.#syncSettingsHighlight();
-          if (this.#sameButtonTarget(pressed, target)) this.#invokeButton(pressed);
-          else this.#requestFrame(true);
-          return;
-        }
-      }
+      const result = this.#hits.processButtonMouse(
+        key.x,
+        key.y,
+        key.pressed,
+        false,
+        (target) => this.#invokeButton(target),
+      );
+      if (result !== "none") this.#syncSettingsHighlight();
+      if (result === "changed" || result === "cleared") this.#requestFrame(true);
+      if (result === "changed" || result === "invoked") return;
     }
 
     if (!key.pressed) return;
     if (key.button !== "left" && key.button !== "right") return;
 
     // 命中判定只有这一条路径：区域表按顺序扫，第一个包含该点的区域胜出。
-    const target = this.#hitTargetAt(
+    const target = this.#hits.hitTargetAt(
       key.x,
       key.y,
       key.button === "right" ? "right" : "left",
@@ -1390,8 +1184,7 @@ export class TuiApp implements TuiInteraction {
   }
 
   #clearButtonInteraction(): void {
-    this.#hoveredButton = undefined;
-    this.#pressedButton = undefined;
+    this.#hits.clear();
     this.#syncSettingsHighlight();
   }
 
@@ -1404,274 +1197,39 @@ export class TuiApp implements TuiInteraction {
   #syncSettingsHighlight(): void {
     const panel = this.#settingsPanel;
     if (panel === undefined) return;
+    const hoveredButton = this.#hits.hovered;
+    const pressedButton = this.#hits.pressed;
     const hovered =
-      this.#hoveredButton?.kind === "settingsRow" ? this.#hoveredButton.index : undefined;
+      hoveredButton?.kind === "settingsRow" ? hoveredButton.index : undefined;
     const pressed =
-      this.#pressedButton?.kind === "settingsRow" ? this.#pressedButton.index : undefined;
+      pressedButton?.kind === "settingsRow" ? pressedButton.index : undefined;
     panel.setHover(hovered);
     panel.setPressed(pressed);
   }
 
-  #sameButtonTarget(a: ButtonTarget | undefined, b: ButtonTarget | undefined): boolean {
-    return buttonKey(a) === buttonKey(b);
-  }
-
-  /** 组装本帧的可点区域。**顺序即优先级**，与鼠标处理共用。 */
-  #buildRegions(): HitRegionEntry[] {
-    const regions: HitRegionEntry[] = [];
-
-    if (this.#scrollbar !== undefined) {
-      regions.push({
-        target: { kind: "scrollbar" },
-        rect: scrollbarRect(this.#scrollbar),
-        button: "left",
-      });
-    }
-    // 吸顶的本轮用户消息：它就是那条消息，所以右键行为与正文里的消息一致。
-    if (this.#pinnedUserHit !== undefined) {
-      regions.push({
-        target: {
-          kind: "message",
-          msgid: this.#pinnedUserHit.msgid,
-          undoMsgid: this.#pinnedUserHit.undoMsgid,
-        },
-        rect: this.#pinnedUserHit.rect,
-        button: "right",
-      });
-    }
-    for (const entry of this.#messageButtonHits) {
-      regions.push({
-        target: { kind: "messageButton", value: entry.value },
-        rect: entry.rect,
-        button: "left",
-      });
-    }
-    for (const entry of this.#dialogButtonHits) {
-      regions.push({
-        target: { kind: "dialogButton", value: entry.value },
-        rect: entry.rect,
-        button: "left",
-      });
-    }
-    for (const entry of this.#askLineHits) {
-      regions.push({
-        target: { kind: "askLine", line: entry.value },
-        rect: entry.rect,
-        button: "left",
-      });
-    }
-    for (const entry of this.#settingsRowHits) {
-      regions.push({
-        target: { kind: "settingsRow", index: entry.value },
-        rect: entry.rect,
-        button: "left",
-      });
-    }
-    if (this.#dialogRect !== undefined) {
-      regions.push({ target: { kind: "dialogBody" }, rect: this.#dialogRect, button: "left" });
-    }
-
-    // 弹窗打开时它盖住的区域都不可点（鼠标处理在弹窗分支直接 return）
-    if (this.#overlayOpen) return regions;
-
-    if (this.#returnToLatestButton !== undefined) {
-      regions.push({
-        target: { kind: "returnToLatest" },
-        rect: this.#returnToLatestButton.rect,
-        button: "left",
-      });
-    }
-    if (this.#moreHistoryButton !== undefined && !this.#viewState.historyOpen) {
-      regions.push({
-        target: { kind: "moreHistory" },
-        rect: this.#moreHistoryButton.rect,
-        button: "left",
-      });
-    }
-    if (this.#todoToggleButton !== undefined) {
-      regions.push({
-        target: { kind: "todoToggle" },
-        rect: this.#todoToggleButton.rect,
-        button: "left",
-      });
-    }
-    // 工具卡片、Thought 头部与普通消息的按键语义集中在 messageRegions
-    // （纯函数，单测覆盖）。
-    regions.push(...messageRegions(this.#toolHits, this.#messageHits, this.#reasoningHits));
-
-    return regions;
-  }
-
-  /**
-   * 屏幕坐标下面是什么 —— 纯查询，不改任何状态。
-   *
-   * 鼠标处理和命中自检（`#collectHitProbes` + `checkHitProbes`）共用这一条
-   * 路径：自检若另写一份判定，就只是在测试另一份实现。
-   *
-   * 除了输入框，全部判定都是"点在不在这个屏幕矩形里"，优先级由 `#regions`
-   * 的顺序表达 —— 没有第二种坐标换算，也就没有"两个空间对不上"这一类 bug。
-   */
-  #hitTargetAt(x: number, y: number, button: ProbeButton = "left"): HitTarget | undefined {
-    // 输入框要按列算出字符索引，是唯一需要额外换算的区域，单独处理。
-    // 它和别的区域不重叠（弹窗打开时 #inputBoxRect 已清空），所以顺序无关。
-    if (button === "left") {
-      const layout = this.#inputBoxLayout;
-      if (layout !== undefined) {
-        const index = inputCursorFromClick(this.#inputBoxRect, layout, x, y);
-        if (index !== undefined) return { kind: "input", index };
-      }
-    }
-
-    for (const region of this.#regions) {
-      if (region.button !== button) continue;
-      if (hitRect(region.rect, x, y)) return region.target;
-    }
-    return undefined;
-  }
-
-  /** 弹窗按钮的 hover / press 目标；其它区域不参与悬停高亮。 */
-  #buttonTargetAt(x: number, y: number): ButtonTarget | undefined {
-    const target = this.#hitTargetAt(x, y, "left");
-    if (target === undefined) return undefined;
-    switch (target.kind) {
-      case "dialogButton":
-        return { kind: "dialog", value: target.value };
-      case "messageButton":
-        return { kind: "message", value: target.value };
-      case "moreHistory":
-        return { kind: "moreHistory" };
-      case "returnToLatest":
-        return { kind: "returnToLatest" };
-      case "todoToggle":
-        return { kind: "todoToggle" };
-      case "settingsRow":
-        return { kind: "settingsRow", index: target.index };
-      default:
-        return undefined;
-    }
-  }
-
-  /** 某个按钮此刻是不是悬停 / 按下 —— 渲染时问这一句就够了。 */
-  #buttonState(target: ButtonTarget): { hovered?: boolean; pressed?: boolean } {
-    const hovered = this.#sameButtonTarget(this.#hoveredButton, target);
-    const pressed = this.#sameButtonTarget(this.#pressedButton, target);
-    return {
-      ...(hovered ? { hovered: true } : {}),
-      ...(pressed ? { pressed: true } : {}),
-    };
-  }
-
-  /**
-   * 生成命中探针：每个可点区域取**自己矩形的中心**。
-   *
-   * 登记已经统一到屏幕坐标，所以这里不需要任何换算。被更靠前区域盖住的
-   * 同键目标不可达，跳过。
-   */
-  #collectHitProbes(): HitProbe[] {
-    const probes: HitProbe[] = [];
-    for (const [index, region] of this.#regions.entries()) {
-      const center = rectCenter(region.rect);
-      // 中心落在更靠前的区域里 = 被盖住（弹窗正文被 ask 行盖住就是这种情况），
-      // 它本来就不该被要求可点。
-      const shadowed = this.#regions
-        .slice(0, index)
-        .some(
-          (earlier) =>
-            earlier.button === region.button && hitRect(earlier.rect, center.x, center.y),
-        );
-      if (shadowed) continue;
-      probes.push({
-        name: hitTargetName(region.target),
-        x: center.x,
-        y: center.y,
-        button: region.button,
-      });
-    }
-
-    // 输入框不在区域表里（要按列算字符索引），单独补一条：点文本区首列应落在
-    // 首行起点上。
-    const box = this.#inputBoxRect;
-    const layout = this.#inputBoxLayout;
-    if (box !== undefined && layout !== undefined) {
-      probes.push({
-        name: `input:${layout.starts[box.startRow] ?? 0}`,
-        x: box.textLeft,
-        y: box.contentTop,
-        button: "left",
-      });
-    }
-
-    return probes;
-  }
-
-  /**
-   * 视觉锚点：登记矩形的左上角应当正好是控件画出来的那个字形。
-   *
-   * 登记改用屏幕坐标之后，中心探针只能验证"命中路径与登记表一致"；登记表
-   * 自己算错（比如居中留白算错）时两边会一起错、互相抵消。锚点直接比对渲染
-   * 出来的字符，是唯一不受换算影响的参照物。
-   */
-  #collectVisualAnchors(): VisualAnchor[] {
-    const anchors: VisualAnchor[] = [];
-    for (const entry of [...this.#messageButtonHits, ...this.#dialogButtonHits]) {
-      anchors.push({ name: "button", x: entry.rect.left, y: entry.rect.top, glyph: entry.glyph });
-    }
-    for (const [name, button] of [
-      ["moreHistory", this.#moreHistoryButton],
-      ["returnToLatest", this.#returnToLatestButton],
-      ["todoToggle", this.#todoToggleButton],
-    ] as const) {
-      if (button !== undefined) {
-        anchors.push({ name, x: button.rect.left, y: button.rect.top, glyph: button.glyph });
-      }
-    }
-    if (this.#dialogRect !== undefined) {
-      anchors.push({
-        name: "dialog",
-        x: this.#dialogRect.left,
-        y: this.#dialogRect.top,
-        glyph: "┌",
-      });
-    }
-    if (this.#inputBoxRect !== undefined) {
-      // 输入框框体从第 1 列开始，首行是 ┌───┐
-      anchors.push({
-        name: "input",
-        x: 1,
-        y: this.#inputBoxRect.top,
-        glyph: "┌",
-      });
-    }
-    return anchors;
-  }
-
-  /**
-   * 自检：每个可点区域的中心，喂回命中入口必须命中它自己；登记的位置必须
-   * 和画出来的位置重合。
-   *
-   * 由 `BUGENT_HIT_PROBE=1` 打开（`=strict` 时直接抛错）。
-   */
-  #verifyHitProbes(lines: readonly string[], width: number, height: number): void {
-    // sliceAnsi 会把当前生效的样式一起带出来，比较字形前要先剥掉
-    const cellAt = (x: number, y: number): string => {
-      const line = lines[y - 1];
-      return line === undefined ? "" : Bun.stripANSI(Bun.sliceAnsi(line, x - 1, x));
-    };
-    const reach = checkHitProbes(this.#collectHitProbes(), (x, y, button) => {
-      const target = this.#hitTargetAt(x, y, button);
-      return target === undefined ? undefined : hitTargetName(target);
+  /** 汇总本帧的可点矩形，交给命中区模型登记（顺序即优先级）。 */
+  #updateHitRegions(): void {
+    this.#hits.update({
+      scrollbar: this.#scrollbar,
+      pinnedUserHit: this.#pinnedUserHit,
+      messageButtonHits: this.#messageButtonHits,
+      dialogButtonHits: this.#dialogButtonHits,
+      askLineHits: this.#askLineHits,
+      settingsRowHits: this.#settingsRowHits,
+      dialogRect: this.#dialogRect,
+      overlayOpen: this.#overlayOpen,
+      returnToLatestButton: this.#returnToLatestButton,
+      moreHistoryButton: this.#moreHistoryButton,
+      todoToggleButton: this.#todoToggleButton,
+      historyOpen: this.#viewState.historyOpen,
+      toolHits: this.#toolHits,
+      messageHits: this.#messageHits,
+      reasoningHits: this.#reasoningHits,
+      inputBox:
+        this.#inputBoxRect !== undefined && this.#inputBoxLayout !== undefined
+          ? { rect: this.#inputBoxRect, layout: this.#inputBoxLayout }
+          : undefined,
     });
-    const anchors = checkVisualAnchors(this.#collectVisualAnchors(), cellAt);
-    if (reach.length === 0 && anchors.length === 0) return;
-
-    const message = [
-      reach.length > 0 ? formatHitProbeFailures(reach, { width, height }) : "",
-      anchors.length > 0 ? formatAnchorFailures(anchors, { width, height }) : "",
-    ]
-      .filter((part) => part.length > 0)
-      .join("\n");
-    process.stderr.write(`[hit-probe] ${message}\n`);
-    if (hitProbeMode === "strict") throw new Error(message);
   }
 
   #invokeButton(target: ButtonTarget): void {
@@ -1707,7 +1265,7 @@ export class TuiApp implements TuiInteraction {
 
   #insert(text: string): void {
     // 敲下第一个字符就让开屏退场：不需要额外按键，也没有"跳过"。
-    this.#beginSplashExit();
+    this.#splash?.beginExit();
     const chars = Array.from(this.#input);
     chars.splice(this.#cursor, 0, ...Array.from(text));
     this.#input = chars.join("");
@@ -1836,7 +1394,7 @@ export class TuiApp implements TuiInteraction {
     }
     if (text === "/goal" || text.startsWith("/goal ")) {
       this.#clearInput();
-      void this.#handleGoalCommand(text.slice("/goal".length).trim());
+      void this.#goals.handleCommand(text.slice("/goal".length).trim());
       return;
     }
     if (text === "/mode") {
@@ -1907,8 +1465,8 @@ export class TuiApp implements TuiInteraction {
     this.#input = "";
     this.#cursor = 0;
     this.#viewState = initialHistoryView();
-    this.#goalContinuationStreak = 0;
-    this.#goalController?.clearUserDeferral();
+    this.#goals.resetContinuationStreak();
+    this.#goals.controller?.clearUserDeferral();
 
     // busy 时绝不启动第二个 runTurn：先排队，等当前 turn 正常结束后自动 drain。
     if (this.#busy || this.#session.hasOpenToolBatch()) {
@@ -1942,7 +1500,7 @@ export class TuiApp implements TuiInteraction {
   async #openCommandPalette(): Promise<void> {
     const commands = [
       { label: "/context   查看当前 session 上下文", run: () => this.#openContextDialog() },
-      { label: "/goal      初始化 / 查看 / 继续 Goal", run: () => this.#handleGoalCommand("") },
+      { label: "/goal      初始化 / 查看 / 继续 Goal", run: () => this.#goals.handleCommand("") },
       { label: "/provider  切换 provider", run: () => this.#chooseProvider() },
       { label: "/model     切换模型", run: () => this.#promptModel() },
       { label: "/key       设置 API key（系统 keychain）", run: () => this.#promptApiKey() },
@@ -1961,293 +1519,6 @@ export class TuiApp implements TuiInteraction {
     const selected = answers?.[0]?.selected[0];
     if (selected === undefined) return;
     await commands[selected]?.run();
-  }
-
-  /**
-   * `/goal` 是 Goal 的唯一显式入口。
-   *
-   * 有参数时只授予一次创建权并启动初始化 turn；真正创建仍由模型调用
-   * `create_goal` 完成，但普通 turn 永远拿不到该权限。
-   */
-  async #handleGoalCommand(argument: string): Promise<void> {
-    const controller = this.#goalController;
-    if (controller === undefined) {
-      this.#transcript.pushError("当前 session 未启用持久化，无法使用 Goal 模式");
-      this.#requestFrame(true);
-      return;
-    }
-
-    const goal = controller.currentGoal();
-    if (argument === "pause") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-      } else {
-        try {
-          controller.pause("用户通过 /goal pause 暂停");
-          this.#refreshGoalStatus();
-          this.#transcript.pushNotice("Goal 已暂停。输入 `/goal resume` 恢复。");
-        } catch (error) {
-          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-        }
-      }
-      this.#requestFrame(true);
-      return;
-    }
-    if (argument === "resume") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-      } else {
-        try {
-          controller.resume();
-          this.#refreshGoalStatus();
-          this.#transcript.pushNotice("Goal 已恢复。");
-        } catch (error) {
-          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-        }
-      }
-      this.#requestFrame(true);
-      return;
-    }
-    if (argument === "continue") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-        this.#requestFrame(true);
-        return;
-      }
-      if (this.#busy || this.#session.hasOpenToolBatch()) {
-        this.#transcript.pushError("当前一轮还在跑，先结束或中断再刷新 Context Epoch");
-        this.#requestFrame(true);
-        return;
-      }
-      try {
-        const epoch = await controller.createContextEpoch("manual");
-        if (this.#switchRuntime(epoch.branchId, `已创建 Context Epoch ${epoch.epochId}`)) {
-          this.#refreshGoalStatus();
-          this.#requestFrame(true);
-        }
-      } catch (error) {
-        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-        this.#requestFrame(true);
-      }
-      return;
-    }
-    if (argument === "checkpoints") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-        this.#requestFrame(true);
-        return;
-      }
-      const checkpoints = controller.repository.listCheckpoints(goal.id);
-      await this.#openDialog({
-        title: "Goal Checkpoints",
-        body:
-          checkpoints.length === 0
-            ? ["尚未建立 Checkpoint"]
-            : checkpoints.map((checkpoint) => {
-                const marker =
-                  checkpoint.status === "completed"
-                    ? "[x]"
-                    : checkpoint.status === "active" ||
-                        checkpoint.status === "verifying" ||
-                        checkpoint.status === "reviewing"
-                      ? "[>]"
-                      : checkpoint.status === "blocked"
-                        ? "[!]"
-                        : "[ ]";
-                return `${marker} ${checkpoint.order}. ${checkpoint.title} · ${checkpoint.status}`;
-              }),
-        hint: `${DIM}Esc / Enter 关闭${RESET}`,
-        actions: [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
-      });
-      return;
-    }
-    if (argument === "finalize") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-        this.#requestFrame(true);
-        return;
-      }
-      if (this.#busy || this.#session.hasOpenToolBatch()) {
-        this.#transcript.pushError("当前一轮还在跑，先结束或中断再执行 final audit");
-        this.#requestFrame(true);
-        return;
-      }
-      this.#busy = true;
-      this.#activity = { state: "working" };
-      this.#requestFrame(true);
-      try {
-        const result = await controller.finalAudit();
-        this.#transcript.pushNotice(
-          result.approved
-            ? "Goal final audit 通过，Goal 已完成。"
-            : `Goal final audit 未通过：${result.errors.join("；")}`,
-        );
-      } catch (error) {
-        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      } finally {
-        this.#busy = false;
-        this.#activity = { state: "idle" };
-        this.#goalContinuationStreak = 0;
-        this.#refreshGoalStatus();
-        this.#requestFrame(true);
-      }
-      return;
-    }
-    if (argument === "edit") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-        this.#requestFrame(true);
-        return;
-      }
-      const objective = await this.#promptText(`Goal objective（当前：${goal.objective}）`);
-      if (objective === undefined) return;
-      const criteriaText = await this.#promptText("成功标准（用 ; 分隔）");
-      if (criteriaText === undefined) return;
-      const constraintsText = await this.#promptText("约束（用 ; 分隔，可留空）");
-      const nonGoalsText = await this.#promptText("非目标（用 ; 分隔，可留空）");
-      const split = (value: string | undefined): string[] =>
-        (value ?? "")
-          .split(";")
-          .map((item) => item.trim())
-          .filter((item) => item.length > 0);
-      try {
-        controller.editContract({
-          rawIntent: goal.rawIntent,
-          objective,
-          successCriteria: split(criteriaText),
-          constraints: split(constraintsText),
-          nonGoals: split(nonGoalsText),
-          riskPolicy: goal.riskPolicy,
-          ...(goal.tokenBudget !== undefined ? { tokenBudget: goal.tokenBudget } : {}),
-        });
-        this.#refreshGoalStatus();
-        this.#transcript.pushNotice("Goal Contract 已更新。");
-      } catch (error) {
-        this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      }
-      this.#requestFrame(true);
-      return;
-    }
-    if (argument === "clear") {
-      if (goal === undefined) {
-        this.#transcript.pushError("当前 session 没有 Goal");
-        this.#requestFrame(true);
-        return;
-      }
-      const confirmed = await this.#openDialog({
-        title: "清除 Goal",
-        body: [
-          `将删除 Goal ${goal.id} 的 Checkpoint、Evidence、Review 元数据。`,
-          "对话消息与 Handoff 文件会保留。",
-        ],
-        hint: `${DIM}Esc / Enter 取消${RESET}`,
-        actions: [
-          { label: "清除", value: true, tone: "error", shortcut: "y" },
-          { label: "取消", value: false, tone: "neutral", shortcut: "n" },
-        ],
-      });
-      if (confirmed) {
-        try {
-          const cleared = controller.clearGoal();
-          this.#goalContinuationStreak = 0;
-          this.#refreshGoalStatus();
-          this.#transcript.pushNotice(`Goal 已清除：${cleared}`);
-        } catch (error) {
-          this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-        }
-        this.#requestFrame(true);
-      }
-      return;
-    }
-    if (argument === "status" || (goal !== undefined && argument.length === 0)) {
-      await this.#showGoalStatus();
-      return;
-    }
-    if (goal !== undefined) {
-      this.#transcript.pushError(
-        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`、`/goal edit`、`/goal clear`。",
-      );
-      this.#requestFrame(true);
-      return;
-    }
-
-    const rawIntent = argument.length > 0 ? argument : await this.#promptText("输入 Goal 原始意图");
-    if (rawIntent === undefined) return;
-    await this.#initializeGoal(rawIntent);
-  }
-
-  async #initializeGoal(rawIntent: string): Promise<void> {
-    const controller = this.#goalController;
-    if (controller === undefined) return;
-    if (this.#busy || this.#session.hasOpenToolBatch()) {
-      this.#transcript.pushError("当前一轮还在跑，先按 ESC 中断再初始化 Goal");
-      this.#requestFrame(true);
-      return;
-    }
-    if (this.#session.queuedUserCount > 0) {
-      this.#transcript.pushError("当前 session 还有排队消息，先处理完再初始化 Goal");
-      this.#requestFrame(true);
-      return;
-    }
-
-    controller.authorizeCreate();
-    this.#session.enqueueInjection(GOAL_INITIALIZATION_INSTRUCTION, "goal");
-    this.#transcript.pushNotice("Goal 初始化已开始：模型会先澄清契约，不会立即改代码。");
-    this.#refreshGoalStatus();
-    this.#requestFrame(true);
-    await this.#runTurn(rawIntent);
-  }
-
-  async #showGoalStatus(): Promise<void> {
-    const controller = this.#goalController;
-    if (controller === undefined) return;
-    const goal = controller.currentGoal();
-    if (goal === undefined) {
-      this.#transcript.pushError("当前 session 没有 Goal。使用 `/goal <目标>` 初始化。");
-      this.#requestFrame(true);
-      return;
-    }
-
-    const canResume =
-      goal.status === "paused" ||
-      goal.status === "blocked" ||
-      goal.status === "usage_limited";
-    const action = await this.#openDialog({
-      title: "Goal 状态",
-      body: controller.dialogLines(),
-      hint: `${DIM}Esc / Enter 关闭${RESET}`,
-      actions:
-        goal.status === "active"
-          ? [
-              { label: "暂停 Goal", value: true, tone: "warn", shortcut: "p" },
-              { label: "关闭", value: false, tone: "neutral", shortcut: "Esc" },
-            ]
-          : canResume
-            ? [
-                { label: "恢复 Goal", value: true, tone: "ok", shortcut: "r" },
-                { label: "关闭", value: false, tone: "neutral", shortcut: "Esc" },
-              ]
-            : [{ label: "关闭", value: false, tone: "neutral", shortcut: "Esc" }],
-    });
-    if (!action) return;
-
-    try {
-      if (goal.status === "active") {
-        controller.pause("用户在 Goal 状态面板暂停");
-        this.#transcript.pushNotice("Goal 已暂停。");
-      } else if (canResume) {
-        controller.resume();
-        this.#transcript.pushNotice("Goal 已恢复。");
-      }
-      this.#refreshGoalStatus();
-    } catch (error) {
-      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-    }
-    this.#requestFrame(true);
-  }
-
-  #refreshGoalStatus(): void {
-    this.#goalStatusLine = this.#goalController?.statusLine();
   }
 
   /** `/context`：展示当前 session 的 effective config，并提供配置入口。 */
@@ -3390,17 +2661,17 @@ export class TuiApp implements TuiInteraction {
   #adoptRuntime(runtime: SessionRuntime): void {
     this.#runtime?.dispose();
     this.#runtime = runtime;
-    if (runtime.session.id !== this.#session.id) {
+    const sessionChanged = runtime.session.id !== this.#session.id;
+    if (sessionChanged) {
       this.#apiKeyOverride = undefined;
-      this.#goalContinuationStreak = 0;
     }
     this.#session = runtime.session;
     this.#tools = runtime.tools;
     this.#mode = runtime.mode;
     this.#audit = runtime.audit;
     this.#providerId = runtime.providerId;
-    this.#goalController = runtime.goalController;
-    this.#refreshGoalStatus();
+    this.#goals.adoptController(runtime.goalController, sessionChanged);
+    this.#goals.refreshStatus();
     if (runtime.mcpStatus !== undefined) {
       this.#mcp = runtime.mcpStatus;
       const enabled = new Set(runtime.mcpStatus.servers.map((server) => server.id));
@@ -3608,8 +2879,8 @@ export class TuiApp implements TuiInteraction {
       onAskUser: async (_call, questions) => {
         this.#setActivity({ state: "working" });
         const answers = await this.askUser(questions);
-        if (answers === undefined) this.#goalController?.deferForUser();
-        else this.#goalController?.clearUserDeferral();
+        if (answers === undefined) this.#goals.controller?.deferForUser();
+        else this.#goals.controller?.clearUserDeferral();
         this.#setActivity({ state: "working" });
         return answers;
       },
@@ -3628,7 +2899,7 @@ export class TuiApp implements TuiInteraction {
           call.name === "update_plan" ||
           call.name === "todo_write"
         ) {
-          this.#refreshGoalStatus();
+          this.#goals.refreshStatus();
         }
         this.#setActivity({ state: "working" });
         this.#syncTodoShimmer();
@@ -3686,12 +2957,12 @@ export class TuiApp implements TuiInteraction {
       this.#busy = false;
       this.#stopTodoShimmer();
       this.#abort = undefined;
-      this.#goalController?.revokeCreateAuthorization();
+      this.#goals.controller?.revokeCreateAuthorization();
 
-      const goal = this.#goalController?.currentGoal();
+      const goal = this.#goals.controller?.currentGoal();
       if (goal !== undefined) {
         try {
-          const completion = this.#goalController!.completeTurn({
+          const completion = this.#goals.controller!.completeTurn({
             turnId,
             startedAt,
             endedAt,
@@ -3723,12 +2994,12 @@ export class TuiApp implements TuiInteraction {
         goal?.status === "active"
       ) {
         try {
-          this.#goalController?.markUsageLimited(failure);
+          this.#goals.controller?.markUsageLimited(failure);
         } catch {
           // 状态已被并发用户操作改变时不覆盖用户决定。
         }
       }
-      this.#refreshGoalStatus();
+      this.#goals.refreshStatus();
 
       if (aborted) {
         this.#activity = { state: "aborted" };
@@ -3760,71 +3031,13 @@ export class TuiApp implements TuiInteraction {
       if (completed && !aborted) {
         if (this.#session.queuedUserCount > 0) this.#drainQueuedUser();
         else if (failure === undefined) {
-          if (this.#goalController?.shouldAutoRefreshContext() === true) {
-            void this.#refreshGoalContext();
+          if (this.#goals.controller?.shouldAutoRefreshContext() === true) {
+            void this.#goals.refreshContext();
           } else {
-            this.#maybeContinueGoal();
+            this.#goals.maybeContinue();
           }
         }
       }
-    }
-  }
-
-  async #refreshGoalContext(): Promise<void> {
-    const controller = this.#goalController;
-    if (controller === undefined || this.#busy || this.#session.queuedUserCount > 0) return;
-    this.#busy = true;
-    this.#activity = { state: "working" };
-    this.#requestFrame(true);
-    try {
-      const epoch = await controller.createContextEpoch("checkpoint");
-      if (this.#switchRuntime(epoch.branchId, `Checkpoint 后已切换 Context Epoch ${epoch.epochId}`)) {
-        this.#refreshGoalStatus();
-        this.#requestFrame(true);
-      }
-    } catch (error) {
-      this.#transcript.pushError(
-        `Context Epoch 创建失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-      this.#requestFrame(true);
-    } finally {
-      this.#busy = false;
-      this.#activity = { state: "idle" };
-      this.#refreshGoalStatus();
-      this.#requestFrame(true);
-      if (!this.#busy && this.#session.queuedUserCount === 0) this.#maybeContinueGoal();
-    }
-  }
-
-  #maybeContinueGoal(): void {
-    if (!this.#goalAutoContinue || this.#busy || this.#session.hasOpenToolBatch()) return;
-    if (this.#session.queuedUserCount > 0) return;
-    if (this.#goalContinuationStreak >= this.#maxGoalContinuationTurns) {
-      this.#transcript.pushNotice(
-        `Goal 已达到连续自动推进上限 ${this.#maxGoalContinuationTurns}，等待用户输入。`,
-      );
-      this.#requestFrame();
-      return;
-    }
-    const controller = this.#goalController;
-    if (controller === undefined) return;
-    const check = controller.canAutoContinue();
-    if (!check.allowed) {
-      this.#refreshGoalStatus();
-      return;
-    }
-
-    try {
-      const start = controller.beginContinuation();
-      this.#goalContinuationStreak += 1;
-      void this.#runTurn(undefined, {
-        appendUser: false,
-        fingerprintBefore: start.fingerprint,
-        turnId: start.turnId,
-      });
-    } catch (error) {
-      this.#transcript.pushError(error instanceof Error ? error.message : String(error));
-      this.#requestFrame();
     }
   }
 
@@ -4091,7 +3304,7 @@ export class TuiApp implements TuiInteraction {
     if (force) this.#screen.invalidate();
 
     const lines = this.#compose(width, height);
-    if (hitProbeMode !== "off") this.#verifyHitProbes(lines, width, height);
+    this.#hits.verify(lines, width, height);
     const output = this.#screen.draw(lines);
     if (output.length > 0) {
       this.#terminal.writeFrame(output, this.#inputCursorRow, this.#inputCursorColumn);
@@ -4115,10 +3328,19 @@ export class TuiApp implements TuiInteraction {
     const maxDialogRows = centered
       ? Math.min(panelRowBudget(height), Math.max(0, height - 2))
       : Math.max(0, height - 2);
-    const dialogContent: RenderedDialog = overlayOpen
-      ? this.#renderDialog(width, maxDialogRows)
-      : { lines: [], buttons: [] };
-    const dialogLines = this.#paintDialog(dialogContent.lines);
+    const dialogView = overlayOpen
+      ? renderDialogView(width, maxDialogRows, {
+          settingsPanel: this.#settingsPanel,
+          askFlow: this.#askFlow,
+          messageMenu: this.#pendingMessageMenu,
+          dialog: this.#pendingDialog,
+          hover: this.#hits.hovered,
+          pressed: this.#hits.pressed,
+        })
+      : undefined;
+    const dialogContent = dialogView?.rendered ?? { lines: [], buttons: [] };
+    this.#settingsCursor = dialogView?.settingsCursor;
+    const dialogLines = paintDialog(dialogContent.lines);
     this.#overlayOpen = overlayOpen;
     // 渲染与鼠标命中共用同一个左内边距，避免两边各算一遍导致点击整体偏移
     const dialogPadding = dialogLeftPadding(width);
@@ -4216,7 +3438,7 @@ export class TuiApp implements TuiInteraction {
     const body = this.#composeBody(width, bodyHeight, scrollHeight);
     // 开屏期间照常跑一遍正文布局（滚动上限、命中区、条目缓存都靠它保持一致），
     // 只是最后不画它：开屏盖在正文区上，消息列表等退场后再出现。
-    const splashBody = this.#composeSplash(width, bodyHeight);
+    const splashBody = this.#splash?.compose(width, bodyHeight);
     if (splashBody !== undefined) {
       // 这一帧不画正文，它的可点区域当然也不该生效 —— 否则点在开屏上会
       // 弹出某条看不见的消息的菜单。
@@ -4266,7 +3488,7 @@ export class TuiApp implements TuiInteraction {
         row,
         tone: "ok",
         shape: returnShape,
-        state: this.#buttonState({ kind: "returnToLatest" }),
+        state: this.#hits.buttonState({ kind: "returnToLatest" }),
       });
       for (const line of button.lines) thinkingBlock.push(line);
       this.#returnToLatestButton =
@@ -4284,7 +3506,7 @@ export class TuiApp implements TuiInteraction {
         row,
         tone: "neutral",
         shape: "compact",
-        state: this.#buttonState({ kind: "todoToggle" }),
+        state: this.#hits.buttonState({ kind: "todoToggle" }),
       });
       todoPanel[todoToggleIndex] = button.lines[0] ?? "";
       this.#todoToggleButton =
@@ -4355,7 +3577,7 @@ export class TuiApp implements TuiInteraction {
           },
         });
       }
-      this.#regions = this.#buildRegions();
+      this.#updateHitRegions();
 
       const settingsCursor = this.#settingsCursor;
       if (width >= inner + 2 && settingsCursor !== undefined && settingsCursor.line < dialogRows) {
@@ -4405,7 +3627,7 @@ export class TuiApp implements TuiInteraction {
     this.#inputBoxLayout = boxFits ? inputLayout : undefined;
     this.#inputCursorRow = boxFits ? inputTopRow + box.cursor.row : undefined;
     this.#inputCursorColumn = box.cursor.column;
-    this.#regions = this.#buildRegions();
+    this.#updateHitRegions();
 
     return [
       this.#composeStatus(width),
@@ -4471,170 +3693,6 @@ export class TuiApp implements TuiInteraction {
 
     this.#todoCache = { lastMsgid, length: messages.length, list: cached.list };
     return cached.list;
-  }
-
-  /**
-   * 给弹窗整体铺独立底色。
-   *
-   * 每个 RESET 后面都要重新贴一次背景色，否则按钮/标题内部一旦 RESET，
-   * 后面的 padding 就会掉回终端默认底色，出现断裂的色带。
-   */
-  #paintDialog(lines: readonly string[]): string[] {
-    const background = bg(COLOR.dialogBg);
-    return lines.map((line) => {
-      const painted = line.replaceAll(RESET, `${RESET}${background}`);
-      return `${background}${painted}${RESET}`;
-    });
-  }
-
-  /**
-   * 渲染弹窗，并把按钮位置**按弹窗局部坐标**返回。
-   *
-   * 局部坐标 -> 屏幕坐标的换算放在 #compose 里做：那时才知道弹窗画在屏幕的
-   * 哪一行、水平居中留白是多少（行数依赖渲染结果，算位置又依赖行数）。
-   *
-   * 按钮默认画成框（3 行）；`maxRows` 放不下时整体退化成紧凑形态（1 行）再画
-   * 一次 —— 小终端上宁可按钮矮一点，也不能把动作截掉一半。
-   */
-  #renderDialog(width: number, maxRows: number): RenderedDialog {
-    const boxed = this.#composeDialogContent(width, "box", maxRows);
-    // 设置面板自己按预算算行数与滚动窗口，不需要 compact 退化
-    if (this.#settingsPanel !== undefined) return boxed;
-    if (boxed.lines.length <= maxRows) return boxed;
-    return this.#composeDialogContent(width, "compact", maxRows);
-  }
-
-  #composeDialogContent(width: number, shape: ButtonShape, maxRows: number): RenderedDialog {
-    const buttons: RenderedDialog["buttons"] = [];
-    const inner = dialogInnerWidth(width);
-    const color = fg(COLOR.dialogBorder);
-    const bar = `${color}│${RESET}`;
-    const row = (text: string): string =>
-      `${bar}${padAnsi(truncateAnsi(text, inner), inner)}${bar}`;
-
-    // 设置面板：内容与滚动窗口都由面板自己按 maxRows 算好，这里只加边框。
-    // 行号换算要 +1 —— 面板返回的是它自己的局部行，上面还有一行上边框。
-    const panel = this.#settingsPanel;
-    if (panel !== undefined) {
-      const rendered = panel.render(inner, maxRows);
-      this.#settingsCursor = rendered.cursor;
-      const settingsRows: NonNullable<RenderedDialog["settingsRows"]> = [];
-      for (const [line, index] of rendered.rowLines) settingsRows.push({ line: line + 1, index });
-      return {
-        lines: [
-          `${color}┌${"─".repeat(inner)}┐${RESET}`,
-          ...rendered.lines.map((line) => row(line)),
-          `${color}└${"─".repeat(inner)}┘${RESET}`,
-        ],
-        buttons,
-        settingsRows,
-      };
-    }
-
-    // 非设置面板的覆盖层：清掉上一帧可能留下的面板光标，否则硬件光标会漂
-    this.#settingsCursor = undefined;
-
-    // ask_user：分页表单，内容由 AskUserFlow 自己渲染
-    if (this.#askFlow !== undefined) {
-      return {
-        lines: [
-          `${color}┌${"─".repeat(inner)}┐${RESET}`,
-          ...this.#askFlow.render(inner).map((line) => row(` ${line}`)),
-          `${color}└${"─".repeat(inner)}┘${RESET}`,
-        ],
-        buttons,
-      };
-    }
-
-    if (this.#pendingMessageMenu !== undefined) {
-      const menu = this.#pendingMessageMenu;
-      const lines = [
-        `${color}┌${"─".repeat(inner)}┐${RESET}`,
-        row(` ${BOLD}${truncateAnsi(menu.title, inner - 2)}${RESET}`),
-      ];
-      for (const entry of menu.body) lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
-      lines.push(row(""));
-
-      const hovered =
-        this.#hoveredButton?.kind === "message" ? this.#hoveredButton.value : undefined;
-      const pressed =
-        this.#pressedButton?.kind === "message" ? this.#pressedButton.value : undefined;
-
-      for (let offset = 0; offset < menu.actions.length; offset += 3) {
-        // 框形态下两组之间空一行，否则两排方框会贴成一堵墙
-        if (offset > 0 && shape === "box") lines.push(row(""));
-        const actions = composeDialogActions<MessageAction>(
-          menu.actions.slice(offset, offset + 3),
-          {
-            ...(hovered !== undefined ? { hovered } : {}),
-            ...(pressed !== undefined ? { pressed } : {}),
-          },
-          { shape },
-        );
-        for (const line of actions.lines) lines.push(row(line));
-        const first = lines.length - actions.lines.length;
-        for (const hit of actions.hits) {
-          buttons.push({
-            target: { kind: "messageButton", value: hit.value },
-            line: first + hit.row,
-            lineSpan: hit.rowSpan,
-            left: hit.start,
-            right: hit.end,
-            glyph: hit.glyph,
-          });
-        }
-      }
-
-      lines.push(row(` ${menu.hint}`));
-      lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
-      return { lines, buttons };
-    }
-
-    const dialog = this.#pendingDialog;
-    if (dialog === undefined) return { lines: [], buttons };
-
-    // 授权弹窗把倒计时接在标题后面 —— 用户要能一眼看到"还有多久算拒绝"。
-    const remaining = dialog.countdown?.();
-    const title =
-      remaining === undefined ? dialog.title : `${dialog.title} · ${formatCountdown(remaining)}`;
-
-    const lines = [
-      `${color}┌${"─".repeat(inner)}┐${RESET}`,
-      row(` ${BOLD}${truncateAnsi(title, inner - 2)}${RESET}`),
-    ];
-    for (const entry of dialog.body) {
-      lines.push(row(` ${truncateAnsi(entry, inner - 2)}`));
-    }
-    lines.push(row(""));
-
-    const hovered =
-      this.#hoveredButton?.kind === "dialog" ? this.#hoveredButton.value : undefined;
-    const pressed =
-      this.#pressedButton?.kind === "dialog" ? this.#pressedButton.value : undefined;
-    const actions = composeDialogActions(
-      dialog.actions,
-      {
-        ...(hovered !== undefined ? { hovered } : {}),
-        ...(pressed !== undefined ? { pressed } : {}),
-      },
-      { shape },
-    );
-    for (const line of actions.lines) lines.push(row(line));
-    const first = lines.length - actions.lines.length;
-    for (const hit of actions.hits) {
-      buttons.push({
-        target: { kind: "dialogButton", value: hit.value },
-        line: first + hit.row,
-        lineSpan: hit.rowSpan,
-        left: hit.start,
-        right: hit.end,
-        glyph: hit.glyph,
-      });
-    }
-
-    lines.push(row(` ${dialog.hint}`));
-    lines.push(`${color}└${"─".repeat(inner)}┘${RESET}`);
-    return { lines, buttons };
   }
 
   /** 当前模型可用的上下文窗口：配置 > 服务端自报 > 内置兜底表。 */
@@ -4711,9 +3769,9 @@ export class TuiApp implements TuiInteraction {
     const modeColor = this.#mode === "no-sandbox" ? COLOR.warn : COLOR.ok;
     const badge = `${fg(modeColor)}${this.#mode}${RESET}`;
     const goalTag =
-      this.#goalStatusLine === undefined
+      this.#goals.statusLine === undefined
         ? ""
-        : ` ${DIM}·${RESET} ${fg(COLOR.tool)}${this.#goalStatusLine}${RESET}`;
+        : ` ${DIM}·${RESET} ${fg(COLOR.tool)}${this.#goals.statusLine}${RESET}`;
     // turn 计数留在左边：它不是"在不在干活"的状态描述（那个由菊花和速度读数
     // 表达），而是"这个 session 跑到第几轮"的进度信息，任何时刻都该看得见。
     const turnTag = ` ${DIM}· turn ${this.#session.turn}${RESET}`;
@@ -4811,7 +3869,7 @@ export class TuiApp implements TuiInteraction {
       this.#reasoningHits = [];
       this.#moreHistoryButton = undefined;
       this.#pinnedUserHit = undefined;
-      this.#regions = this.#buildRegions();
+      this.#updateHitRegions();
       return drawer.lines;
     }
 
@@ -4840,7 +3898,7 @@ export class TuiApp implements TuiInteraction {
             row: 2 + bandRows, // body 第 0 行 = 屏幕第 2 行
             tone: "neutral",
             shape: moreShape,
-            state: this.#buttonState({ kind: "moreHistory" }),
+            state: this.#hits.buttonState({ kind: "moreHistory" }),
           });
     // 实际画出来的行数才作数：太窄时 composeButton 会放弃按钮
     const topRows = bandRows + (moreButton?.lines.length ?? 0);

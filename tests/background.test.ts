@@ -7,7 +7,7 @@ import {
   parseOsc11Reply,
   perceivedLuminance,
   type BackgroundDetection,
-} from "../src/tui/background.ts";
+} from "../src/tui/widgets/background.ts";
 
 describe("OSC 11 应答解析", () => {
   test("BEL 结尾的 4 位通道", () => {

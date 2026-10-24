@@ -4,9 +4,9 @@ import {
   centeredPanelTop,
   panelRowBudget,
   type SettingsRow,
-} from "../src/tui/settings-panel.ts";
+} from "../src/tui/widgets/settings-panel.ts";
 import { hitTargetName } from "../src/tui/hit-target.ts";
-import type { Key } from "../src/tui/keys.ts";
+import type { Key } from "../src/tui/core/keys.ts";
 
 const text = (value: string): Key => ({ type: "text", value });
 const key = (type: Key["type"]): Key => ({ type } as Key);

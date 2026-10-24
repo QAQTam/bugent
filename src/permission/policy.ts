@@ -181,7 +181,7 @@ export class PermissionPolicy {
     return this.#default;
   }
 
-  /** 运行时追加规则（ui-protocol-spec §6.1 "总是允许"）。
+  /** 运行时追加规则（权限弹窗的"总是允许"）。
    *  只活在当前进程内，不写盘、不跨 session。**不进构造期规则表**：
    *  运行期授权压得过 ask/兜底，压不过用户显式写的 deny（见 evaluate）。
    *  tool 与 resource 都按**字面量**匹配 —— 用户批准的是眼前那条具体命令，

@@ -6,7 +6,7 @@ import {
   formatHitProbeFailures,
   visibleRangeOf,
   type HitProbe,
-} from "../src/tui/hit-probe.ts";
+} from "../src/tui/core/hit-probe.ts";
 
 describe("命中自检", () => {
   const probes: HitProbe[] = [

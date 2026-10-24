@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderMarkdown, renderPlain, splitMarkdown, wrapToLines } from "../src/tui/markdown.ts";
+import { renderMarkdown, renderPlain, splitMarkdown, wrapToLines } from "../src/tui/markdown/markdown.ts";
 import {
   clearHighlightCache,
   highlightCode,
@@ -10,7 +10,7 @@ import {
   isNativeLanguage,
   normalizeLanguage,
   setHighlightReadyHandler,
-} from "../src/tui/highlight.ts";
+} from "../src/tui/markdown/highlight.ts";
 
 const tempDirs: string[] = [];
 

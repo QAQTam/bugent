@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { hitRect, rectCenter, rectOfRow } from "../src/tui/hit.ts";
+import { hitRect, rectCenter, rectOfRow } from "../src/tui/core/hit.ts";
 import { hitTargetName, messageRegions } from "../src/tui/hit-target.ts";
 
 describe("鼠标命中", () => {

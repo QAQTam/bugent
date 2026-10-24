@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { KeyDecoder, type Key } from "../src/tui/keys.ts";
+import { KeyDecoder, type Key } from "../src/tui/core/keys.ts";
 import { Transcript } from "../src/tui/transcript.ts";
 import { foldLines } from "../src/tui/render-tools.ts";
 
