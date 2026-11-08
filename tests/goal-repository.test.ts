@@ -106,7 +106,7 @@ describe("Goal P0 · schema v10", () => {
     );
 
     expect(schemaVersion(upgraded)).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe(11);
+    expect(SCHEMA_VERSION).toBe(12);
     // v11：同构冗余索引应被清理（PERF-006）
     const indexes = new Set(
       (
@@ -130,6 +130,13 @@ describe("Goal P0 · schema v10", () => {
     ]) {
       expect(tables.has(table)).toBe(true);
     }
+    // v12：budget-limit 报告标记随迁移落到 session_goals（旧库 ALTER 补列）
+    const goalColumns = new Set(
+      (
+        upgraded.query("PRAGMA table_info(session_goals)").all() as { name: string }[]
+      ).map((row) => row.name),
+    );
+    expect(goalColumns.has("budget_limit_reported")).toBe(true);
   });
 });
 

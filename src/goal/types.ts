@@ -55,6 +55,8 @@ export interface Goal {
   status: GoalStatus;
   phase: GoalPhase;
   tokenBudget?: number;
+  /** budget_limited 的收尾注入是否已发出（持久化：进程重启不重复注入）。 */
+  budgetLimitReported: boolean;
   tokensUsed: number;
   timeUsedSeconds: number;
   continuationCount: number;

@@ -276,6 +276,9 @@ export function createSessionRuntime(options: CreateSessionRuntimeOptions): Sess
       },
       cwd: options.cwd,
       notifications: session,
+      onSubagentUsage: (event) => {
+        goalController?.recordSubagentUsage(event);
+      },
       onIntegration: async (record) => {
         audit?.agentIntegration(record);
         goalController?.recordAgentIntegration(record);

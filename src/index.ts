@@ -119,6 +119,7 @@ TUI 内：
   /goal finalize    执行最终完成审计
   /goal pause       暂停 Goal
   /goal resume      恢复 Goal
+  /goal budget <n>  调整 Goal token 预算（budget_limited 时提额可恢复）
   /goal edit        编辑未进入 planning 的 Goal Contract
   /goal clear       清除 Goal 聚合（保留对话）
   /mode <mode>      切换当前 session 的沙箱档位
@@ -553,6 +554,9 @@ async function main(): Promise<void> {
       },
       cwd: options.cwd,
       notifications: session,
+      onSubagentUsage: (event) => {
+        goalController?.recordSubagentUsage(event);
+      },
       onIntegration: async (record) => {
         audit?.agentIntegration(record);
         goalController?.recordAgentIntegration(record);

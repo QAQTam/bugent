@@ -14,6 +14,7 @@ import {
   type ReasoningReplay,
 } from "./adapters/openai-chat.ts";
 import { createAnthropicMessagesClient, type AnthropicMessagesOptions } from "./adapters/anthropic-messages.ts";
+import { createOpenAIResponsesClient, type OpenAIResponsesOptions } from "./adapters/openai-responses.ts";
 import { createMockClient, type MockTurn } from "./adapters/mock.ts";
 
 /** 读一个"正整数"环境变量；缺失 / 非数字 / ≤0 一律当没配。 */
@@ -199,8 +200,16 @@ const FACTORIES: Record<EndpointKind, AdapterFactory> = {
     });
   },
 
-  "openai-responses": (_config, model) => {
-    throw new Error(`endpoint "openai-responses" 尚未实现（model=${model}）`);
+  "openai-responses": (config, model) => {
+    const options: OpenAIResponsesOptions = {};
+    if (config.baseUrl !== undefined) options.baseUrl = config.baseUrl;
+    if (config.apiKey !== undefined) options.apiKey = config.apiKey;
+    if (config.headers !== undefined) options.headers = config.headers;
+    if (config.extraBody !== undefined) options.extraBody = config.extraBody;
+    if (config.proxy !== undefined) options.proxy = config.proxy;
+    if (config.tls !== undefined) options.tls = config.tls;
+    if (config.reasoningReplay !== undefined) options.reasoningReplay = config.reasoningReplay;
+    return createOpenAIResponsesClient(model, options);
   },
 
   "anthropic-messages": (config, model) => {

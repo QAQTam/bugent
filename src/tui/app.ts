@@ -699,6 +699,15 @@ export class TuiApp implements TuiInteraction {
         { label: "允许这一次", value: true, tone: "warn", shortcut: "y" },
         { label: "拒绝", value: false, tone: "error", shortcut: "n" },
       ],
+    }).then((outcome) => {
+      // BUG-023 的 TUI 半边：bash 的能力授权绕过 gate.check，CLI/headless
+      // 路径在 index.ts 组合层补记，TUI 这条链路此前全程不落审计。
+      this.#audit?.capability({
+        capability: escalation.capability,
+        reason: escalation.reason,
+        outcome,
+      });
+      return outcome;
     });
   }
 

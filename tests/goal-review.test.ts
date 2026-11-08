@@ -26,6 +26,7 @@ const reviewRequest: ReviewRequest = {
     },
     status: "active",
     phase: "executing",
+    budgetLimitReported: false,
     tokensUsed: 0,
     timeUsedSeconds: 0,
     continuationCount: 0,

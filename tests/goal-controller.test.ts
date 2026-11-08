@@ -883,6 +883,247 @@ describe("Goal P5 · continuation accounting", () => {
   });
 });
 
+describe("Goal · budget controls", () => {
+  function planOneCheckpoint(controller: GoalController): void {
+    controller.applyPlan({
+      phases: [
+        {
+          id: "p1",
+          title: "预算",
+          objective: "达到预算",
+          checkpointIds: ["cp1"],
+          dependsOn: [],
+          risks: [],
+          verification: ["test"],
+        },
+      ],
+      checkpoints: [
+        {
+          id: "cp1",
+          order: 1,
+          title: "预算",
+          deliverable: "stop",
+          acceptanceCriteria: ["stop"],
+          evidenceRequired: ["test"],
+        },
+      ],
+    });
+  }
+
+  test("/goal budget 提额解除 budget_limited，且再触顶能重新报告", async () => {
+    const { session, controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证提额恢复",
+      successCriteria: ["恢复"],
+      tokenBudget: 10,
+    });
+    planOneCheckpoint(controller);
+
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t1",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 6, output: 4 },
+    });
+    expect(controller.currentGoal()?.status).toBe("budget_limited");
+
+    const goalId = controller.currentGoal()!.id;
+    expect(controller.repository.isBudgetLimitReported(goalId)).toBe(true);
+
+    const raised = controller.setTokenBudget(100);
+    expect(raised.status).toBe("active");
+    expect(controller.canAutoContinue().allowed).toBe(true);
+    expect(controller.repository.isBudgetLimitReported(goalId)).toBe(false);
+
+    // 再触顶：报告标记已被清空，收尾注入要再发一次
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t2",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 100, output: 0 },
+    });
+    expect(controller.currentGoal()?.status).toBe("budget_limited");
+    const limitInjections = session.messages.filter(
+      (message) =>
+        message.injectionSource === "goal" && storedText(message).includes("# Goal Budget Limit"),
+    );
+    expect(limitInjections).toHaveLength(2);
+  });
+
+  test("/goal budget 降额到已用量以下立即进入 budget_limited", async () => {
+    const { controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证降额触限",
+      successCriteria: ["触限"],
+      tokenBudget: 100,
+    });
+    planOneCheckpoint(controller);
+
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t1",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 50, output: 0 },
+    });
+    expect(controller.currentGoal()?.status).toBe("active");
+
+    const limited = controller.setTokenBudget(50);
+    expect(limited.status).toBe("budget_limited");
+    expect(controller.canAutoContinue().allowed).toBe(false);
+  });
+
+  test("报告标记持久化：controller 重建后不重复注入 budget-limit 收尾", async () => {
+    const { store, session, controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证重启不重复注入",
+      successCriteria: ["恢复"],
+      tokenBudget: 10,
+    });
+    planOneCheckpoint(controller);
+
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t1",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 6, output: 4 },
+    });
+    expect(controller.currentGoal()?.status).toBe("budget_limited");
+
+    // 模拟进程重启：新 repository + 新 controller，内存标记全部丢失
+    const revived = new GoalController({
+      repository: new GoalRepository(store.db),
+      session,
+      store,
+      cwd: "/tmp",
+      now: () => 100,
+    });
+    revived.resume();
+    // 不走 beginContinuation：canAutoContinue 对"已超预算"直接拒绝（这与状态
+    // 无关的硬闸），用户显式恢复后允许再跑一轮是 completeTurn 自身的语义。
+    revived.completeTurn({
+      turnId: "t2",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 10, output: 0 },
+    });
+    expect(revived.currentGoal()?.status).toBe("budget_limited");
+
+    const limitInjections = session.messages.filter(
+      (message) =>
+        message.injectionSource === "goal" && storedText(message).includes("# Goal Budget Limit"),
+    );
+    expect(limitInjections).toHaveLength(1);
+  });
+
+  test("80%/90% 阈值预警：每阈值只注入一次，且不改变 Goal 状态", async () => {
+    const { session, controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证阈值预警",
+      successCriteria: ["预警"],
+      tokenBudget: 100,
+    });
+    planOneCheckpoint(controller);
+
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t1",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 80, output: 5 },
+    });
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t2",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 6, output: 1 },
+    });
+    controller.beginContinuation();
+    controller.completeTurn({
+      turnId: "t3",
+      startedAt: 0,
+      endedAt: 1000,
+      usage: { input: 1, output: 1 },
+    });
+
+    expect(controller.currentGoal()?.status).toBe("active");
+    const warnings = session.messages.filter(
+      (message) =>
+        message.injectionSource === "goal" && storedText(message).includes("# Goal Budget Warning"),
+    );
+    expect(warnings).toHaveLength(2);
+    expect(storedText(warnings[0]!)).toContain("crossed 80%");
+    expect(storedText(warnings[1]!)).toContain("crossed 90%");
+  });
+
+  test("setTokenBudget 校验：非正整数与超过 maxTokenBudget 都拒绝", async () => {
+    const { controller } = await setup({ maxTokenBudget: 1000 });
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证校验",
+      successCriteria: ["校验"],
+      tokenBudget: 100,
+    });
+
+    expect(() => controller.setTokenBudget(0)).toThrow("positive integer");
+    expect(() => controller.setTokenBudget(1.5)).toThrow("positive integer");
+    expect(() => controller.setTokenBudget(2000)).toThrow("configured limit");
+    expect(controller.currentGoal()?.tokenBudget).toBe(100);
+  });
+
+  test("子代理 usage 幂等计入 Goal 账本并联动触限", async () => {
+    const { session, controller } = await setup();
+    controller.authorizeCreate();
+    controller.createFromContract({
+      rawIntent: "预算 Goal",
+      objective: "验证子代理记账",
+      successCriteria: ["记账"],
+      tokenBudget: 100,
+    });
+    planOneCheckpoint(controller);
+
+    controller.recordSubagentUsage({
+      agentId: "worker_1",
+      usage: { input: 80, output: 10 },
+      durationMs: 2000,
+    });
+    controller.recordSubagentUsage({
+      agentId: "worker_1",
+      usage: { input: 80, output: 10 },
+      durationMs: 2000,
+    });
+    controller.recordSubagentUsage({
+      agentId: "explorer_1",
+      usage: { input: 20, output: 0 },
+      durationMs: 500,
+    });
+
+    // (80+10) 计一次（worker_1 幂等）+ 20 = 110 >= 100 → budget_limited
+    expect(controller.currentGoal()).toMatchObject({ tokensUsed: 110, status: "budget_limited" });
+    const accounting = controller.repository.listTurnAccounting(controller.currentGoal()!.id);
+    expect(accounting.map((entry) => entry.turnId)).toEqual(["agent:worker_1", "agent:explorer_1"]);
+    expect(controller.currentGoal()?.timeUsedSeconds).toBe(3);
+    const limitInjections = session.messages.filter(
+      (message) =>
+        message.injectionSource === "goal" && storedText(message).includes("# Goal Budget Limit"),
+    );
+    expect(limitInjections).toHaveLength(1);
+  });
+});
+
 describe("Goal P6 · final audit", () => {
   const evidence = [
     {

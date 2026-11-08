@@ -43,6 +43,13 @@ export interface WorkerAgentOutput {
   readonly changedFiles: readonly string[];
   readonly patchArtifact: string;
   readonly worktreePath: string;
+  /** Provider usage 交给父层计入 Goal 预算（此前被直接丢弃，HANDOFF P0 挂账）。 */
+  readonly usage?: {
+    readonly input: number;
+    readonly output: number;
+    readonly cached?: number;
+  };
+  readonly durationMs?: number;
 }
 
 const WORKER_SYSTEM = [
@@ -159,6 +166,7 @@ export function createWorkerAgentExecutor(
           tools: registry.list().map((tool) => tool.name),
         });
 
+        const startedAt = Date.now();
         const turn = await runUserTurn(session, promptFor(context, lease.path, lease.baseRevision), {
           tools: registry,
           cwd: lease.path,
@@ -190,6 +198,12 @@ export function createWorkerAgentExecutor(
           changedFiles: diff.changedFiles,
           patchArtifact: diff.artifactPath,
           worktreePath: lease.path,
+          usage: {
+            input: turn.usage.input,
+            output: turn.usage.output,
+            ...(turn.usage.cached !== undefined ? { cached: turn.usage.cached } : {}),
+          },
+          durationMs: Math.max(0, Date.now() - startedAt),
         };
         return {
           agentId: context.spec.identity.agentId,

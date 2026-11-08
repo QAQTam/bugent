@@ -1,16 +1,207 @@
 # bugent Handoff
 
-> 更新时间：2026-10-09
+> 更新时间：2026-11-03
 > 分支：`master`
-> 功能检查点：`aed6cf9 fix(tui): TAB 统一展开成空格，修掉 read_file 卡片右侧滚动条缺口`
-> 状态：TUI 流式平滑、Lezer Markdown AST、表格行级增量已完成并单独提交；工作区仍有其他同事的 Goal/tools/prompt/agent 改动，禁止一起提交
-> 本轮补充：**权限授权统一**（bash 执行前判定 + 60s 授权窗口 + 弹窗倒计时）已落地、全量回归通过、未提交；上一轮 Goal 预算优化同样未提交
-> 最新一轮：**WebUI 设计落地审计 + 玻璃补强方案（已定稿，源码零改动）**（详见下节）
-> 上一轮：anthropic-messages adapter + wire 配置字段 + provider 退避重试，typecheck 与相关回归通过、未提交
+> 功能检查点：`8a75ce6 refactor: 移除 WebUI/butui，TUI 重建 core/markdown/widgets 分层`
+> 最新一轮：**WebUI v2：协议 + 桥 + 前端脚手架（2026-11-03）**（v2 自定义信封 over WS——用户裁决，不用 JSON-RPC/ACP；hub/session-host/entry-webui + webui/ 新脚手架 + 25 条协议测试 + 浏览器实测闭环）
+> 次新一轮：挂账现状全量审计 + 欠账清理落地（2026-11-03，详见下节：TUI 能力授权审计闭环、Goal 预算组、子代理 usage 汇总、bash undo 记账、openai-responses adapter）
+> 历史轮次：WebUI v0.4.0 已在 8a75ce6 整体移除；daemon 协议线暂缓；ACP（Zed）适配器记为后续独立线（复用 session-host 翻译层）
 
-## WebUI 设计落地审计 + 玻璃补强方案（2026-09-29，未动手）
+## 挂账现状全量审计 + 欠账清理落地（2026-11-03）
 
-**当前状态：只完成了审计和方案设计，`webui/` 下源码一行未改。** 本节就是为了让下一位（或下一个会话）跳过全部重新调研直接开工。用户已拍板两个前提：
+本轮先对 HANDOFF/buglist 的全部挂账做了一次代码级审计（基线 HEAD=8a75ce6，安全债
+BUG-001~029 与 PERF-001~005 均已修完），再落地了确认未做的四组欠账。
+**本节是挂账状态的权威来源**，覆盖下方两个历史挂账表（权限授权节、Goal 预算节）
+里与之冲突的行；历史节仅作设计约束与背景保留。
+
+### 审计结论（做了 / 没做，证据到 file:line）
+
+| 挂账项 | 审计结论（本轮之前） | 本轮动作 |
+| --- | --- | --- |
+| 能力授权进审计（BUG-023，P1） | **部分做**：CLI/headless 已接（`index.ts` 组合层 `.capability(`），默认 TUI 主入口全程不落审计 | ✅ 补齐：`TuiApp#requestCapability` 落 `capability` 事件 + 接线测试 |
+| `/goal budget <n>`（P0） | **未做**。状态机其实已允许 `budget_limited -> active`（goal-repository `GOAL_STATUS_TRANSITIONS`），`/goal resume` 技术上能解除，但无提额入口，下一轮立刻再触限 | ✅ 实现（含 budget_limited UX 修正） |
+| 子代理 usage 汇总（P0） | **部分做**：reviewer/auditor 已计入；worker 的 usage 在 `WorkerAgentOutput` 里根本没有字段（直接丢弃）、explorer 的 usage 无消费者 | ✅ 实现 |
+| bash 写盘 undo 可观测性（原 P0） | **未做**：`bash.ts` 零 workspace 记账，`/undo` 看不见 bash 写入 | ✅ 实现（writeTargets 快照方案） |
+| openai-responses adapter | **未做**（registry 占位抛错） | ✅ 实现（含 freeform custom tool 首次兑现） |
+| 80%/90% 预算预警、budget-limit 报告标记持久化（P1） | 均未做（标记是纯内存字段，重启会重复注入收尾上下文） | ✅ 实现（标记落库 schema v12） |
+| Goal P1/P2 剩余（最终账单 UI、reserve/commit 预留语义、mid-turn 记账、time budget、completion report） | 未做 | ⏸ 开放（见下） |
+| MCP session 级 grant 分池 | 未做：policy 在 `McpStdioClient.start()` 按静态 config 一次编译，与 CapabilityGrant 完全不通 | ⏸ 开放 |
+| HTTP MCP transport | 未做（`src/mcp/` 仅 stdio） | ⏸ 开放 |
+| /context 的 MCP 新增/删除入口 | 部分做：只有启停 + 重载 | ⏸ 开放 |
+| TUI provider profile 导入/导出接线 + TLS 表单 | 未接线（core API `provider-profiles.ts` 完备，`src/tui/` 零引用） | ⏸ 开放 |
+| PERF-006 resize 增量渲染 | 未做：`transcript-layout.ts` 宽度变化整表清 WeakMap 全量重渲 | ⏸ 开放 |
+| command-scan 命令表补全（tar -x / git checkout / make install 等） | 未做：写命令表自 v0.3.2 零扩充，仍靠内核兜底 | ⏸ 开放 |
+| wsbox overlay 账本路线 | **已失效**：`docs/workspace-ledger-sandbox.md` 与 `~/Projects/wsbox` 均不存在 | 由本轮 writeTargets 快照方案替代 |
+
+### 本轮落地（2026-11-03）
+
+1. **TUI 能力授权审计闭环**：`src/tui/app.ts` `requestCapability` 把结论写进
+   `AuditTrail.capability`（与 CLI 路径 `index.ts` 组合层对齐）；测试
+   `tests/tui-capability-audit.test.ts` 用 30ms 授权窗口验证 timeout 也落审计。
+2. **Goal 预算组**：
+   - `controller.setTokenBudget(n)`：复用 `repository.updateGoalContract` 的
+     tokenBudget patch；提额覆盖已用量时 budget_limited 自动回 active（不走
+     resume 的模型指令注入）；降额到已用量以下立即触限；校验正整数与
+     `max_goal_token_budget` 上限。
+   - TUI `/goal budget <n>`（`goal-flows.ts`）+ 帮助文本；状态面板
+     `canResume` 纳入 budget_limited；`statusLine` 提示提额命令。
+   - 80%/90% 阈值预警：`completeTurn` / 外部 usage 记账后统一检查，每阈值每
+     Goal 只注入一次，`setTokenBudget` 重置；不改变 Goal 状态。
+   - 报告标记持久化：`session_goals.budget_limit_reported`（schema v12 迁移，
+     `ensureColumn` 模式），`#markBudgetLimited` 改读库标记，内存字段删除。
+3. **子代理 usage 汇总**：`WorkerAgentOutput` 增加 `usage`/`durationMs`（从
+   `runUserTurn` 结果填充）；`tools/agent.ts` 新增 `onSubagentUsage` 回调，在
+   子代理 completed 终态（通知订阅点）恰好上报一次，从 `result.data` 结构化
+   提取（worker/explorer 通用）；`GoalController.recordSubagentUsage` 以
+   `turnId = agent:<agentId>` 幂等记账并联动触限/预警；`index.ts` 与
+   `core/runtime.ts` 两个装配点接线。
+4. **bash 写工作区 undo 记账**：新文件 `src/tools/bash-undo.ts`。授权链本就要算
+   `scanCommand`，`ExecAuthorization` 顺带把 scan 带出（避免二次扫描）；对
+   `writeTargets` 中工作区内的普通文件目标做执行前快照（上限 32 个/8MB），
+   执行后按字节 hash 比对产出 `WorkspaceFileEdit`，经 `ctx.onWorkspaceChange`
+   走与文件工具完全相同的链路（registry 收集 → session flush →
+   WorkspaceFileChange → /undo）。联网重跑的拒绝路径同样回报（首跑可能已落盘）。
+   已知限制：解释器写意图（无具体目标）无法记账；目录/符号链接跳过；非
+   UTF-8 与超限文件记为**不可逆**（undo 整体拒绝并给原因，不静默漏掉）。
+5. **openai-responses adapter**：新文件 `src/provider/adapters/openai-responses.ts`。
+   system/developer → 顶层 `instructions`；tool 调用/结果 → 平铺 input items
+   （`function_call` / `function_call_output`，不要求交替）；**freeform 工具首次
+   兑现**为 custom tool（`{type:"custom"}`，`custom_tool_call(_output)` item，
+   按名字查 freeform 工具集判定）；SSE 按 output_item 分块，`response.completed`
+   汇总 usage（`input_token_details.cached_tokens` → cached、reasoning tokens
+   单独保留）；错误处理照 anthropic 模式（stripAnsi + retry-after）。
+   reasoning replay v0 忽略（Responses 的 reasoning item 不透明，见文件头注释）。
+   测试 `tests/openai-responses.test.ts`：wire 映射 / SSE 归一化 / Bun.serve
+   端到端三段。
+
+### 验证状态（本轮）
+
+```text
+bun run typecheck
+# pass
+
+bun test
+# 1365 pass / 10 skip / 9 fail —— 9 个失败全部为 HEAD 既有（干净树复现），
+# 与本轮改动无关：
+#   - tests/mcp-stdio.test.ts ×4：本 checkout 未构建 libbugent-sandbox.so
+#     （`bun run build:sandbox` 或设 BUGENT_SANDBOX_LIBRARY 即恢复）
+#   - tests/tui-pty.test.ts ×3 + system-prompt ×1：终端环境 / cwd 依赖
+#   - tests/store.test.ts 端到端审计 1：HEAD 既有，待查（permission 事件缺失）
+# 新增测试：tui-capability-audit（1）、goal-controller budget controls（6）、
+# agent-tools onSubagentUsage（2）、agent-worker usage（断言并入既有用例）、
+# bash-undo-accounting（6）、openai-responses（11）
+
+bun run src/index.ts --mock --no-persist -p "你好"
+# 正常回显
+```
+
+### 面向下一位的提醒
+
+- Goal 预算的护栏没变：只有用户/系统能改预算，模型侧 `update_goal` 不提供入口。
+- `canAutoContinue` 对"已超预算"是**与状态无关的硬闸**（不看 budget_limited
+  状态位），用户 resume 后想再跑一轮，靠的是 completeTurn 的直接调用语义 ——
+  改这块前先读 `tests/goal-controller.test.ts` 的 budget controls 组。
+- bash undo 记账的上限（32 目标 / 8MB）与不可逆降级是刻意保守：宁可漏记，
+  不给"可回滚"的错觉；放宽前先看 `tests/bash-undo-accounting.test.ts`。
+- mock provider 默认 usage 全 0（`syntheticUsage` 打开才造假数据），worker
+  usage 断言依赖这一点。
+
+## WebUI v2：协议 + 桥 + 前端脚手架（2026-11-03）
+
+> 更新时间：2026-11-03（晚于上一节审计轮）。**本节是 WebUI 线的权威现状**，
+> 覆盖下方历史"液态玻璃补强方案"节——那一节针对的 v0.4.0 WebUI（含
+> `liquid-glass-react`、`docs/webui/*`）已在 8a75ce6 整体删除，其文件级改造
+> 清单与库事实仅作历史参考保留；v2 前端是新脚手架，视觉方向（玻璃/克制）
+> 留给用户后续裁决。
+
+### 用户已裁决的前提
+
+1. **传输 = WebSocket**（覆盖 `claude-agent-protocol-review.md` 基本前提的
+   "REST + SSE"；其 B/C/D 组与传输无关的裁决仍然适用）。
+2. **信封 = v2 自定义统一信封**（`{v:2, id, kind: cmd|evt|reply, type, sessionId, seq, payload, ts}`），
+   **不用 JSON-RPC / ACP**。调研结论：WS+JSON-RPC 主流阵地是工具协议
+   （LSP/CDP/Ethereum/MCP），UI 实时流的主流是自定义信封（Socket.IO ack、
+   graphql-ws、Phoenix channels）；ACP v1 无 seq/增量补发（`session/load`
+   全量重放 / `session/resume` 不重放），WS 传输还在 RFD 且"no message
+   sequencing or stream resumption"被明确推迟到 v2 —— 我们 B 组（P0）语义
+   换任何框架都得自建，自研信封成本最低、迁移 JSON-RPC 的适配器路径保留
+   （~30 行 framing 层）。
+3. **ACP（Zed Agent Client Protocol）记为后续独立线**：`entry-acp.ts`
+   （stdio + JSON-RPC，`session/prompt` → `runUserTurn`、LoopHooks →
+   `session/update`）可复用 session-host 的翻译层，让 bugent 可被 Zed 拉起。
+   本轮未开工。
+
+### 权威文档与代码
+
+- **协议 spec**：`docs/webui-v2-protocol-spec.md`（信封、命令/事件注册表、
+  attach 快照 + draft 续看、seq/环形日志/lastSeq 补发、心跳/慢消费者、
+  history.before 分页、与裁决文档逐条映射表）。改协议先改它。
+- **类型单一来源**：`src/protocol/types.ts` —— 只 re-export core 类型
+  （message/loop/provider/tools/presentation/workspace/ask-user/policy/mode/
+  authorization/goal）+ 定义信封/命令/事件联合类型。前端经 vite alias
+  `@protocol` **import type** 引用，结构零复制。
+- **桥**：`src/webui/hub.ts`（协议机：seq 分配、事件日志环形窗口 4096、
+  lastSeq 补发、resync 降级、turn.send 幂等缓存 128、慢消费者 1013、
+  应用层心跳 30s、hello/token 4401）+ `src/webui/session-host.ts`
+  （SessionDelegate 的 agent 实现：LoopHooks→UiEvent 1:1、blockId 块模型、
+  request-id 往返 first-wins、always=PermissionPolicy.addRule 字面量规则、
+  capability 审计对齐 BUG-023、onWatchers(0)→挂起请求默认 denied）+
+  `src/entry-webui.ts`（装配：config→registry→共享 mcp/skill manager→
+  Bun.serve 静态 `webui/dist` + `/ws`；每 session 独立 policy/runtime）。
+- **前端**：`webui/`（独立 bun 包）。栈：**Vite 8.3（Rolldown）+ React 19.3
+  + @vitejs/plugin-react 6（oxc 转换器，React Compiler 用 `compiler: true`
+  + `oxc-transform-react`，不是 babel-plugin-react-compiler）+ TypeScript 7
+  （tsgo，flags 与根 tsconfig 对齐含 exactOptionalPropertyTypes）+
+  Tailwind 4.3（@tailwindcss/vite）+ Zustand 5 + Streamdown 2.7 +
+  @tanstack/react-virtual（已装未接线）**。dev：`webui && bun run dev`
+  （页面在 `http://localhost:5199` —— Vite 8 默认只绑 `[::1]`，**不是**
+  127.0.0.1，/ws 代理到 8787 已实测穿透）；prod：`bun run build` 后由
+  bridge 同源托管。
+
+### 本轮验证状态
+
+```bash
+bun run typecheck   # 0 errors（根 + webui 两套 tsconfig 均过）
+bun test            # 1391 pass / 10 skip / 8 fail —— 8 个全为上节审计已记录
+                    #   的 HEAD 既有失败（mcp-stdio×4 沙箱库未构建、tui-pty×2、
+                    #   system-prompt×1、P10 审计×1）；本轮新增 0 失败
+# 新增测试：webui-hub（12：认证/seq 单调/补发/resync/幂等/多观察者/生命周期）、
+# webui-session-host（9：hooks 映射/blockId/cancel/draft/往返/always/断连默认/分页）、
+# webui-e2e（4：真 WS ↔ hub ↔ SessionHost ↔ 真 runtime 全栈）
+cd webui && bun run typecheck && bun run build   # 均过（build 590ms，Rolldown）
+bun run src/entry-webui.ts --mock --port 8899    # 浏览器实测通过：
+#   token 门 → 连接 → workspace-write 徽章 → mcp/skill 注入块 → 发消息 →
+#   mock 回复按块模型渲染（截图核验）
+```
+
+### 面向下一位的提醒（v2）
+
+- **已知裁剪**（entry-webui 头部注释同步）：MCP/skills 目录变化不热刷进已开
+  session；不支持 `--resume`；`SessionInfo.title` 未接（session.new 的 title
+  被接受但忽略）；`tool.progress` 未做 40ms 合帧（C9，P2）。
+- **前端未接线**：TanStack Virtual（D7）、`history.before` 向上翻页（D2/D5
+  滚动锚点）、`workspace.change` 徽标、`block.content` 按需展开（D6 预留）。
+- **构建警告**：单 chunk 761KB（Streamdown 的 shiki/mermaid）—— 接入
+  `history.before`/虚拟化时顺手动态 import 切分。
+- **hub 契约细节**：`sessionFactory` 产出的 delegate 由 **hub** 统一
+  `registerSession`（entry/测试不要再登，双重注册会 throw）；信封 sessionId
+  才参与路由（payload 里的 sessionId 不算数，有测试钉住）；未知 type 的 evt
+  静默丢弃是版本化策略（§11），heartbeat 靠它兼容旧客户端。
+- **e2e 测试的坑**：SessionHost 的 `publish` 闭包必须同时接 store/数组和
+  `hub.publish`（漏接 hub 就是"host 有事件、ws 收不到帧"，本轮踩过）；
+  `onWatchers(1)` 必须在发起 request **之前**（watcher 检查发生在创建请求的
+  同一同步步）。
+- **安全护栏不变**：API key 只在 bridge 进程，协议无密钥字段；审计事件不含
+  命令 stdout/stderr；reasoning 不落库（快照 draft 里是明文但仅内存）。
+
+---
+
+> ⚠️ **历史节（已失效）**：以下液态玻璃补强方案针对的 v0.4.0 WebUI 与
+> `docs/webui/*`、`webui/node_modules/liquid-glass-react` 均已在 8a75ce6 删除，
+> 现行 WebUI 是上节的新脚手架。仅当用户重启"玻璃视觉"方向时，库事实与守则
+> 裁决仍有参考价值。
+
+**当时状态：只完成了审计和方案设计，`webui/` 下源码一行未改。** 本节就是为了让下一位（或下一个会话）跳过全部重新调研直接开工。用户已拍板两个前提：
 
 1. **优先级：`docs/webui/addendum-liquid-glass.md`（附录）> `docs/webui/ui-restraint-rules.md`（守则）> `docs/webui/agent-webui-spec.md`（主 spec）**。玻璃标签栏、`liquid-glass-react` 依赖都是合法的，主 spec 里"白色背景为主/禁大面积 backdrop-filter/禁新增大型依赖"相关条款被附录 §1 显式覆盖。
 2. 审计发现的问题清单成立，交给我方"继续补强"。
@@ -264,6 +455,11 @@ PTY 端到端两条（真终端、真 CLI）：
 
 ### 剩余挂账（授权方向）
 
+> **2026-11-03 状态更新**：本表已过时，以顶部「挂账现状全量审计 + 欠账清理落地」为准。
+> P0「沙箱内写盘的可观测性」已用 writeTargets 快照方案落地（wsbox overlay 路线作废，
+> 设计文档与引擎已不存在）；P1「授权记录进审计」已闭环（CLI 在 index.ts 组合层、
+> TUI 在 requestCapability，BUG-023 完整收尾）；P1「扫描器命令表补全」仍未做。
+
 | 优先级 | 设计 | 主要模块 | 当前状态 | 关键约束 |
 | --- | --- | --- | --- | --- |
 | P0 | 沙箱内写盘的可观测性 | `src/sandbox/command-scan.ts`、`src/core/workspace.ts` | bash 写工作区**仍然不产生 `WorkspaceFileChange`**，`/undo` 看不到 | 见 `docs/workspace-ledger-sandbox.md`（overlay 账本路线，引擎已在 `项目/wsbox`） |
@@ -328,6 +524,11 @@ bun test
 - 设计稿：`docs/reasoning-display-design.md`
 
 ### 剩余设计挂账
+
+> **2026-11-03 状态更新**：本表已过时，以顶部「挂账现状全量审计 + 欠账清理落地」为准。
+> P0 三项中「用户可控预算更新」（`/goal budget <n>`）与「所有子代理 usage 汇总」已落地，
+> 80%/90% 预警与 budget-limit 报告标记持久化（schema v12）同轮落地；
+> 「预算预留与硬上限语义」及其余 P1/P2 仍开放，设计护栏继续有效。
 
 | 优先级 | 设计 | 主要模块 | 当前状态 / 入口 | 关键约束 |
 | --- | --- | --- | --- | --- |

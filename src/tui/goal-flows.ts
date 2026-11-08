@@ -288,9 +288,38 @@ export class GoalFlows {
       await this.#showStatus(controller);
       return;
     }
+    if (argument === "budget" || argument.startsWith("budget ")) {
+      if (goal === undefined) {
+        host.pushError("当前 session 没有 Goal");
+        host.requestFrame(true);
+        return;
+      }
+      const raw = argument.slice("budget".length).trim();
+      const parsed = Number(raw);
+      if (raw.length === 0 || !Number.isInteger(parsed) || parsed <= 0) {
+        host.pushError(
+          goal.tokenBudget === undefined
+            ? "用法：`/goal budget <正整数 token 数>`（当前未设预算）"
+            : `用法：\`/goal budget <正整数 token 数>\`（当前预算 ${goal.tokenBudget}）`,
+        );
+        host.requestFrame(true);
+        return;
+      }
+      try {
+        const updated = controller.setTokenBudget(parsed);
+        this.refreshStatus();
+        host.pushNotice(
+          `Goal 预算已更新为 ${parsed} tokens（已用 ${updated.tokensUsed}，状态 ${updated.status}）。`,
+        );
+      } catch (error) {
+        host.pushError(error instanceof Error ? error.message : String(error));
+      }
+      host.requestFrame(true);
+      return;
+    }
     if (goal !== undefined) {
       host.pushError(
-        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`、`/goal edit`、`/goal clear`。",
+        "当前 session 已有 Goal。可用子命令：`/goal status`、`/goal checkpoints`、`/goal continue`、`/goal finalize`、`/goal pause`、`/goal resume`、`/goal budget <n>`、`/goal edit`、`/goal clear`。",
       );
       host.requestFrame(true);
       return;
@@ -331,7 +360,8 @@ export class GoalFlows {
     const canResume =
       goal.status === "paused" ||
       goal.status === "blocked" ||
-      goal.status === "usage_limited";
+      goal.status === "usage_limited" ||
+      goal.status === "budget_limited";
     const action = await host.openDialog({
       title: "Goal 状态",
       body: controller.dialogLines(),

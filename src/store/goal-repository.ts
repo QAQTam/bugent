@@ -213,6 +213,7 @@ interface GoalRow {
   status: string;
   phase: string;
   token_budget: number | null;
+  budget_limit_reported: number;
   tokens_used: number;
   time_used_seconds: number;
   continuation_count: number;
@@ -377,6 +378,7 @@ function rowToGoal(row: GoalRow): Goal {
     status: row.status as GoalStatus,
     phase: row.phase as GoalPhase,
     ...(row.token_budget !== null ? { tokenBudget: row.token_budget } : {}),
+    budgetLimitReported: row.budget_limit_reported === 1,
     tokensUsed: row.tokens_used,
     timeUsedSeconds: row.time_used_seconds,
     continuationCount: row.continuation_count,
@@ -753,6 +755,35 @@ export class GoalRepository {
       .query("UPDATE session_goals SET status = ?, updated_at = ? WHERE goal_id = ?")
       .run(status, Date.now(), goalId);
     return this.requireGoal(goalId);
+  }
+
+  /**
+   * budget_limited 收尾注入的持久化标记。
+   *
+   * 之前是 controller 里的纯内存字段，进程重启后会对同一个 Goal 重复注入
+   * 收尾上下文（HANDOFF 挂账 P1）。标记不更新 updated_at —— 它是簿记状态，
+   * 不代表 Goal 本身有进展。
+   */
+  markBudgetLimitReported(goalId: string): void {
+    this.requireGoal(goalId);
+    this.#db
+      .query("UPDATE session_goals SET budget_limit_reported = 1 WHERE goal_id = ?")
+      .run(goalId);
+  }
+
+  /** 用户提升/调整预算后清掉标记，让下一次触顶能重新报告。 */
+  clearBudgetLimitReported(goalId: string): void {
+    this.requireGoal(goalId);
+    this.#db
+      .query("UPDATE session_goals SET budget_limit_reported = 0 WHERE goal_id = ?")
+      .run(goalId);
+  }
+
+  isBudgetLimitReported(goalId: string): boolean {
+    const row = this.#db
+      .query("SELECT budget_limit_reported FROM session_goals WHERE goal_id = ?")
+      .get(goalId) as { budget_limit_reported: number } | null;
+    return row === null ? false : row.budget_limit_reported === 1;
   }
 
   setGoalPhase(goalId: string, phase: GoalPhase): Goal {

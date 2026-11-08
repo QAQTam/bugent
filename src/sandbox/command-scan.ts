@@ -516,7 +516,8 @@ function expandTarget(target: string, cwd: string, home: string): string | undef
   return trimmed;
 }
 
-function insideWorkspace(cwd: string, path: string): boolean {
+/** 路径（expandTarget 展开后的绝对形态）是否落在工作区内；bash undo 记账复用。 */
+export function insideWorkspace(cwd: string, path: string): boolean {
   const cwdKey = compareKey(cwd);
   const pathKey = compareKey(path);
   if (pathKey === cwdKey) return true;

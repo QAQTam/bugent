@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 const GOAL_SCHEMA = `
 CREATE TABLE IF NOT EXISTS session_goals (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS session_goals (
   status               TEXT NOT NULL,
   phase                TEXT NOT NULL,
   token_budget         INTEGER,
+  budget_limit_reported INTEGER NOT NULL DEFAULT 0,
   tokens_used          INTEGER NOT NULL,
   time_used_seconds    INTEGER NOT NULL,
   continuation_count   INTEGER NOT NULL,
@@ -433,6 +434,12 @@ function migrate(db: Database): void {
     // idx_messages_session 与 messages 主键 (session_id, msgid) 完全同构，
     // 纯写放大（PERF-006）。老库的残留索引在这里清掉。
     db.exec("DROP INDEX IF EXISTS idx_messages_session;");
+  }
+
+  if (version < 12) {
+    // budget_limit_reported：budget_limited 的收尾注入只发一次的持久化标记。
+    // 之前是纯内存标记，进程重启后可能对同一个 Goal 重复注入（HANDOFF 挂账 P1）。
+    ensureColumn(db, "session_goals", "budget_limit_reported", "INTEGER NOT NULL DEFAULT 0");
   }
 }
 

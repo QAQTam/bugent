@@ -57,12 +57,26 @@ export interface AgentNotificationSink {
   enqueueInjection(text: string, source: "agent"): void;
 }
 
+/** 子代理终态上报的 provider usage（计入 root Goal 预算）。 */
+export interface SubagentUsageEvent {
+  readonly agentId: string;
+  readonly taskId?: string;
+  readonly usage: { input: number; output: number; cached?: number };
+  readonly durationMs?: number;
+}
+
 export interface AgentToolsOptions {
   readonly transport: AgentTransport;
   readonly parent: AgentToolsParent;
   readonly cwd: string;
   /** Parent session used for safe-boundary completion notifications. */
   readonly notifications?: AgentNotificationSink;
+  /**
+   * 子代理 completed 时上报 usage（worker / explorer 各恰一次）。此前 reviewer
+   * 走 review runner 计入 Goal，但 worker 的 usage 在 WorkerAgentOutput 里没有
+   * 字段、explorer 的 usage 无人消费 —— 全部游离在 Goal 预算之外（HANDOFF P0）。
+   */
+  readonly onSubagentUsage?: (event: SubagentUsageEvent) => void;
   /** Same sandboxed runner as the parent bash tool, used for post-apply checks. */
   readonly verificationRunner?: ShellRunner;
   /**
@@ -253,6 +267,38 @@ function terminalNotification(event: {
   ].join("\n");
 }
 
+/**
+ * 从终态 AgentResult 的 data（WorkerAgentOutput / ReadOnlyAgentOutput）里提取
+ * provider usage。只认 completed —— error/aborted 的执行体不会产出完整 output。
+ * 结构化判定而不是按 kind 分支：两种 output 的 usage 字段形状一致。
+ */
+function subagentUsageOf(event: {
+  readonly type: string;
+  readonly agentId: string;
+  readonly payload: unknown;
+}): SubagentUsageEvent | undefined {
+  if (event.type !== "agent.completed") return undefined;
+  if (event.payload === null || typeof event.payload !== "object") return undefined;
+  const data = (event.payload as { data?: unknown }).data;
+  if (data === null || typeof data !== "object") return undefined;
+  const source = (data as { usage?: unknown }).usage;
+  if (source === null || typeof source !== "object") return undefined;
+  const usage = source as Record<string, unknown>;
+  if (typeof usage.input !== "number" || typeof usage.output !== "number") return undefined;
+  const taskId = (event.payload as { taskId?: unknown }).taskId;
+  const durationMs = (data as { durationMs?: unknown }).durationMs;
+  return {
+    agentId: event.agentId,
+    ...(typeof taskId === "string" ? { taskId } : {}),
+    usage: {
+      input: usage.input,
+      output: usage.output,
+      ...(typeof usage.cached === "number" ? { cached: usage.cached } : {}),
+    },
+    ...(typeof durationMs === "number" ? { durationMs } : {}),
+  };
+}
+
 export function createAgentTools(options: AgentToolsOptions): Tool[] {
   const parent = options.parent;
   if (!hasCapability(parent.capabilities, "agent.spawn")) {
@@ -352,11 +398,15 @@ export function createAgentTools(options: AgentToolsOptions): Tool[] {
         },
       };
       let unsubscribe = (): void => {};
-      if (options.notifications !== undefined) {
+      if (options.notifications !== undefined || options.onSubagentUsage !== undefined) {
         unsubscribe = options.transport.subscribe(agentId, (event) => {
           const notification = terminalNotification(event);
           if (notification === undefined) return;
           options.notifications?.enqueueInjection(notification, "agent");
+          const usage = subagentUsageOf(event);
+          if (usage !== undefined) {
+            options.onSubagentUsage?.(usage);
+          }
           unsubscribe();
         });
       }

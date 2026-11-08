@@ -12,6 +12,7 @@ import {
   WAIT_SUBAGENT_TOOL_NAME,
   createAgentTools,
   type AgentToolsOptions,
+  type SubagentUsageEvent,
 } from "../src/tools/agent.ts";
 import type { Tool, ToolCtx } from "../src/tools/types.ts";
 
@@ -38,6 +39,7 @@ function toolsFor(
     parent?: AgentToolsOptions["parent"];
     idFactory?: AgentToolsOptions["idFactory"];
     notifications?: AgentToolsOptions["notifications"];
+    onSubagentUsage?: AgentToolsOptions["onSubagentUsage"];
   } = {},
 ): { tools: Map<string, Tool>; transport: ReturnType<typeof createInProcessTransport> } {
   const transport = createInProcessTransport({ executor });
@@ -47,6 +49,9 @@ function toolsFor(
     cwd: CTX.cwd,
     ...(options.idFactory !== undefined ? { idFactory: options.idFactory } : {}),
     ...(options.notifications !== undefined ? { notifications: options.notifications } : {}),
+    ...(options.onSubagentUsage !== undefined
+      ? { onSubagentUsage: options.onSubagentUsage }
+      : {}),
   });
   return { tools: new Map(tools.map((tool) => [tool.name, tool])), transport };
 }
@@ -104,6 +109,81 @@ describe("agent model tools", () => {
     )) as Record<string, unknown>;
     expect(output.output).toEqual({ text: "review body" });
     expect(output.trust).toBe("untrusted-data");
+    await transport.dispose();
+  });
+
+  test("onSubagentUsage 在 completed 终态上报恰好一次 usage", async () => {
+    const executor: AgentExecutor = {
+      async run(context) {
+        return {
+          agentId: context.spec.identity.agentId,
+          status: "completed",
+          summary: "explore done",
+          artifacts: [],
+          data: {
+            text: "facts",
+            usage: { input: 5, output: 2, cached: 1 },
+            durationMs: 1234,
+          },
+        };
+      },
+    };
+    const events: SubagentUsageEvent[] = [];
+    const { tools, transport } = toolsFor(executor, {
+      idFactory: (() => {
+        const values = ["agent-u1", "task-u1", "agent-session-u1"];
+        return () => values.shift()!;
+      })(),
+      onSubagentUsage: (event) => events.push(event),
+    });
+
+    await tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run(
+      { kind: "explorer", task: "explore this" },
+      CTX,
+    );
+    await tools.get(WAIT_SUBAGENT_TOOL_NAME)!.run({ agent_id: "agent-u1", timeout_ms: 1000 }, CTX);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toEqual({
+      agentId: "agent-u1",
+      taskId: "task-u1",
+      usage: { input: 5, output: 2, cached: 1 },
+      durationMs: 1234,
+    });
+    await transport.dispose();
+  });
+
+  test("data 无 usage 字段时不上报，也不影响通知", async () => {
+    const executor: AgentExecutor = {
+      async run(context) {
+        return {
+          agentId: context.spec.identity.agentId,
+          status: "completed",
+          summary: "no usage",
+          artifacts: [],
+          data: { text: "body only" },
+        };
+      },
+    };
+    const events: SubagentUsageEvent[] = [];
+    const injections: string[] = [];
+    const { tools, transport } = toolsFor(executor, {
+      idFactory: (() => {
+        const values = ["agent-n1", "task-n1", "agent-session-n1"];
+        return () => values.shift()!;
+      })(),
+      notifications: {
+        enqueueInjection: (text) => injections.push(text),
+      },
+      onSubagentUsage: (event) => events.push(event),
+    });
+
+    await tools.get(SPAWN_SUBAGENT_TOOL_NAME)!.run({ kind: "reviewer", task: "review" }, CTX);
+    await tools.get(WAIT_SUBAGENT_TOOL_NAME)!.run({ agent_id: "agent-n1", timeout_ms: 1000 }, CTX);
+
+    expect(events).toHaveLength(0);
+    expect(injections).toHaveLength(1);
+    expect(injections[0]).toContain("# Subagent notification");
     await transport.dispose();
   });
 

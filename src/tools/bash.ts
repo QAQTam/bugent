@@ -20,7 +20,16 @@ import type { ResourceClaim } from "./locks.ts";
 import type { Tool, ToolCtx } from "./types.ts";
 import { createOutputSpool, type OutputSpool, type OutputStreamName } from "./spill.ts";
 import { sanitizeEnv } from "../sandbox/env.ts";
-import { planWriteApproval, scanCommand, type WriteApprovalPlan } from "../sandbox/command-scan.ts";
+import {
+  planWriteApproval,
+  scanCommand,
+  type CommandScan,
+  type WriteApprovalPlan,
+} from "../sandbox/command-scan.ts";
+import {
+  snapshotWorkspaceWrites,
+  workspaceEditsFromSnapshot,
+} from "./bash-undo.ts";
 import {
   AUTHORIZATION_DENIED,
   describeOutcome,
@@ -939,6 +948,11 @@ export interface ExecAuthorization {
   refused?: AuthorizationOutcome;
   /** 本次获准的越界能力（联网 / 可写目录），执行时必须原样带上。 */
   grant: RunGrant;
+  /**
+   * 执行前静态扫描结果（bash undo 记账消费 writeTargets）。授权链本来就要算，
+   * 带出来避免二次扫描；即使 onRequestCapability 缺省也存在。
+   */
+  scan: CommandScan;
 }
 
 /**
@@ -973,7 +987,7 @@ export async function authorizeExecRun(
   const perRunConfirmation =
     options.requireApprovalEveryRun === true && options.authorizeBeforeRun !== false;
 
-  if (ctx.onRequestCapability === undefined) return { grant: {} };
+  if (ctx.onRequestCapability === undefined) return { grant: {}, scan };
 
   if (perRunConfirmation && !needsEscalation) {
     const outcome = await ctx.onRequestCapability({
@@ -981,8 +995,8 @@ export async function authorizeExecRun(
       reason: "当前没有可用的内核级沙箱（未找到 bwrap），这条命令将在无隔离的情况下直接执行。",
       details: [`命令：${command}`],
     });
-    if (outcome !== "approved") return { refused: outcome, grant: {} };
-    return { grant: {} };
+    if (outcome !== "approved") return { refused: outcome, grant: {}, scan };
+    return { grant: {}, scan };
   }
 
   if (needsEscalation && options.authorizeBeforeRun !== false) {
@@ -998,16 +1012,17 @@ export async function authorizeExecRun(
       reason: noSandboxNote === undefined ? reason : `${noSandboxNote}${reason}`,
       details: escalationDetailsFor(command, plan),
     });
-    if (outcome !== "approved") return { refused: outcome, grant: {} };
+    if (outcome !== "approved") return { refused: outcome, grant: {}, scan };
     return {
       grant: {
         ...(needsNetwork ? { allowNetwork: true } : {}),
         ...(plan !== undefined && plan.binds.length > 0 ? { writablePaths: plan.binds } : {}),
       },
+      scan,
     };
   }
 
-  return { grant: {} };
+  return { grant: {}, scan };
 }
 
 export function createBashTool(
@@ -1103,6 +1118,17 @@ export function createBashTool(
       if (auth.refused !== undefined) return refusalText(auth.refused, command);
       let grant: RunGrant = auth.grant;
 
+      // bash 写工作区的 undo 记账（原 P0）：授权链已算完 scan，这里对工作区内
+      // 的写目标做执行前快照；执行后（含联网重跑的拒绝路径 —— 首跑可能已经
+      // 落盘）diff 成 WorkspaceFileEdit 走 onWorkspaceChange。
+      const writeSnapshot = snapshotWorkspaceWrites(auth.scan, ctx.cwd);
+      const reportWorkspaceWrites = (): void => {
+        if (ctx.onWorkspaceChange === undefined) return;
+        for (const edit of workspaceEditsFromSnapshot(writeSnapshot)) {
+          ctx.onWorkspaceChange(edit);
+        }
+      };
+
       let attempt = await runOnce(grant);
       let result = attempt.result;
 
@@ -1138,6 +1164,7 @@ export function createBashTool(
           // 第一次失败只用于申请授权；用户没批准就把否定结论如实回传，
           // 不能让模型以为"重跑也没用"是别的原因。
           await attempt.spool.discard();
+          reportWorkspaceWrites();
           ctx.onPresentation?.(buildBashPresentation(command, result, timeoutMs, maxOutputBytes));
           return refusalText(outcome, command);
         }
@@ -1150,6 +1177,7 @@ export function createBashTool(
         result = attempt.result;
       }
 
+      reportWorkspaceWrites();
       ctx.onPresentation?.(
         buildBashPresentation(command, result, timeoutMs, maxOutputBytes),
       );

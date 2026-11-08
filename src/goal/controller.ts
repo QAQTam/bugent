@@ -404,8 +404,8 @@ export class GoalController {
   #now: () => number;
   #createAuthorizedUntil: number | undefined;
   #waitingUser = false;
-  /** 同一个 Goal 只注入一次 budget-limit 收尾指令。 */
-  #budgetLimitReportedGoalId: string | undefined;
+  /** 80%/90% 预算阈值预警：每个阈值每 Goal 只注入一次（key = `${goalId}:${threshold}`）。 */
+  #budgetWarnings = new Set<string>();
 
   constructor(options: GoalControllerOptions) {
     this.repository = options.repository;
@@ -744,7 +744,7 @@ export class GoalController {
     const planning = this.repository.setGoalPhase(goal.id, "planning");
     this.session.appendGoalContext(renderGoalContract(planning));
     this.revokeCreateAuthorization();
-    this.#budgetLimitReportedGoalId = undefined;
+    this.#budgetWarnings.clear();
     return planning;
   }
 
@@ -1097,7 +1097,7 @@ export class GoalController {
       throw new Error("the goal contract is already in planning and cannot be rewritten in place; clear it and initialize again");
     }
     if (input.tokenBudget !== undefined && input.tokenBudget !== goal.tokenBudget) {
-      this.#budgetLimitReportedGoalId = undefined;
+      this.#budgetWarnings.clear();
     }
     if (
       input.tokenBudget !== undefined &&
@@ -1126,7 +1126,7 @@ export class GoalController {
   clearGoal(): string {
     const goal = this.requireCurrent();
     if (!this.repository.deleteGoal(goal.id)) throw new Error(`failed to delete goal: ${goal.id}`);
-    this.#budgetLimitReportedGoalId = undefined;
+    this.#budgetWarnings.clear();
     this.session.enqueueInjection(
       `# Goal Cleared\n\n- Goal ID: ${goal.id}\n- The user explicitly cleared the goal aggregate; conversation history and handoff files are kept.`,
       "system",
@@ -1260,6 +1260,9 @@ export class GoalController {
       updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget;
     if (budgetLimited && updated.status === "active") {
       this.#markBudgetLimited(updated);
+    } else {
+      // 没到 100% 也可能在跨 80%/90% —— 预警与触限不在同一轮重复注入。
+      this.#checkBudgetThresholds(updated);
     }
     return { outcome, blockedStreak, blocked, budgetLimited };
   }
@@ -1291,6 +1294,47 @@ export class GoalController {
     return updated;
   }
 
+  /**
+   * 用户经 `/goal budget <n>` 调整预算。
+   *
+   * 设计护栏（HANDOFF Goal 挂账）：只有用户/系统能改预算，模型只能解释数字 ——
+   * `update_goal` 工具不提供预算入口，这是唯一一个运行时改预算的路径。
+   *
+   * - 提额到覆盖已用量且当前 budget_limited：状态机允许 budget_limited -> active，
+   *   自动回 active（不走 resume()，那会注入"继续当前阶段"的模型指令）；
+   * - 降额到已用量以下且当前 active：立即进入 budget_limited（收尾注入照发）；
+   * - 80%/90% 预警与 budget-limit 报告标记都重置，重新触顶时再次提示/报告。
+   */
+  setTokenBudget(tokenBudget: number): Goal {
+    if (!Number.isInteger(tokenBudget) || tokenBudget <= 0) {
+      throw new Error("goal token budget must be a positive integer");
+    }
+    if (this.maxTokenBudget !== undefined && tokenBudget > this.maxTokenBudget) {
+      throw new Error(`goal token budget must not exceed the configured limit ${this.maxTokenBudget}`);
+    }
+    const goal = this.requireCurrent();
+    this.repository.clearBudgetLimitReported(goal.id);
+    this.#budgetWarnings.clear();
+    const updated = this.repository.updateGoalContract(goal.id, { tokenBudget });
+    const overBudget =
+      updated.tokenBudget !== undefined && updated.tokensUsed >= updated.tokenBudget;
+    let result = updated;
+    if (updated.status === "budget_limited" && !overBudget) {
+      result = this.repository.setGoalStatus(updated.id, "active");
+    } else if (updated.status === "active" && overBudget) {
+      result = this.#markBudgetLimited(updated);
+    }
+    this.session.appendGoalContext(
+      [
+        "# Goal Budget Updated",
+        `- New budget: ${tokenBudget} tokens (user-set via /goal budget)`,
+        `- Used so far: ${result.tokensUsed} tokens`,
+        `- Status: ${result.status}`,
+      ].join("\n"),
+    );
+    return result;
+  }
+
   statusLine(): string | undefined {
     const goal = this.currentGoal();
     if (goal === undefined) return undefined;
@@ -1299,7 +1343,7 @@ export class GoalController {
     if (goal.status === "usage_limited") return "Goal hit usage limits (/goal resume)";
     if (goal.status === "budget_limited") {
       const limit = goal.tokenBudget === undefined ? "?" : `${Math.round(goal.tokenBudget / 1000)}K`;
-      return `Goal unmet (${Math.round(goal.tokensUsed / 1000)}K/${limit})`;
+      return `Goal budget reached (${Math.round(goal.tokensUsed / 1000)}K/${limit}) · /goal budget <n> 提额或 /goal resume`;
     }
     if (goal.status === "complete") {
       return `Goal achieved (${Math.round(goal.tokensUsed / 1000)}K tokens)`;
@@ -1339,16 +1383,46 @@ export class GoalController {
   }
 
   /**
+   * 预算阈值预警（80% / 90%）：安全边界注入一条提示，不改 Goal 状态。
+   *
+   * 与 budget-limit 的差别：这是"该收尾了"的预警，预算还没耗尽；每个阈值
+   * 每 Goal 只发一次，`setTokenBudget` 调整预算时清空重算。
+   */
+  #checkBudgetThresholds(goal: Goal): void {
+    if (goal.status !== "active") return;
+    if (goal.tokenBudget === undefined || goal.tokenBudget <= 0) return;
+    for (const threshold of [0.8, 0.9] as const) {
+      const key = `${goal.id}:${threshold}`;
+      if (this.#budgetWarnings.has(key)) continue;
+      if (goal.tokensUsed < goal.tokenBudget * threshold) continue;
+      this.#budgetWarnings.add(key);
+      const remaining = Math.max(0, goal.tokenBudget - goal.tokensUsed);
+      this.session.enqueueInjection(
+        [
+          "# Goal Budget Warning",
+          `- Usage: ${goal.tokensUsed}/${goal.tokenBudget} tokens (crossed ${Math.round(threshold * 100)}% of the budget).`,
+          `- Remaining: ${remaining} tokens.`,
+          `- This is a heads-up, not a stop: prefer wrapping up the current checkpoint. The goal enters budget_limited once the budget is exhausted.`,
+        ].join("\n"),
+        "goal",
+      );
+    }
+  }
+
+  /**
    * Enter budget_limited once and inject a safe-boundary wrap-up instruction.
    *
    * This mirrors Codex's system state + steering split without writing into an
    * active model turn: the message is queued as a normal goal injection and
    * lands at the next safe boundary.
+   *
+   * "只注入一次"的标记持久化在 session_goals.budget_limit_reported（schema v12）
+   * —— 之前是纯内存标记，进程重启后会对同一个 Goal 重复注入。
    */
   #markBudgetLimited(goal: Goal): Goal {
     const updated = this.repository.setGoalStatus(goal.id, "budget_limited");
-    if (this.#budgetLimitReportedGoalId !== goal.id) {
-      this.#budgetLimitReportedGoalId = goal.id;
+    if (!this.repository.isBudgetLimitReported(goal.id)) {
+      this.repository.markBudgetLimitReported(goal.id);
       this.session.enqueueInjection(renderBudgetLimit(updated), "goal");
     }
     return updated;
@@ -1366,20 +1440,55 @@ export class GoalController {
     result: ReviewResult,
     options: { allowBudgetLimit: boolean } = { allowBudgetLimit: true },
   ): void {
-    const usage = result.usage;
-    if (usage === undefined) return;
-    const turnId = `review:${reviewId}`;
+    if (result.usage === undefined) return;
+    this.#recordExternalUsage(
+      goalId,
+      `review:${reviewId}`,
+      result.usage,
+      result.durationMs ?? 0,
+      options,
+    );
+  }
+
+  /**
+   * 子代理（worker / explorer）的 provider usage 计入 root Goal。
+   *
+   * 之前 reviewer/auditor 已计入，但 worker 的 usage 在 WorkerAgentOutput 里
+   * 根本没有字段、explorer 的 usage 无人消费 —— 大量 token 游离在预算外。
+   * turnId = `agent:<agentId>` 做幂等键；归属规则与 review 相同（root Goal），
+   * 不与 root turn 的 completeTurn 重复计费。
+   */
+  recordSubagentUsage(input: {
+    agentId: string;
+    usage: { input: number; output: number; cached?: number };
+    durationMs?: number;
+  }): void {
+    const goal = this.currentGoal();
+    if (goal === undefined) return;
+    this.#recordExternalUsage(goal.id, `agent:${input.agentId}`, input.usage, input.durationMs ?? 0, {
+      allowBudgetLimit: true,
+    });
+  }
+
+  /** review / subagent 共用的外部 usage 记账：幂等落账 + 预算联动检查。 */
+  #recordExternalUsage(
+    goalId: string,
+    turnId: string,
+    usage: { input: number; output: number; cached?: number },
+    durationMs: number,
+    options: { allowBudgetLimit: boolean },
+  ): void {
     if (this.repository.listTurnAccounting(goalId).some((entry) => entry.turnId === turnId)) return;
 
-    const durationMs = Math.max(0, result.durationMs ?? 0);
+    const safeDurationMs = Math.max(0, durationMs);
     const endedAt = Date.now();
-    const startedAt = Math.max(0, endedAt - Math.round(durationMs));
+    const startedAt = Math.max(0, endedAt - Math.round(safeDurationMs));
     this.repository.recordTurn(goalId, {
       turnId,
       inputTokens: usage.input,
       outputTokens: usage.output,
       cachedTokens: usage.cached ?? 0,
-      activeSeconds: Math.max(0, Math.round(durationMs / 1000)),
+      activeSeconds: Math.max(0, Math.round(safeDurationMs / 1000)),
       outcome: "progress",
       startedAt,
       endedAt,
@@ -1387,9 +1496,9 @@ export class GoalController {
 
     if (!options.allowBudgetLimit) return;
     const updated = this.currentGoal();
+    if (updated === undefined || updated.id !== goalId) return;
+    this.#checkBudgetThresholds(updated);
     if (
-      updated !== undefined &&
-      updated.id === goalId &&
       updated.status === "active" &&
       updated.tokenBudget !== undefined &&
       updated.tokensUsed >= updated.tokenBudget

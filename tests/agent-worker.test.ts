@@ -122,6 +122,8 @@ describe("isolated worker executor", () => {
       patchArtifact: string;
       worktreePath: string;
       diffHash: string;
+      usage?: { input: number; output: number; cached?: number };
+      durationMs?: number;
     };
 
     expect(result.status).toBe("completed");
@@ -129,6 +131,10 @@ describe("isolated worker executor", () => {
     expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("base\n");
     expect(output.changedFiles).toEqual(["tracked.txt"]);
     expect(output.diffHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // usage 不再被丢弃：交给父层计入 Goal 预算（HANDOFF P0 挂账）
+    expect(output.usage).toEqual({ input: 0, output: 0 });
+    expect(typeof output.durationMs).toBe("number");
+    expect(output.durationMs!).toBeGreaterThanOrEqual(0);
     expect(existsSync(output.patchArtifact)).toBe(true);
     expect(await readFile(output.patchArtifact, "utf8")).toContain("+worker");
     expect(existsSync(output.worktreePath)).toBe(false);
